@@ -1,0 +1,37 @@
+pg_scratch group 1: 1 files
+pg_scratch group 2: 1 files
+Scratch groups failed or execution counts/statuses undetermined
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.0.3, pluggy-1.6.0 -- /opt/albert-scott/.venv/bin/python
+rootdir: /tmp/partition-producer-ggf9toff/synthetic
+collecting ... collected 1 item
+
+tests/test_partition_a.py::test_partition_a FAILED                       [100%]
+
+=================================== FAILURES ===================================
+_______________________________ test_partition_a _______________________________
+tests/test_partition_a.py:2: in test_partition_a
+    assert False, 'intentional partition A failure'
+E   AssertionError: intentional partition A failure
+E   assert False
+- generated xml file: /tmp/partition-producer-ggf9toff/pgp-7m_sbsbi/group-0.xml -
+=========================== short test summary info ============================
+FAILED tests/test_partition_a.py::test_partition_a - AssertionError: intentio...
+============================== 1 failed in 0.02s ===============================
+============================= test session starts ==============================
+platform linux -- Python 3.14.4, pytest-9.0.3, pluggy-1.6.0 -- /opt/albert-scott/.venv/bin/python
+rootdir: /tmp/partition-producer-ggf9toff/synthetic
+collecting ... collected 1 item
+
+tests/test_partition_b.py::test_partition_b FAILED                       [100%]
+
+=================================== FAILURES ===================================
+_______________________________ test_partition_b _______________________________
+tests/test_partition_b.py:2: in test_partition_b
+    assert False, 'intentional partition B failure'
+E   AssertionError: intentional partition B failure
+E   assert False
+- generated xml file: /tmp/partition-producer-ggf9toff/pgp-7m_sbsbi/group-1.xml -
+=========================== short test summary info ============================
+FAILED tests/test_partition_b.py::test_partition_b - AssertionError: intentio...
+============================== 1 failed in 0.03s ===============================

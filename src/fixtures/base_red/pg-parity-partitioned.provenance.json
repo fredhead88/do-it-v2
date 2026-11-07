@@ -1,0 +1,68 @@
+{
+  "exit_status": 1,
+  "expected_nodes": [
+    "tests/test_partition_a.py::test_partition_a",
+    "tests/test_partition_b.py::test_partition_b"
+  ],
+  "fixture_sha256": "3a74f17befaf649eded10fb185a3c87d607b360c4351aa27490d6889c0d51c61",
+  "generator_argv": [
+    "/usr/bin/python3",
+    "src/fixtures/base_red/regenerate_pg_partition.py",
+    "--producer-checkout",
+    "$PG_PARTITION_PRODUCER_CHECKOUT",
+    "--producer-sha",
+    "c34f5d3771bda4f3c99e7663cb7e06d4f8e92160",
+    "--output-dir",
+    "<fresh-scratch-dir>"
+  ],
+  "groups": [
+    [
+      "tests/test_partition_a.py"
+    ],
+    [
+      "tests/test_partition_b.py"
+    ]
+  ],
+  "independent_placeholders": true,
+  "interpreter": {
+    "generator": "/usr/bin/python3",
+    "pytest_command": [
+      "/opt/albert-scott/.venv/bin/python",
+      "-m",
+      "pytest"
+    ],
+    "version": "3.14.4 (main, Aug 20 2026, 10:41:58) [GCC 15.2.0]"
+  },
+  "normalized_inventory": [
+    {
+      "group": 1,
+      "kind": "FAILED",
+      "node": "tests/test_partition_a.py::test_partition_a"
+    },
+    {
+      "group": 2,
+      "kind": "FAILED",
+      "node": "tests/test_partition_b.py::test_partition_b"
+    }
+  ],
+  "patched_boundaries": [
+    "_cluster",
+    "_tcp_environment"
+  ],
+  "placeholder_variables": [
+    "AS_LOCAL_PG_ADMIN",
+    "PG_PARITY_DB_URL"
+  ],
+  "producer_path": "scripts/ci/pg_scratch_parallel.py",
+  "producer_sha": "c34f5d3771bda4f3c99e7663cb7e06d4f8e92160",
+  "producer_source_sha256": "fc0f166c7cb95ef4774c2f47ea0fd8a7a0d47be8871b6b37bbba0569f09e1602",
+  "synthetic_sources": {
+    "tests/test_partition_a.py": "def test_partition_a():\n    assert False, 'intentional partition A failure'\n",
+    "tests/test_partition_b.py": "def test_partition_b():\n    assert False, 'intentional partition B failure'\n"
+  },
+  "weights": {
+    "tests/test_partition_a.py": 2,
+    "tests/test_partition_b.py": 1
+  },
+  "working_directory": "do-it-v2 worktree root"
+}

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,148 @@ def archive(**members):
 
 
 class BaseRedTests(unittest.TestCase):
+    def partition_fixture(self):
+        raw = (FIX / "pg-parity-partitioned.log").read_text()
+        provenance = json.loads((FIX / "pg-parity-partitioned.provenance.json").read_text())
+        return raw, provenance
+
+    def partition_response(self, ac, body):
+        encoded = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url="scratch://pg-partition-naming/" + ac, status=200,
+                              body_sha256=hashlib.sha256(encoded.encode()).hexdigest(),
+                              body_excerpt=body), sort_keys=True))
+
+    def test_partition_fixture_provenance(self):
+        raw, provenance = self.partition_fixture()
+        checkout = os.environ.get("PG_PARTITION_PRODUCER_CHECKOUT")
+        self.assertTrue(checkout, "PG_PARTITION_PRODUCER_CHECKOUT is required, never skipped")
+        sha = provenance["producer_sha"]
+        source = subprocess.check_output(["git", "-C", checkout, "show", sha + ":scripts/ci/pg_scratch_parallel.py"])
+        self.assertEqual(hashlib.sha256(source).hexdigest(), provenance["producer_source_sha256"])
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), provenance["fixture_sha256"])
+        argv = ["/usr/bin/python3", "src/fixtures/base_red/regenerate_pg_partition.py",
+                "--producer-checkout", "$PG_PARTITION_PRODUCER_CHECKOUT", "--producer-sha", sha,
+                "--output-dir", "<fresh-scratch-dir>"]
+        self.assertEqual(provenance["generator_argv"], argv)
+        self.assertEqual(provenance["working_directory"], "do-it-v2 worktree root")
+        output = self.root / "regenerated"
+        argv[3], argv[-1] = checkout, str(output)
+        proc = subprocess.run(argv, cwd=HERE.parent, capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        regenerated = json.loads((output / "pg-parity-partitioned.provenance.json").read_text())
+        replay = (output / "pg-parity-partitioned.log").read_text()
+        self.assertEqual(hashlib.sha256(replay.encode()).hexdigest(), regenerated["fixture_sha256"])
+        for key in ("groups", "synthetic_sources", "weights", "expected_nodes", "producer_source_sha256",
+                    "patched_boundaries", "placeholder_variables", "independent_placeholders", "exit_status"):
+            self.assertEqual(regenerated[key], provenance[key], key)
+        groups = provenance["groups"]
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(all(groups))
+        self.assertFalse(set(groups[0]) & set(groups[1]))
+        self.assertEqual(set(groups[0] + groups[1]), set(provenance["synthetic_sources"]))
+        self.assertEqual(provenance["exit_status"], 1)
+        # Independent normalization: do not trust the generator's inventory.
+        def inventory(text):
+            rows = []
+            for raw_line in text.splitlines():
+                line = br.ANSI.sub("", raw_line).split("\t")[-1].strip()
+                line = re.sub(r"^\d{4}-\d\d-\d\dT\S+\s+", "", line)
+                match = re.fullmatch(r"(FAILED|ERROR)\s+(\S+\.py::\S+)(?:\s+-\s+.*)?", line)
+                if not match:
+                    continue
+                kind, node = match.groups()
+                file, test = node.split("::", 1)
+                files = [f for f in groups[0] + groups[1] if file == f or file.endswith("/" + f)]
+                self.assertEqual(len(files), 1)
+                canonical = files[0] + "::" + test
+                group, = [i for i, members in enumerate(groups, 1) if files[0] in members]
+                rows.append(dict(group=group, kind=kind, node=canonical))
+            return rows
+        expected, actual = inventory(raw), inventory(replay)
+        self.assertEqual(expected, actual)
+        self.assertEqual([r["group"] for r in actual], [1, 2])
+        self.assertEqual({r["node"] for r in actual}, set(provenance["expected_nodes"]))
+        self.assertEqual(expected, provenance["normalized_inventory"])
+        self.assertEqual(actual, regenerated["normalized_inventory"])
+        self.partition_response("AC1", dict(expected_groups=groups, actual_groups=regenerated["groups"],
+                                expected=expected, actual=actual, aggregate_status=regenerated["exit_status"]))
+
+    def test_partition_parse_log(self):
+        raw, provenance = self.partition_fixture()
+        nodes = provenance["expected_nodes"]
+        def only(indices):
+            return "\n".join(line for line in raw.splitlines()
+                             if not any("FAILED " + node in line for i, node in enumerate(nodes) if i not in indices))
+        cases = [("two-red", raw, set(nodes)), ("first-red", only({0}), {nodes[0]}),
+                 ("second-red", only({1}), {nodes[1]}), ("green", only(set()), set()),
+                 ("duplicate", raw + raw, set(nodes)),
+                 ("parameter", raw.replace(nodes[0], "tests/test_partition_a.py::test_x[a-b]"),
+                  {"tests/test_partition_a.py::test_x[a-b]", nodes[1]}),
+                 ("error", raw.replace("FAILED " + nodes[1], "ERROR " + nodes[1]), set(nodes))]
+        observations = []
+        for name, text, expected in cases:
+            for wrapper in (lambda line: line, lambda line: "\x1b[31m2026-11-07T00:00:00Z " + line + "\x1b[0m"):
+                wrapped = "\n".join(wrapper(line) for line in text.splitlines())
+                envelope = "\n".join("pg-parity (Postgres)\t" + STEP + "\t" + line for line in wrapped.splitlines())
+                if expected:
+                    envelope += "\npg-parity (Postgres)\t" + STEP + "\t##[error]Process completed with exit code 1"
+                parsed = br.parse_log(envelope)
+                self.assertEqual(parsed["pytest"], expected, name)
+                self.assertEqual(parsed["pg-parity"], set(), name)
+                self.assertEqual(parsed["undetermined"], [], name)
+                # Real zip acquisition/envelope code; only GitHub transport is fake.
+                self.zips[1] = archive(**{"pg-parity (Postgres)/5_scratch.txt": wrapped})
+                self.jobs[1] = [dict(name=br.window_gate.PG_CHECK, conclusion="failure" if expected else "success",
+                                     steps=[dict(name=STEP, number=5, conclusion="failure" if expected else "success")])]
+                doc = dict(checks={br.window_gate.PG_CHECK: dict(run_id=1)})
+                candidate = br.window_gate.candidate_failures(self.repo, dict(doc=doc))
+                self.assertEqual(candidate["pytest"], expected, name)
+                self.assertEqual(candidate["pg-parity"], set(), name)
+                self.assertEqual(candidate["undetermined"], [], name)
+            observations.append(dict(case=name, expected=sorted(expected), actual=sorted(candidate["pytest"])))
+        self.assertEqual(br.parse_log(raw)["pytest"], set(), "bare pytest is not PG context")
+        setup = "pg-parity\tSet up scratch\t##[error]Process completed with exit code 1"
+        named = "pg-parity\t" + STEP + "\tFAILED " + nodes[0]
+        parsed = br.parse_log(named + "\n" + setup)
+        self.assertEqual(parsed["pytest"], {nodes[0]})
+        self.assertEqual(parsed["pg-parity"], {"pg-parity::Set up scratch"})
+        self.assertEqual(br.parse_log("pg-parity\t" + STEP + "\t##[error]failed")["pg-parity"], {"pg-parity::" + STEP})
+        for marker in ("Scratch cluster B shutdown failed", "Scratch parallel execution failed; readiness undetermined"):
+            mixed = named + "\npg-parity\t" + STEP + "\t" + marker
+            parsed = br.parse_log(mixed)
+            self.assertEqual(parsed["pytest"], {nodes[0]})
+            self.assertTrue(any(marker in reason for reason in parsed["undetermined"]))
+            with patch.object(br.window_gate, "candidate_logs", return_value=[("1", mixed)]):
+                candidate = br.window_gate.candidate_failures(self.repo, dict(doc={}))
+            self.assertEqual(candidate["pytest"], {nodes[0]})
+            self.assertTrue(any(marker in reason for reason in candidate["undetermined"]))
+        sentinel = self.root / "must-not-exist"
+        malicious = named + " - $(touch " + str(sentinel) + "); `false`"
+        self.assertEqual(br.parse_log(malicious)["pytest"], {nodes[0]})
+        self.assertFalse(sentinel.exists())
+        self.partition_response("AC2", observations)
+
+    def test_partition_store_round_trip(self):
+        raw, provenance = self.partition_fixture()
+        text = "\n".join("pg-parity\t" + STEP + "\t" + line for line in raw.splitlines())
+        ids = sorted(br.parse_log(text)["pytest"])
+        self.assertEqual(ids, sorted(provenance["expected_nodes"]))
+        br._append("base-red-nightly", "demo", self.sha, complete=True, ids=[])
+        br.record("demo", self.sha, ids, source="rerun")
+        (self.root / "repos" / "other").mkdir()
+        code = ("import base_red,json; print(json.dumps(dict(known=base_red.known_red('demo'), "
+                "other=base_red.known_red('other'), rows=base_red._rows('demo'))))")
+        proc = subprocess.run(["/usr/bin/python3", "-c", code], capture_output=True, text=True,
+                              env={**os.environ, "PYTHONPATH": str(HERE)}, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        read = json.loads(proc.stdout)
+        self.assertEqual(set(read["known"]), set(ids))
+        self.assertEqual(read["other"], {})
+        self.assertTrue(all(row["source"] == "rerun" and row["sha"] == self.sha for row in read["known"].values()))
+        self.assertEqual(read["rows"][-1]["ids"], ids)
+        self.assertFalse(read["rows"][-1]["complete"])
+        self.partition_response("AC4", read)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="base-red-case-")
         self.addCleanup(self.temp.cleanup)

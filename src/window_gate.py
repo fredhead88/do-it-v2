@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """window_gate — verify a merge WINDOW's candidate tip before master moves (L-spec-0765).
-
     doit gate-window <window-id> --project albert-scott [--specs A,B,C] [--after WINDOW] [--main BRANCH] [--fixes-base]
     doit gate-window <id> --rehearse --on SHA --project albert-scott --specs A,B,C
-
 Rehearsals verify the prospective tree without owning or advancing a window.
 They return 0 green, 1 red, 2 undetermined/preflight failure, or 3 at capacity.
-
 Today nobody runs the full Python suite until a deploy, so one bad merge hides
 behind twenty-four good ones. For project `albert-scott` the Executor instead
 gates each branch (`doit gate`, unchanged), collects the window, and calls this:
-
   1. build the candidate tip — master plus each gate-clean branch, in order,
      `--no-ff` — with git PLUMBING only (`merge-tree --write-tree`,
      `commit-tree`, `update-ref`): no checkout, no index, no working tree;
@@ -64,6 +60,10 @@ PG_REHEARSAL_TEST_STEPS = frozenset({
     "Run spec-1158 all-orders/ingestion-pipeline/MCF-channel ingest tests",
     "Run spec-839/895/926/949 scratch-database tests (pg_scratch)",
 })
+PG_LIFECYCLE_FAILURES = (
+    "Scratch cluster B shutdown failed",
+    "Scratch parallel execution failed; readiness undetermined",
+)
 # These workflows only run on master pushes/PRs, not ci-verify dispatches.
 # Every new deploy requirement must be classified here before a window can open.
 CI_VERIFY_EXCLUDED = frozenset({
@@ -673,11 +673,7 @@ def run_minutes(repo, docs, *, required=None):
 
 
 def pg_result(repo, doc, *, rehearsal=False):
-    """Read the named job, not the workflow conclusion; retain failure signatures.
-
-    The deploy gate enumerates pytest's baseline-aware NEW nodes, but pg-parity
-    needs its own log. No workflow dispatch/poll mechanism is duplicated here.
-    """
+    """Read the named job, not the workflow conclusion; retain failure signatures."""
     check = doc.get("checks", {}).get(PG_CHECK)
     if check == "ran":                 # legacy verdicts without job metadata
         return False, {}
@@ -708,6 +704,10 @@ def pg_result(repo, doc, *, rehearsal=False):
         if not jid.isdigit():
             raise RuntimeError("pg-parity job id unavailable")
         log = gh("--job", jid, "--log-failed")
+        if rehearsal:
+            for marker in PG_LIFECYCLE_FAILURES:
+                if marker in re.sub(r"\x1b\[[0-9;]*m", "", log):
+                    raise RuntimeError("pg-parity lifecycle evidence: " + marker)
         failures = {}
         for line in log.splitlines():
             line = re.sub(r"\x1b\[[0-9;]*m", "", line)

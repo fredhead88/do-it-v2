@@ -73,6 +73,9 @@ def parse_log(text):
             if pg_step:
                 pg_nodes[pg_step].add(m[1])
         if pg_step:
+            for marker in window_gate.PG_LIFECYCLE_FAILURES:
+                if marker in line:
+                    result["undetermined"].append(pg_step + ": " + marker)
             m = NODE.search(line)
             if m:
                 result["pytest"].add(m[1])
