@@ -119,7 +119,7 @@ def render(repo: str) -> str:
             else:
                 current += separator + chunk
     lines.append(current)
-    lines.extend(['', '## Tick event types', '',
+    lines.extend(['', '## Tick event types',
                   'Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,',
                   'plus every action in `lane_rules.toml`.'])
     lines.extend(_wrap('; '.join(sorted(events))))
@@ -127,7 +127,7 @@ def render(repo: str) -> str:
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:
         raise ValueError('merge_queue: expected positive member verdict settings')
-    lines.extend(['', '## Member verdicts', '',
+    lines.extend(['', '## Member verdicts',
                   'Source: `look.toml` `[merge_queue]` and `src/window_members.py`.'])
     lines.extend(_wrap('After a red window with unnamed owners, each remaining member is verified alone on the '
                        f'window base, at most {parallel} CI runs at once (member_verify_parallel).'))
