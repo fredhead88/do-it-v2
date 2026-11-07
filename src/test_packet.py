@@ -2181,3 +2181,15 @@ with patch.object(fold, 'routed_criteria', return_value={'AC1': 'owed'}):
     else:
         raise AssertionError('all-routed grader packet accepted')
 print('PASS factory all-routed packet refusal')
+
+# A bare test command on another card is shared vocabulary; card prose still strips.
+from types import SimpleNamespace
+with tempfile.TemporaryDirectory() as card_dir:
+    card = pathlib.Path(card_dir) / 'card.md'
+    card.write_text('/usr/bin/python3 src/test_base_red.py\n'
+                    'AC3 done because the stale evidence path was rewritten\n')
+    other = SimpleNamespace(a=SimpleNamespace(subject='L-spec-1'), specs={
+        'L-spec-2': dict(evs=[dict(type='build-done', card=str(card))])})
+    assert [l for _, l in packet.other_cards(other)] == [
+        'AC3 done because the stale evidence path was rewritten']
+print('PASS other cards keep prose and drop bare commands')
