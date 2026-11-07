@@ -367,3 +367,13 @@ sig = 'master_full\.py\b'
 owner = "thinker"
 project = "albert-scott"
 max_runtime_s = 270
+
+[[row]]
+name = "merge-news"
+where = "user"
+schedule = "*/1 * * * *"
+command = "DOIT_ROOT={root} {doit} cron-run merge-news -- {doit} merge-news flush >> {root}/logs/merge-news.log 2>&1"
+path = "{doit}"
+sig = '\bdoit merge-news flush\b'
+owner = "thinker"
+project = "do-it-v2"

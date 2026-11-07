@@ -110,10 +110,11 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   claude-autoswitch -- /usr/bin/python3 {repo}/scripts/claude-autoswitch.py >/dev/null 2>&1
   master-full | */5 * * * * | user | /usr/bin/python3  {doit} cron-run master-full --
   /usr/bin/python3 {repo}/src/master_full.py albert-scott >> {root}/logs/master-full.log 2>&1
+  merge-news | */1 * * * * | user | {doit}  DOIT_ROOT={root} {doit} cron-run merge-news -- {doit}
+  merge-news flush >> {root}/logs/merge-news.log 2>&1
 
 ## Tick event types
-Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,
-plus every action in `lane_rules.toml`.
+Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.
 - autodispatch-failed; autodispatch-skipped; autodispatched; charter-closed; charter-proving;
   charter-reopened; cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate;
   escalation-blocking; look-stale; next-step-held; none; proving-check-failed; proving-overdue;
@@ -124,8 +125,7 @@ Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
 - After a red window with unnamed owners, each remaining member is verified alone on the window
   base, at most 4 CI runs at once (member_verify_parallel).
 - Each run appends `member-verdict {spec, window, tree, state, url, nodes}`; state is green, red or
-  undetermined. A red member is dropped with its failing nodes; green and undetermined members stay
-  eligible for the next window.
+  undetermined. A red member is dropped with its failing nodes; the rest stay eligible next window.
 - Tree reuse: a green member-verdict or window-tree-verified on the exact git tree that covers the
   required checks is reused for 24 hours (verdict_fresh_hours). Undetermined, malformed, stale or
   future-dated evidence is never reused.

@@ -118,8 +118,7 @@ def render(repo: str) -> str:
                 current += separator + chunk
     lines.append(current)
     lines.extend(['', '## Tick event types',
-                  'Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,',
-                  'plus every action in `lane_rules.toml`.'])
+                  'Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.'])
     lines.extend(_wrap('; '.join(sorted(events))))
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
@@ -130,8 +129,8 @@ def render(repo: str) -> str:
     lines.extend(_wrap('After a red window with unnamed owners, each remaining member is verified alone on the '
                        f'window base, at most {parallel} CI runs at once (member_verify_parallel).'))
     lines.extend(_wrap('Each run appends `member-verdict {spec, window, tree, state, url, nodes}`; state is green, '
-                       'red or undetermined. A red member is dropped with its failing nodes; green and '
-                       'undetermined members stay eligible for the next window.'))
+                       'red or undetermined. A red member is dropped with its failing nodes; the rest '
+                       'stay eligible next window.'))
     lines.extend(_wrap('Tree reuse: a green member-verdict or window-tree-verified on the exact git tree that covers '
                        f'the required checks is reused for {fresh} hours (verdict_fresh_hours). Undetermined, '
                        'malformed, stale or future-dated evidence is never reused.'))
