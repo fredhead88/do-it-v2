@@ -106,7 +106,9 @@ def _standing_autodispatch_failed(evs):
     AC4)."""
     # Routine failures are owned by nextstep's bounded attempt predicate. A
     # second standing transport veto would strand a due builder/reviewer retry.
+    import nextstep
     fails = [e for e in evs if e.get("type") == "autodispatch-failed"
+             and not nextstep._base_receipt(e)
              and (e.get('role') or fold.actor_of(str(e.get('spawn') or '')))
              not in {'builder', 'grader', 'reviewer'}]
     if not fails:

@@ -339,6 +339,18 @@ def launch(step, *, dispatcher):
         if events is None:
             return None
     evs = [e for e in events if e.get('subject') == step.item]
+    base_refresh = False
+    if step.action == 'build' and step.reason.startswith('base-refresh:'):
+        # Prose on a fabricated Step cannot grant the existing-worktree exception.
+        import lane_rules
+        current = nextstep.step_for(events, getattr(dispatcher, 'specs', None)
+                                    or {step.item: {'state': 'written'}}, step.item,
+                                    getattr(dispatcher, 'now', fold.NOW), lane_rules.load())
+        base_refresh = (current.state == 'action' and current.owner == 'tick'
+                        and current.action == 'build' and current.reason.startswith('base-refresh:')
+                        and (current.trigger, current.since) == (step.trigger, step.since))
+        if not base_refresh:
+            return None
     if any(release is None for hold,release in nextstep.retry_hold_pairs(evs)):
         return None
     if step.action in ('build', 'rebuild') and autodispatch._automatic_hold(evs, events):
@@ -356,7 +368,7 @@ def launch(step, *, dispatcher):
     if step.action in ROUTINE_ROLES and step.action != 'audit':
         import attempts
         role = ROUTINE_ROLES[step.action]
-        if any(e.get('type') in {'spawn-failed','autodispatch-failed'} and nextstep._attempt_role(e) == role
+        if not base_refresh and any(e.get('type') in {'spawn-failed','autodispatch-failed'} and nextstep._attempt_role(e) == role
                and nextstep._time(e['ts']) >= nextstep._time(step.since) for e in evs):
             history = attempts.history(nextstep._grader_history(evs)[0] if role == 'grader' else evs,
                 dict(subject=step.item,ts=step.since),role,now=getattr(dispatcher,'now',fold.NOW))
@@ -428,7 +440,10 @@ def launch(step, *, dispatcher):
             repo = fold.ROOT / 'repos' / project
             import packet
             base = packet._effective_base(repo, project, dispatch.spec_path(step.item), step.item)
-            if wt.is_dir():
+            if wt.is_dir() and base_refresh:
+                # Detached preflight owns all Git safety checks and recutting.
+                result = {'code': 0}
+            elif wt.is_dir():
                 result = dispatcher(['git', '-C', str(wt), 'rev-list', '--count', base + '..HEAD'])
                 if result.get('code', 1) or result.get('stdout', '').strip() != '0':
                     raise ValueError(f'worktree {wt} exists with commits above {base}; not reusing')
@@ -903,8 +918,7 @@ def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
     for candidate in candidates:
         subject = candidate['subject']
         step = by_step.get(subject)
-        base_hold = (step is not None and step.owner == 'executor'
-                     and step.reason.startswith('base-refresh:'))
+        base_hold = step is not None and step.reason.startswith('base-refresh:')
         reason = None
         if autodispatch._automatic_hold(by_subject.get(subject, []), events):
             reason = 'automatic-hold'

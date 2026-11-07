@@ -8,7 +8,7 @@ owner registry; decisions themselves always use a call-local owner mapping.
 """
 import ledger_files
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import replace, asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import json
 import re
@@ -951,22 +951,70 @@ def _base_blocked(event):
                  or re.search(r'(?:\breason=|\bproblem:)pinned-base-mismatch(?=$|\s|[,;])', reason)))
 
 
+def _base_receipt(event):
+    return (event.get('type') in {'spawn-failed', 'autodispatch-failed', 'build-blocked'}
+            and (event.get('type') != 'build-blocked' or _base_blocked(event))
+            and classify_failure(_failure_text(event), event.get('exit_code', 1)) == 'base-refresh')
+
+
+def _base_refresh_history(evs, failure, now):
+    """Base transport refusals consume no builder retry budget (SD11).
+
+    Keep their group identity so an associated detached marker is ended rather
+    than resurrected as a live attempt. Completed prior builds are a previous
+    lifecycle; later outputs, real failures and active attempts still veto.
+    """
+    cutoff = max((i for i, e in enumerate(evs) if e.get('type') == 'build-done'
+                  and _time(e['ts']) < _time(failure['ts'])), default=-1)
+    rows = [dict(e, type='spawn-failed', reason='branch-refreshed',
+                 role=_attempt_role(e) or 'builder') if _base_receipt(e) else e
+            for e in evs[cutoff+1:]]
+    trigger = _latest(rows, {'decision', 'spec-written', 'window-dropped', 'verdict',
+                            'conflict-rework', 'merge-conflict', 'precheck-red'})
+    return attempts.history(rows, trigger or dict(failure, ts=rows[0]['ts']), 'builder', now=now)
+
+
+def _base_refusal_hold(c, failure):
+    import branch_refresh
+    refusal = branch_refresh.recut_refusal(c['events'], c['sid'], c['now'])
+    if refusal is None:
+        return None
+    step = _hold(c['sid'], 'spec', 'building', failure,
+                 'base-refresh: ' + str(refusal['reason']) + '; tip=' + str(refusal['tip'] or 'unknown-tip'),
+                 'new branch-recut/build-started/build-done/spec-written/decision/unblocked'
+                 + (' or retry_at=' + refusal['retry_at'] if refusal['retry_at'] else ''), 'thinker')
+    return replace(step, retry_at=refusal['retry_at'])
+
+
 def _base_refresh_hold(c, failure):
-    evs = c['evs']
-    trigger = _latest(evs, {'decision', 'spec-written', 'window-dropped', 'verdict', 'conflict-rework', 'merge-conflict', 'precheck-red'})
-    history = attempts.history(_history_events(evs), trigger or failure, 'builder', now=c['now'])
-    detail = str(failure.get('why') or failure.get('reason') or '')
+    evs, sid = c['evs'], c['sid']
     reason = ('base-refresh: regenerate the packet with the current effective base and redispatch; '
-              'dispatch performs safe auto-rebase of a clean ordinary branch')
-    if 'dirty work' in detail:
-        reason += '; builder/operator preserves and cleans dirty work first'
-    elif 'rebase conflict' in detail:
-        reason += '; Executor uses existing subject-authorized conflict-rework to send the builder to resolve the conflict'
-    if history.exhausted:
-        reason += f'; retry exhausted: {history.n_failed} failed attempts; operator authorization required'
-    return _hold(c['sid'], 'spec', _stage(evs), failure, reason,
-                 'refreshed effective base/branch and regenerated packet; successful redispatch'
-                 + (' after new authorized trigger or operator decision' if history.exhausted else ''))
+              'detached dispatch performs safe auto-rebase of a clean ordinary branch')
+    admission = autodispatch._automatic_hold(evs, c['events'])
+    if admission or c['wave']:
+        detail = admission or 'earlier wave: ' + c['wave']
+        return _hold(sid, 'spec', 'building', failure, reason + '; ' + detail,
+                     'dependency shipped or earlier wave settled', 'tick')
+    questions = _unanswered(evs, c['events'])
+    if questions:
+        return _hold(sid, 'spec', 'building', questions[-1], 'judgment: open question/escalation', 'decision')
+    refusal = _base_refusal_hold(c, failure)
+    if refusal is not None:
+        return refusal
+    history = _base_refresh_history(evs, failure, c['now'])
+    if sid in c['busy'] or history.live or history.consumed:
+        return _hold(sid, 'spec', 'building', failure, 'in flight or recovery trigger consumed',
+                     'attempt terminal receipt or new authorized trigger', 'tick')
+    if history.exhausted or history.not_ready or history.next_retry_at and c['now'] < history.next_retry_at:
+        detail = (reason + f'; retry exhausted: {history.n_failed} failed attempts; operator authorization required'
+                  if history.exhausted else 'retry-wait: ' + '; '.join(history.reasons))
+        return _hold(sid, 'spec', 'building', failure, detail,
+                     'new authorized trigger or operator decision' if history.exhausted
+                     else 'next_retry_at=' + str(history.next_retry_at), 'executor' if history.exhausted else 'tick')
+    ignored = sum(_base_receipt(e) for e in evs)
+    reason += f'; {ignored} base transport refusal(s) excluded from builder retry budget; recut daily bound applies'
+    return Step(sid, 'spec', 'building', 'action', 'build', 'tick', _source(failure),
+                reason, None, failure['ts'])
 
 
 def _choose(c, rows, owners):
@@ -1181,6 +1229,10 @@ def next_steps(events, specs, now, rules, waves=None):
             failure, classification = _failure(evs, rules)
             if classification == 'base-refresh':
                 steps.append(_base_refresh_hold(c, failure))
+                continue
+            refusal = _base_refusal_hold(c, failure or event)
+            if refusal is not None:
+                steps.append(refusal)
                 continue
             if classification == 'spec-defect':
                 diagnostic = PACKET_INCOMPLETE_RE.search(_failure_text(failure)).group(0)
