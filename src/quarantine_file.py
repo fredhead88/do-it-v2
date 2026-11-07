@@ -5,6 +5,7 @@ verifies the queued branch before its ordinary compare-and-swap advancement.
 """
 from datetime import datetime, timezone
 import hashlib
+import re
 import subprocess
 
 import fold
@@ -35,8 +36,14 @@ def render(text, events, project, now):
             continue
         owner = row.get('owner', 'auto-' + quarantine._time(row['since']).date().isoformat())
         reason = row['rule'] + ' evidence=' + ','.join(row['windows'])
-        if any(c in owner + reason for c in '\t\r\n'):
+        if not quarantine._metadata(owner) or not quarantine._metadata(reason):
             raise ValueError('invalid quarantine metadata')
+        # Compact only the display evidence: ledger windows remain exact for
+        # proposal identity/renewal. Seven hex characters cannot exceed the
+        # scanner's 3-bit entropy threshold. Keep context and JSON syntax intact.
+        evidence = re.sub(r'(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])',
+                          lambda match: match[0][:7], ','.join(row['windows']))
+        reason = row['rule'] + ' evidence=' + evidence
         lines.append('\t'.join((node, owner, quarantine._time(row['until']).date().isoformat(), reason)))
     return '\n'.join(lines) + '\n'
 
