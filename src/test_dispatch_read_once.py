@@ -619,6 +619,11 @@ class TestPreBackendEquality(unittest.TestCase):
                                     cwd=str(Path(root) / "worktrees" / "fixture" / "l-spec-7933"))),
                             raw_baseline=raw_pairs[0], raw_candidate=raw_pairs[1],
                             baseline=pairs[0], candidate=pairs[1]))
+                        if role == "grader" and case == "packet-refusal":
+                            # Acquisition moved to tick; the receiver still
+                            # makes exactly the same refusal and gate decisions.
+                            self.assertEqual([p["collectors"] for p in pairs], [1, 0])
+                            pairs[0]["collectors"] = 0
                         self.assertEqual(pairs[0], pairs[1])
                         if case in ("held-capability", "released-capability"):
                             gate = next(g for g in pairs[0]["gates"]

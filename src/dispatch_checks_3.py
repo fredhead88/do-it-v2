@@ -200,16 +200,15 @@ def check_evidence1109():
                 rows = drive()
                 assert [r["type"] for r in rows] == ["spawn-failed"]
                 assert rows[0]["reason"] == "bundle-pending"
-                assert calls[-1][0][1:] == ["run-checks", subject, "--sha", ready]
-                assert calls[-1][1]["start_new_session"] is True
-            assert len(calls) == 4 and dispatch.grading_budget(fold.read_events(), subject) is None
+                assert calls == [], "grader receiver must not launch a checker"
+            assert calls == [] and dispatch.grading_budget(fold.read_events(), subject) is None
             publish(event)
             rows = drive()  # stale packet has no digest
-            assert rows[0]["reason"] == "bundle-pending" and len(calls) == 5
+            assert rows[0]["reason"] == "bundle-pending" and calls == []
             packet.write_text("bundle_sha256: `" + event["bundle_sha256"] + "0`")
             rows = drive()  # a longer digest sharing the prefix is not a match
             assert [r["type"] for r in rows] == ["spawn-failed"]
-            assert rows[0]["reason"] == "bundle-pending" and len(calls) == 6
+            assert rows[0]["reason"] == "bundle-pending" and calls == []
             signed("AC4", rows)
             packet.write_text("bundle_sha256: `" + event["bundle_sha256"] + "`")
             rows = drive()

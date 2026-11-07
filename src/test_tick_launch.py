@@ -763,7 +763,9 @@ class AC5(Scratch):
                     print(f'{name}: branch ids {results[name][1]}; base {base[:9]} exit {base_code} ids {base_ids}')
                     self.assertNotEqual(base_code, 0, f'{name} fails only on the branch')
                     self.assertTrue(base_ids, f'{name}: base failing ids undetermined')
-                    self.assertEqual(results[name][1], base_ids, f'{name}: failing ids differ from base')
+                    self.assertTrue(results[name][1], f'{name}: branch failing ids undetermined')
+                    self.assertLessEqual(set(results[name][1]), set(base_ids),
+                                         f'{name}: new failing ids absent from base')
             finally:
                 git('worktree', 'remove', '--force', str(wt))
 

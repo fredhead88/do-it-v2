@@ -69,52 +69,30 @@ def base_hold(events, subject, mains):
             and isinstance(latest.get('cited'), list) and latest['cited']):
         return None
     # evidence_state selects build-done; the marked block supplies this identity.
-    view = [*events, dict(latest, type='build-done')]
+    view = build_view(events, subject)
     main = mains.get(project_scope.subject_project(events, subject))
-    state = grader_packet.evidence_state(view, subject, main_sha=main)
-    return (latest, view, main) if state.state == 'pending' else None
+    return latest, view, main
+
+
+def build_view(events, subject):
+    """Preserve the marked base-only recovery identity for tick acquisition."""
+    own = [e for e in events if e.get('subject') == subject]
+    latest = next((e for e in reversed(own) if e.get('type') in
+                   {'blocked', 'unblocked', 'build-blocked', 'build-started', 'build-done'}), None)
+    if (latest and latest.get('base_only') is True and latest.get('ready_sha')
+            and isinstance(latest.get('cited'), list) and latest['cited']):
+        return [*events, dict(latest, type='build-done', status='DONE')]
+    return events
 
 
 def run(step, events, now, *, root, dst):
-    """Act only on the projected pending hold. No grader or packet is created."""
+    """Compatibility entry: pending holds use the tick's single acquisition seam."""
     if step.reason != 'not-ready:bundle-pending' or step.owner != 'tick':
         return
-    import dispatch
-    import look
-    subject = step.item
-    own = [e for e in events if e.get('subject') == subject]
-    build = next((e for e in reversed(own) if e.get('type') == 'build-done'), {})
-    block = next((e for e in reversed(own) if e.get('base_only') is True
-                  and e.get('ready_sha') and e.get('cited')), None)
-    if block and (not build or evidence_revision._time(block['ts']) > evidence_revision._time(build['ts'])):
-        build = block
-        events = [*events, dict(block, type='build-done')]
-    sha = build.get('ready_sha')
-    if not re.fullmatch(r'L-spec-\d+', str(subject)) or not re.fullmatch(r'[0-9a-fA-F]{7,40}', str(sha or '')):
-        return
-    request = request_for(events, subject, sha)
-    if request is None:
-        # The projection supplies the exact read-only selection key; no second
-        # per-subject main resolution is necessary during the acting pass.
-        match = re.search(r'current key=([0-9a-f]{64})', step.clears or '')
-        if not match:
-            return
-        try:
-            subprocess.Popen(['doit', 'run-checks', subject, '--sha', sha],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True,
-                             cwd=root)
-        except OSError:
-            return
-        dispatch.emit(dst, dict(subject=subject, project=project_scope.subject_project(events, subject)),
-                      'bundle-requested', sha=sha, key=match[1], strict=True)
-        return
-    age = (now - evidence_revision._time(request['ts'])).total_seconds()
-    alarm_key = f'{subject}:{sha}'
-    alarmed = any(e.get('type') == 'brief' and e.get('condition') == 'bundle-wait'
-                  and (e.get('key') == alarm_key
-                       or any(i.get('key') == alarm_key for i in e.get('items', [])))
-                  for e in events)
-    if age > 7200 and not alarmed:
-        look.emit_once('bundle-wait', f'{subject}:{sha}', 'executor',
-                       dict(subject=subject, ready_sha=sha, waited_s=int(age)), events, root=root)
+    import tick
+    from types import SimpleNamespace
+    # Re-evaluate with the full evidence reader; a landed bundle releases the
+    # hold, and all launch admission/retry bookkeeping belongs to tick.
+    from dataclasses import replace
+    current = replace(step, state='action', action='bundle')
+    return tick.launch(current, dispatcher=SimpleNamespace(now=now))

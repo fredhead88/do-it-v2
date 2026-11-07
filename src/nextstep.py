@@ -11,6 +11,7 @@ import argparse
 from dataclasses import replace, asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import re
 import sys
 import unicodedata
@@ -970,7 +971,9 @@ def _answers(events):
 
 def _unanswered(evs, events):
     retry_pairs = retry_hold_pairs(evs)
-    pending = [h for h,r in retry_pairs if r is None]
+    # Bundle holds are identity scoped and evaluated by _bundle_step. They
+    # must not block a new build/revision or a late usable runner success.
+    pending = [h for h,r in retry_pairs if r is None and h.get('role') != 'bundle']
     retry_ids = {id(h) for h,r in retry_pairs}
     return pending + [e for e in evs if e['type'] in {'question', 'escalation-blocking'}
             and id(e) not in retry_ids and not any(
@@ -1150,6 +1153,10 @@ def _choose(c, rows, owners):
         return _hold(sid, 'spec', stage, event, 'undetermined: conflicting actions', 'one lane action')
     row = next(iter(acting), None)
     if row:
+        if row['name'] in {'grade', 'regrade'}:
+            bundle = _bundle_step(c, row)
+            if bundle is not None:
+                return bundle
         if row.get('retry_hold'):
             trigger = next((e for e in reversed(evs) if (_source(e) == row['trigger']
                             if row.get('trigger') else e['ts'] == row['since'])), {})
@@ -1177,6 +1184,127 @@ def _choose(c, rows, owners):
                          str(row.get('blocker')) + ' shipped', 'tick', row['since'])
     reason, clears, owner = _idle_reason(evs)
     return _hold(sid, 'spec', stage, event, reason, clears, owner)
+
+
+def _bundle_context(events, subject, trigger):
+    """Acquisition identity is independent of retry number and claim receipts."""
+    import evidence_revision
+    import grader_packet
+    build = _latest(events, {'build-done'}) or {}
+    sha = build.get('ready_sha')
+    if build.get('status') != 'DONE' or not sha:
+        return None
+    text = (grader_packet.root() / 'content' / (subject + '.md')).read_text()
+    revision = evidence_revision.digest(text)
+    build_ref = _source(build)
+    if not build_ref or not trigger:
+        raise ValueError('bundle governing source missing')
+    key = hashlib.sha256(json.dumps([subject, sha, build_ref, revision]).encode()).hexdigest()
+    return dict(subject=subject, project=build.get('project'), sha=sha, build_ref=build_ref,
+                ref=trigger, spec_sha256=revision, acquisition_key=key)
+
+
+def _bundle_usable(events, subject, ready):
+    import grader_packet
+    import evidence_revision
+    found = grader_packet.bundle_for(events, subject, ready, record=False)
+    if found is None:
+        return False
+    build = _latest(events, {'build-done'}) or {}
+    failures = [e for e in events if e.get('type') == 'evidence-bundle-failed'
+                and e.get('subject') == subject and grader_packet._same_sha(e.get('sha'), ready)
+                and evidence_revision.current(events, subject, e)
+                and _time(e['ts']) > _time(build['ts'])]
+    return not any(_time(e['ts']) >= _time(found['event']['ts']) for e in failures)
+
+
+def _bundle_history(events, identity, now):
+    """Private projection: checker receipts never enter paid-role history."""
+    import grader_packet
+    import evidence_revision
+    build = next(e for e in events if _source(e) == identity['build_ref'])
+    threshold = _time(build['ts'])
+    changed = evidence_revision.amendment(events, identity['subject'])
+    if changed:
+        threshold = max(threshold, changed)
+    for hold, release in retry_hold_pairs(events):
+        if (hold.get('role') == 'bundle' and hold.get('acquisition_key') == identity['acquisition_key']
+                and release and not release.get('close') and release.get('rework') != 'yes'):
+            threshold = max(threshold, _time(release['ts']))
+    projected, settled = [], set()
+    claims = [e for e in events if e.get('reason') == 'bundle-claim'
+              and e.get('acquisition_key') == identity['acquisition_key']
+              and _time(e['claimed_at']) > threshold]
+    claims.sort(key=lambda e: _time(e['claimed_at']))
+    failures = [e for e in events if e.get('type') == 'evidence-bundle-failed'
+                and e.get('subject') == identity['subject'] and e.get('criteria') is None
+                and grader_packet._same_sha(e.get('sha'), identity['sha'])
+                and evidence_revision.current(events, identity['subject'], e)
+                and (not e.get('spec_sha256') or e['spec_sha256'] == identity['spec_sha256'])
+                and _time(e['ts']) > threshold]
+    failures.sort(key=lambda e: _time(e['ts']))
+    for index, claim in enumerate(claims):
+        number = claim['attempt']
+        closed = next((e for e in events if e.get('reason') == 'bundle-launch-failed'
+                       and e.get('acquisition_key') == identity['acquisition_key']
+                       and e.get('attempt') == number and e.get('claimed_at') == claim['claimed_at']), None)
+        terminal = next((e for e in failures if _time(e['ts']) >= _time(claim['claimed_at'])
+                         and (index+1 == len(claims) or _time(e['ts']) < _time(claims[index+1]['claimed_at']))
+                         and id(e) not in settled), None)
+        if terminal:
+            settled.add(id(terminal))
+        end = terminal or closed
+        spawn = 'bundle-' + str(index)
+        projected.append(dict(type='spawn-started', subject=identity['subject'], role='grader',
+                              spawn=spawn, ts=claim['claimed_at']))
+        if end:
+            projected.append(dict(type='spawn-failed', subject=identity['subject'], role='grader',
+                                  spawn=spawn, ts=end['ts'], reason=end.get('detail') or end.get('reason')))
+    first = min((_time(c['claimed_at']) for c in claims),
+                default=datetime.max.replace(tzinfo=timezone.utc))
+    for i, failed in enumerate(failures):
+        if id(failed) not in settled and _time(failed['ts']) < first:
+            projected.append(dict(type='spawn-failed', spawn='unclaimed-'+str(i), subject=identity['subject'],
+                                  role='grader', ts=failed['ts'], reason=failed.get('reason', 'checker failed')))
+    return attempts.history(projected, dict(subject=identity['subject'], ts=threshold.isoformat()), 'grader', now=now)
+
+
+def _bundle_step(c, row):
+    import grader_packet
+    sid, evs = c['sid'], c['evs']
+    build = _latest(evs, {'build-done'}) or {}
+    ready = build.get('ready_sha')
+    if build.get('status') != 'DONE' or not ready:
+        return None
+    # Paid retry authority and mechanical zero-criterion completion predate
+    # acquisition. Neither is permission to start another checker.
+    if (row.get('retry_hold') and not row['reason'].startswith(
+            ('grade-wait: bundle-pending', 'exhausted: bundle-pending',
+             'not-ready:bundle-pending'))
+            or __import__('empty_grade').proof(c['events'], sid) is not None):
+        return None
+    if _bundle_usable(evs, sid, ready):
+        if row['reason'].startswith(('grade-wait: bundle-pending', 'exhausted: bundle-pending',
+             'not-ready:bundle-pending')):
+            row.update(retry_hold=False, reason='evidence ready')
+        return None
+    trigger = row.get('trigger') or _source(build)
+    fields = dict(item=sid, item_kind='spec', stage='checking', owner='tick', trigger=trigger,
+                  since=row['since'], attempt=1, retry_at=None)
+    clears = f'{sid} sha={ready} usable full evidence; new build/revision or authorized release'
+    if grader_packet.snapshot_identity_missing(evs, sid, ready):
+        return Step(**fields, state='hold', action=None, reason='undetermined: bundle identity', clears=clears)
+    identity = _bundle_context(evs, sid, trigger)
+    history = _bundle_history(evs, identity, c['now'])
+    fields.update(attempt=min(history.n_failed + 1, attempts.MAX_ATTEMPTS),
+                  retry_at=history.next_retry_at.isoformat() if history.next_retry_at else None)
+    reason = ('bundle in flight' if history.live else
+              'retries-exhausted: bundle; ' + '; '.join(history.reasons) if history.exhausted else
+              'retry-wait: bundle; ' + '; '.join(history.reasons)
+              if history.next_retry_at and c['now'] < history.next_retry_at else 'bundle evidence required')
+    hold = history.live or history.exhausted or bool(history.next_retry_at and c['now'] < history.next_retry_at)
+    return Step(**fields, state='hold' if hold else 'action', action=None if hold else 'bundle',
+                reason=reason, clears=clears if hold else None)
 
 
 def _spec_exception(sid, evs, exc):
@@ -1346,8 +1474,11 @@ def next_steps(events, specs, now, rules, waves=None, mains=None):
             base_pending = bundle_wait.base_hold(events, sid, mains)
             if base_pending and not c['dependency'] and sid not in busy:
                 block, view, main = base_pending
-                steps.append(_hold(sid, 'spec', 'checking', block, 'not-ready:bundle-pending',
-                                   bundle_wait.clears(view, sid, main, 'Fresh base-only evidence'), 'tick'))
+                recovery = dict(c, evs=[e for e in view if e.get('subject') == sid], events=view)
+                row = dict(trigger=_source(block), since=block['ts'], reason='not-ready:bundle-pending')
+                steps.append(_bundle_step(recovery, row) or _hold(
+                    sid, 'spec', 'checking', block, 'base-only evidence ready',
+                    'thinker/operator release the base-only block', 'thinker'))
                 continue
             tooling = _gate_tooling(c)
             if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):

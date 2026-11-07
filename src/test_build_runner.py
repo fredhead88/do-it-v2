@@ -243,7 +243,7 @@ class BuildRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'bundle-pending'):
                 grader_packet.gate(events, self.sid, '',
                                    lambda *args, **kwargs: None, fail)
-            launch.assert_called_once()
+            launch.assert_not_called()
         _, replacement = self.bundle()
         self.assertNotEqual(path, replacement)
 

@@ -43,8 +43,44 @@ def _contained(path, directory):
     return candidate
 
 
-def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runner_version=None):
-    """Matched event, original JSON and parsed bundle, or None if unprovable."""
+def _snapshot_identity(data, build):
+    identity = (data.get('base_sha'), data.get('master_sha'), data.get('local_master_sha'))
+    if (not all(isinstance(value, str) and re.fullmatch(r'[0-9a-fA-F]{40}', value)
+                for value in (data.get('sha'), identity[0], identity[1]))
+            or identity[2] is not None and not (
+                isinstance(identity[2], str) and re.fullmatch(r'[0-9a-fA-F]{40}', identity[2]))
+            or 'local_master_sha' not in data
+            or build and build.get('base_sha') and not _same_sha(build['base_sha'], identity[0])):
+        return None
+    return identity
+
+
+def snapshot_identity_missing(events, subject, ready):
+    """Explain an unprovable persisted identity, after a pure lookup refused it."""
+    event = next((e for e in reversed(events) if e.get('subject') == subject
+                  and e.get('type') == 'evidence-bundle' and _same_sha(e.get('sha'), ready)
+                  and e.get('criteria') is None), None)
+    if event is None:
+        return False
+    try:
+        raw = _contained(event['path'], root() / 'content/evidence' / subject).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != event['bundle_sha256']:
+            return False
+        data = json.loads(raw)
+        return 'bundle_key' in data and _snapshot_identity(
+            data, _latest(events, subject, 'build-done')) is None
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runner_version=None,
+               record=True):
+    """Matched event, original JSON and parsed bundle, or None if unprovable.
+
+    Snapshot readers use record=False: stable identity then comes only from
+    verified persisted evidence, without resolving live Git refs or publishing
+    reuse. Receiving gates retain live identity validation by default.
+    """
     import build_runner
     selected = sorted(criteria) if criteria is not None else None
     event = next((e for e in reversed(events) if e.get('subject') == subject
@@ -88,7 +124,14 @@ def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runn
                     or event.get('project') != project
                     or build and build.get('project') != project):
                 return None
-            if identity is None:
+            if identity is None and not record:
+                # The file digest and containment were verified above. Its
+                # canonical SHA keeps abbreviated ready SHAs out of the key.
+                identity = _snapshot_identity(data, build)
+                sha = data['sha']
+                if identity is None:
+                    return None
+            elif identity is None:
                 env = {k: v for k, v in build_runner.grading_env._clean_env().items()
                        if not k.startswith('GIT_')}
                 repo = root() / 'repos' / project
@@ -96,7 +139,7 @@ def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runn
                 identity = build_runner._bundle_base(repo, project, build or {}, sha,
                                                      env, time.monotonic() + 30)
             else:
-                sha = ready_sha
+                sha = ready_sha if record else data['sha']
             base, master, local_master = identity
             if (not master or data['base_sha'] != base or data['master_sha'] != master
                     or data.get('local_master_sha') != local_master
@@ -113,7 +156,7 @@ def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runn
             if stable and hashlib.sha256(output).hexdigest() != command['tail_sha256']:
                 return None
             tails.append(f"Command output {index}:\n{output.decode(errors='replace')}")
-        if stable:
+        if stable and record:
             build_runner._event(subject, data['project'], 'bundle-reused',
                 sha=data['sha'], base_sha=data['base_sha'], bundle_key=data['bundle_key'],
                 path=event['path'], bundle_sha256=event['bundle_sha256'])
@@ -247,22 +290,10 @@ def gate(events, subject, packet, emit, fail):
     if failure_newer or legacy_unreadable:
         reason = failed.get("reason", "runner failed") if failure_newer else "bundle-unreadable"
         if ready and failure_newer and (failed.get("reason_code") == "wall-cap" or reason == "wall cap exceeded"):
-            # Dispatch's infra gate has already enforced retry_at. A retry is
-            # claimed visibly before launch so repeated dispatches cannot fan out.
             later = events[selection._failure_index + 1:]
             retried = any(e.get("subject") == subject and e.get("type") == "infra-failure"
                           and e.get("role") == "grader" for e in later)
             if retried:
-                claimed = any(e.get("subject") == subject and e.get("type") == "grading-preflight-failed"
-                              and e.get("sha") == ready and e.get("reason") == "wall-cap-retry"
-                              for e in later)
-                if not claimed:
-                    emit("grading-preflight-failed", role="grader", capability="runner",
-                         reason="wall-cap-retry", sha=ready)
-                    subprocess.Popen([str(pathlib.Path(__file__).resolve().parents[1] / "doit"),
-                                      "run-checks", subject, "--sha", ready],
-                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
                 fail("evidence bundle pending after wall-cap retry", reason="wall-cap-retry")
             emit("grading-preflight-failed", role="grader", capability="runner", reason=reason)
             fail(reason, reason="wall-cap")
@@ -270,11 +301,6 @@ def gate(events, subject, packet, emit, fail):
         fail(reason, reason="preflight:runner")
     digest = re.escape(bundle["event"]["bundle_sha256"]) if bundle else ""
     if bundle is None or not re.search(r"bundle_sha256:\s*(?:`" + digest + r"`|" + digest + r"(?=\s|$))", packet):
-        if ready:
-            subprocess.Popen([str(pathlib.Path(__file__).resolve().parents[1] / "doit"),
-                              "run-checks", subject, "--sha", ready],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
         fail("evidence bundle pending", reason="bundle-pending")
     return bundle
 

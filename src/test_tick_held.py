@@ -270,6 +270,8 @@ tick._record_next_step_held(events, specs, steps, now)
         tick._record()
         self.assertEqual(len(self.held()), before + 1)  # same reason again, no new assignment
         # Real grade action, refusal and same-pass assignment all share _record.
+        # Evidence acquisition has its own tests; these grade rows assume usable evidence.
+        self.mock(nextstep, '_bundle_usable', return_value=True)
         self.seed(-1800, 'L-spec-9903', 'DONE')
         _, steps = self.steps()
         action = next(s for s in steps if s.item == 'L-spec-9903')
