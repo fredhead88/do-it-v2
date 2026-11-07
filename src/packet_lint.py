@@ -71,6 +71,11 @@ def split(findings):
     return block, warn
 
 
+def spec_written_blocks(spec_text: str) -> list[str]:
+    """Canonical spec-written blocking findings, including fixed checkout cwd."""
+    return split(run(spec_text, CHECKLIST, "spec"))[0]
+
+
 # ── PL-001..009 check functions — each: text -> str | None ────────────────────
 
 _BASE_SHA_HEAD = re.compile(r"(?:base_sha|BASE)\s*:?\s*HEAD\b")

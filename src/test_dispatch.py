@@ -227,6 +227,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from test_dispatch import _fast_seat_poll, _seat_timing_checks
 _historical = Path(__file__).with_name("dispatch_checks_3.py").read_text().split("# END L0898 REGRESSIONS\n", 1)[1]
+import grader_packet
+_validate_grader_output = grader_packet.validate_output
+GRADER_CRITERIA = None
+
+def _validate_historical_grade(output, bundle):
+    return _validate_grader_output(output, bundle, criteria=GRADER_CRITERIA)
+
 for _chunk in range(1, 4):
     _path = Path(__file__).with_name(f"dispatch_checks_{_chunk}.py")
     _source = _historical if _chunk == 3 else _path.read_text()
@@ -247,7 +254,8 @@ for _chunk in range(1, 4):
     # These historical graders exercise legacy no-bundle capability and
     # verdict handling. The real bundle gate is covered in check_evidence1109
     # above, in its own process; it now refuses these old fixture packets.
-    with patch("grader_packet.gate", return_value=None):
+    with patch("grader_packet.gate", return_value=None), \
+            patch("grader_packet.validate_output", side_effect=_validate_historical_grade):
         exec(compile(_source, str(_path), "exec"), globals())
 """
 def _infra_response(ac, rows):

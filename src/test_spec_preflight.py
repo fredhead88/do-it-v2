@@ -336,7 +336,7 @@ def AC7():
     bodies = []
     with mock.patch.object(sp, "_append", side_effect=lambda root, body, **kwargs: bodies.append(body)):
         assert sp.tick(root=f.root, now=NOW) == 0
-    assert [b["spec"] for b in bodies] == [f"L-spec-{9100+i}" for i in range(4, 8)], bodies
+    assert [b["spec"] for b in bodies] == [f"L-spec-{9100+i}" for i in range(4, 10)], bodies
 
 
 def AC8():
@@ -395,6 +395,47 @@ def AC11():
     assert {n.func.attr for n in calls} == {"Popen", "CompletedProcess"}
     assert "start_new_session=True" in source and "stdin=subprocess.DEVNULL" in source
     assert sp.TEST_CAP_S == 600 and sp.TICK_MAX == 4
+
+
+def AC2046():
+    f = Fixture()
+    written = {}
+    for i in range(sp.TICK_MAX + 2):
+        sid = f"L-spec-{9200+i}"
+        f.spec(sid=sid)
+        written[sid] = datetime.fromisoformat(f.events[-1]["ts"])
+    output = __import__("io").StringIO()
+    started = time.monotonic()
+    with contextlib.redirect_stdout(output):
+        assert sp.tick(root=f.root, now=NOW) == 0
+    elapsed = time.monotonic() - started
+    with mock.patch.multiple(fold, ROOT=f.root, EVENTS=f.root / "events", PROJECT=""):
+        rows = [e for e in fold.read_events(use_cache=False) if e["type"] == "spec-preflight"]
+    assert [e["subject"] for e in rows] == list(written), rows
+    for row in rows:
+        assert row["lag_s"] == (NOW - written[row["subject"]]).total_seconds(), row
+        assert f"{row['subject']}:{row['lag_s']}" in output.getvalue(), output.getvalue()
+    print(f"L-spec-2046 AC4 scratch run cost: {elapsed:.3f}s for {len(rows)} specs")
+    assert sp.TICK_BUDGET_S == 240
+
+    budget = Fixture()
+    for i in range(3):
+        budget.spec(sid=f"L-spec-{9300+i}")
+    output = __import__("io").StringIO()
+    clock = [0.0]
+    actual = sp.run
+    calls = []
+    def slow(sid, **kwargs):
+        calls.append(sid)
+        body = actual(sid, **kwargs)
+        clock[0] += 241
+        return body
+    with mock.patch.object(sp.time, "monotonic", side_effect=lambda: clock[0]), \
+            mock.patch.object(sp, "run", side_effect=slow), contextlib.redirect_stdout(output):
+        assert sp.tick(root=budget.root, now=NOW) == 0
+    assert calls == ["L-spec-9300"], calls
+    assert "deferred=2" in output.getvalue() and "L-spec-9301, L-spec-9302" in output.getvalue(), output.getvalue()
+    assert len([e for e in sp._events(budget.root) if e["type"] == "spec-preflight"]) == 1
 
 
 GROUPS = {name: value for name, value in list(globals().items()) if re.fullmatch(r"AC\d+", name)}
