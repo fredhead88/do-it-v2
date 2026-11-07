@@ -91,6 +91,8 @@ class DigestTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.sent = []
+        # These argv/HTTP regressions deliberately exercise the pre-cutover route.
+        self.assertFalse((self.root / 'state/tg-cutover-done').exists())
         self.sender = lambda argv: self.send(argv)
         self.install([event("decision", text="a readable ledger")])
 

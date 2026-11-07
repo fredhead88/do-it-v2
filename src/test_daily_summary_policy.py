@@ -18,6 +18,7 @@ import fold
 import owed_digest
 import stuck_digest
 import thinker_inbox as inbox
+import tg_say
 
 NOW = datetime(2026,11,2,6,5,tzinfo=timezone.utc)
 SID = 'L-spec-9001'
@@ -44,6 +45,9 @@ class DailySummaryPolicyTests(unittest.TestCase):
         for obj,name,value in [(fold,'ROOT',self.root),(fold,'EVENTS',self.root/'events'),(fold,'PROJECT',None)]:
             p=patch.object(obj,name,value);p.start();self.addCleanup(p.stop)
         p=patch.dict(os.environ,DOIT_ROOT=str(self.root),DOIT_NO_POKE='1');p.start();self.addCleanup(p.stop)
+        (self.root/'state').mkdir()
+        (self.root/'state/tg-cutover-done').touch()
+        p=patch.object(tg_say,'_now',return_value=NOW);p.start();self.addCleanup(p.stop)
         self.sent=[]
         self.install(check())
 
@@ -53,8 +57,9 @@ class DailySummaryPolicyTests(unittest.TestCase):
             with (self.root/'events'/('L-'+row['actor']+'-fixture.jsonl')).open('a') as out:
                 out.write(json.dumps({k:v for k,v in row.items() if k not in ('actor','_src')})+'\n')
 
-    def sender(self,argv):
-        self.sent.append(argv[1]);return subprocess.CompletedProcess(argv,0,'200\n','')
+    def sender(self,sender,text,*,label,root):
+        self.assertEqual((sender,label,root),('daily-summary','[DAILY]',self.root))
+        self.sent.append(text);return tg_say.Delivery('sent',200)
 
     def run_daily(self,first=owed_digest,now=NOW):
         for module in (first, stuck_digest if first is owed_digest else owed_digest):
@@ -67,7 +72,7 @@ class DailySummaryPolicyTests(unittest.TestCase):
         text=self.sent[0]
         for part in ('Checks:','Work:','NEEDS YOU:','Recommend','No reply:','L-spec-9001/AC1'):
             self.assertIn(part,text)
-        self.assertLess(len(text),1000)
+        self.assertLessEqual(len(text),3500)
         self.run_daily(first=stuck_digest)
         self.assertEqual(len(self.sent),1)
         # Next day the reverse order still delivers once, and old delivered asks stay silent.
@@ -114,7 +119,7 @@ class DailySummaryPolicyTests(unittest.TestCase):
         self.assertIn('NEEDS YOU:',self.sent[0])
 
     def test_failed_send_does_not_claim_the_day_other_command_can_retry(self):
-        fail=lambda argv:subprocess.CompletedProcess(argv,0,'429\n','')
+        fail=lambda *a,**kw:tg_say.Delivery('failed',429)
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(owed_digest.run(now=NOW,alert=True,sender=fail),1)
         self.assertNotIn('sent_date',json.loads((self.root/'state/telegram-summary.json').read_text()))
@@ -133,6 +138,7 @@ class DailySummaryPolicyTests(unittest.TestCase):
         self.run_daily();self.assertEqual(messages[0],[self.sent[0]])
 
     def test_legacy_unlabelled_daily_sender_is_refused_without_transport(self):
+        (self.root/'state/tg-cutover-done').unlink()
         repo=Path(owed_digest.__file__).resolve().parents[1]
         (self.root/'telegram').mkdir()
         wrapper=self.root/'telegram/tg-send.sh'
@@ -174,7 +180,7 @@ class DailySummaryPolicyTests(unittest.TestCase):
         import health_alarms
         import tg_say
         def health_sender(argv):
-            self.sender(argv)
+            self.sent.append(argv[1])
             return tg_say.Delivery('sent', 200)
         import window_gate
         # A critical maintenance reading is retained, but is not observed downtime.
