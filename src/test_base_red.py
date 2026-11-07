@@ -692,9 +692,9 @@ print(json.dumps({'known': base_red.known_red('demo'),
                                                "covered": covered, "uncovered": [] if complete else ids,
                                                "undetermined": False})
                     actual = br.classify("demo", self.sha, ids, known_red=True, now=now)
-                    expected = (["nightly"] if age is not None else []) + (["base"] if complete else [])
+                    expected = (["nightly"] if age is not None and age < 36 else []) + (["base"] if complete else [])
                     self.assertEqual(actual["pre_existing"], expected)
-                    self.assertEqual(actual["known_red"], ["nightly"] if age is not None else [])
+                    self.assertEqual(actual["known_red"], ["nightly"] if age is not None and age < 36 else [])
                     self.assertEqual(actual["complete"], complete or (age is not None and age < 36))
         print("ac3 classify default unchanged")
         print("ac3 classify known_red")

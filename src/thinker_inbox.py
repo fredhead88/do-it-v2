@@ -168,6 +168,12 @@ def telegram(msg):
 
 
 def short(i):
+    if i.get("kind") == "master-full-red":
+        # Preserve all failed ids and the tested merge range for --list/pane.
+        # Commit subjects and ids are data, including when written by a reader
+        # other than the producer's own sanitized question path.
+        text = f"{i['subject']} [master-full-red] {i['ask']} (src {i['src']})"
+        return " ".join("".join(c if c.isprintable() else " " for c in text).split())
     return f"{i['subject']} [{i['kind'] or i['type']}] {i['ask'][:140]} (src {i['src']})"
 
 
@@ -196,13 +202,16 @@ def main():
             groups.setdefault(i["kind"] or i["type"], []).append(i)
         parts = []
         for k, l in groups.items():
-            if len(l) > 3:
+            if len(l) > 3 and k != "master-full-red":
                 parts.append(f"{len(l)}x {k} ({', '.join(x['subject'] for x in l[:12])}{'…' if len(l) > 12 else ''})")
             else:
                 parts += [("FOR THE OPERATOR, send them a plain-English explanation and your recommendation: " if x["owner"] == "operator" else "") + short(x) for x in l]
         msg = (f"[thinker-inbox] {len(new)} new item(s) waiting on the Thinker: " + " ; ".join(parts) +
                f". Full list: python3 {ROOT}/thinker-inbox.py --list. Answer each with /home/albert/do-it-v2/doit thinker-answer <src> \"<why>\".")
-        if type_into(p, msg[:3500]):
+        # Master-full incident details include every failed id and tested merge.
+        # Do not mark those incidents delivered after truncating their payload.
+        message = msg if any(i["kind"] == "master-full-red" for i in new) else msg[:3500]
+        if type_into(p, message):
             for i in new:
                 st["delivered"][i["src"]] = t_now
             log(f"delivered {len(new)} to {p}")

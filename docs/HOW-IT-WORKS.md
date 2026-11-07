@@ -24,11 +24,9 @@ Source: `agents/*.md` and `machine/models.toml`.
 
 SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.
 Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.
-`doit health [--json]` reports finishing, intake, usage percentages, disk and tokens_per_live_spec.
-Tokens per live spec average uncached input plus output for measured specs shipped in seven days.
-unmeasured_specs counts excluded specs; spawn-stale has no usage and understates spend.
-The vendor routing above assigns authors to Codex and judging roles to Claude seats.
-The Executor uses claude-sonnet-5-5; judgment calls go to a claude-opus-5-5 seat sub-agent.
+`doit health [--json]`: finishing, intake, usage percentages, disk and tokens_per_live_spec.
+Seven-day shipped mean: uncached input + output; unmeasured_specs excluded; spawn-stale unknown.
+Authors: Codex; judges: Claude seats. Executor: claude-sonnet-5-5; judgment: claude-opus-5-5 seat.
 Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;
 record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.
 
@@ -108,6 +106,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   scratch-db-reaper | 17 * * * * | user | {doit}  {doit} cron-run scratch-db-reaper -- {doit}
   reap-scratch-db; worktree-reaper | */5 * * * * | user | {doit}  {doit} cron-run worktree-reaper --
   {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1
+  master-full | */5 * * * * | user | /usr/bin/python3  {doit} cron-run master-full --
+  /usr/bin/python3 {repo}/src/master_full.py albert-scott >> {root}/logs/master-full.log 2>&1
 
 ## Tick event types
 

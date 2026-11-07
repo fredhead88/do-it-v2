@@ -346,3 +346,14 @@ path = "{doit}"
 sig = '\bdoit reap-worktrees\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "master-full"
+where = "user"
+schedule = "*/5 * * * *"
+command = "{doit} cron-run master-full -- /usr/bin/python3 {repo}/src/master_full.py albert-scott >> {root}/logs/master-full.log 2>&1"
+path = "/usr/bin/python3"
+sig = 'master_full\.py\b'
+owner = "thinker"
+project = "albert-scott"
+max_runtime_s = 270
