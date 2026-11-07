@@ -1222,8 +1222,9 @@ def _emit_tooling(subject, branch, main_sha, branch_sha, history, review, reason
     import nextstep
     # A resolved identity comes only from this invocation, never a previous run.
     resolved = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch_sha or ""))
+    now = fold._append_now()
     event = dict(type="merge-gate-undetermined", subject=subject,
-                 ts=fold.NOW.isoformat(timespec="seconds"), branch=branch, reason=reason,
+                 ts=now.isoformat(timespec="seconds"), branch=branch, reason=reason,
                  sha=branch_sha if resolved else "", branch_sha=branch_sha if resolved else "",
                  main_sha=main_sha or "", repo=_COMMON, cycle=review['ts'] if review else "",
                  attempt="" if reason == "lock-busy" else uuid.uuid4().hex,
@@ -1238,11 +1239,11 @@ def _emit_tooling(subject, branch, main_sha, branch_sha, history, review, reason
         if count >= 3:
             event.update(retryable=False, hold_reason="retry-cap-exhausted")
         else:
-            event['retry_at'] = (fold.NOW + timedelta(minutes=5 if count <= 1 else 15)).isoformat(timespec="seconds")
+            event['retry_at'] = (now + timedelta(minutes=5 if count <= 1 else 15)).isoformat(timespec="seconds")
     if LAST_APPEND_ONLY:
         event["append_only"] = LAST_APPEND_ONLY
     fold.append(["merge-gate-undetermined", subject] +
-                [f"{k}:={json.dumps(v)}" for k, v in event.items() if k not in {'type', 'subject', 'ts'}])
+                [f"{k}:={json.dumps(v)}" for k, v in event.items() if k not in {'type', 'subject'}])
     print("merge-gate: tooling hold — " + reason + "; " +
           ("retry_at=" + event['retry_at'] if event['retry_at'] else event['hold_reason'] or "lock-busy"))
     _print_append_only()

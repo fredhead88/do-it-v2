@@ -666,9 +666,11 @@ class ResourcesTests(unittest.TestCase):
         token = resources._REAP_REPORT.set(report)
         try:
             with (patch.object(fold, 'PROJECT', None),
+                  patch.object(fold, 'read_events', wraps=fold.read_events) as reads,
                   patch.object(fold, 'subject_project', wraps=fold.subject_project) as labels):
                 self.assertEqual(resources.reap(events, dry_run=False, now=now)[0].action, 'retired')
-            self.assertEqual(labels.call_count, 1)
+            self.assertEqual(labels.call_count, 0)
+            self.assertEqual(reads.call_count, 1)
             self.assertEqual(report['project_fallback'], 1)
         finally:
             resources._REAP_REPORT.reset(token)

@@ -88,6 +88,8 @@ def test_integration():
                                       (models, {"ROOT": root, "PATH": root / "models.toml"})):
                     for name, value in attrs.items():
                         stack.enter_context(patch.object(module, name, value))
+                # Hold all balance writes at the fixture clock, including child ties.
+                stack.enter_context(patch.object(fold, "NOW", datetime.fromisoformat(fold.NOW.isoformat())))
                 run_checks(root, balance, dispatch, fold, models)
 
 

@@ -1665,7 +1665,7 @@ CARD_8034P.write_text("# L-card-9460 · DONE\n"
                       "AC3 [backend] built · log · ok\n")
 ev("spec-writer", "spec-written", "L-spec-9460", spec="L-spec-9460", path=str(SPEC_8034P), footprint=["a.py"])
 ev("builder", "build-done", "L-spec-9460", status="DONE", card=str(CARD_8034P), ready_sha="9460ready", verify_exit=0)
-ev("grader", "criterion-routed", "L-spec-9460", criterion="AC2", capability="browser", to="reviewer")
+w44_route = ev("grader", "criterion-routed", "L-spec-9460", criterion="AC2", capability="browser", to="reviewer")
 
 t_8034_grader = build("grader", "L-spec-9460", worktree=str(REPO))
 assert TOKEN_8034P not in t_8034_grader, "AC9: AC2's planted continuation-line token must not leak to the grader"
@@ -1689,13 +1689,13 @@ print("8034-AC9 ok")
 # disposition instead of the dropped criterion/card text.
 ev("thinker", "decision", "L-spec-9460", criterion="AC2",
    why="AC2 is ruled met: browser evidence accepted.", evidence="evidence/9460-browser.json",
-   ts=(fold.NOW + fold.timedelta(seconds=1)).isoformat())
+   ts=(fold.ts(w44_route["ts"]) + fold.timedelta(seconds=1)).isoformat())
 t_44_grader = build("grader", "L-spec-9460", worktree=str(REPO))
 assert "AC2: ruled met by the Thinker: AC2 is ruled met: browser evidence accepted., evidence evidence/9460-browser.json" in t_44_grader, t_44_grader
 assert TOKEN_8034P not in t_44_grader and "AC2 [ui] built" not in t_44_grader
 assert "AC1 [backend] built" in t_44_grader and "AC3 [backend] built" in t_44_grader
 ev("operator", "decision", "L-spec-9460", criteria="AC1, AC3", why="Evidence accepted.", evidence="evidence/9460-all.json",
-   ts=(fold.NOW + fold.timedelta(seconds=2)).isoformat())
+   ts=(fold.ts(w44_route["ts"]) + fold.timedelta(seconds=2)).isoformat())
 try:
     build("grader", "L-spec-9460", worktree=str(REPO))
 except SystemExit as exc:

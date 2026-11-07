@@ -2,6 +2,7 @@
 """One runnable check on the fold rules. Run: python3 test_fold.py"""
 import json, os, pathlib, re, shutil, sys, tempfile, types
 from itertools import permutations
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
@@ -48,7 +49,15 @@ print('1497: standalone fold enforces all four seat authorizations')
 SESSIONS_DEFAULT = fold.SESSIONS
 fold.SESSIONS = TMP / "sessions"
 
-T = datetime.now(timezone.utc)
+# Appended records and stamp() fixtures share one scoped writer clock.
+T = datetime.fromisoformat(fold.NOW.isoformat())
+
+
+def _fixture_append(argv, strict=False):
+    with patch.object(fold, "NOW", T):
+        return fold.append(argv, strict=strict)
+
+
 stamp = lambda d=0: (T - timedelta(days=d)).isoformat(timespec="seconds")
 
 # A role's spawn id shares a prefix with charters but is not a charter.
@@ -361,10 +370,10 @@ assert len(fold.read_events()) == len(evs[0]), "half-written line skipped, rest 
 
 # append lands, and re-reads to prove it (rule 4)
 os.environ["DOIT_LEDGER_FILE"] = "L-operator-01.jsonl"
-fold.append(["observed", "-"])
+_fixture_append(["observed", "-"])
 
 # an all-digit sha must not become an integer; a bool must still be a bool
-ev = fold.append(["merge-gate-clean", "L-spec-x", "merged_tree=628758778891",
+ev = _fixture_append(["merge-gate-clean", "L-spec-x", "merged_tree=628758778891",
                   "sha=9b7e02d", "confirmed=false", "payload=[1,2]", "n:=17"])
 assert ev["merged_tree"] == "628758778891", "an all-digit sha stays a string"
 assert ev["sha"] == "9b7e02d"
@@ -375,9 +384,9 @@ assert ev["payload"] == [1, 2] and ev["n"] == 17, "explicit JSON still works"
 # from elsewhere must not strand its events under a second label (found by running
 # merge-gate from the repo root, where cwd said `do-it-v2` and the charter said `do-it`)
 here = pathlib.Path.cwd().name
-assert fold.append(["charter-filed", "L-charter-new"])["project"] == here, "new subject: cwd"
+assert _fixture_append(["charter-filed", "L-charter-new"])["project"] == here, "new subject: cwd"
 os.chdir(TMP)
-assert fold.append(["merge-gate-clean", "L-charter-new"])["project"] == here, \
+assert _fixture_append(["merge-gate-clean", "L-charter-new"])["project"] == here, \
     "known subject keeps its own project, whatever directory the caller ran from"
 os.chdir(pathlib.Path(__file__).parent)
 
@@ -1502,7 +1511,7 @@ for argv, missing_word in (
 ):
     before15 = AC15_LEDGER.read_text() if AC15_LEDGER.is_file() else ""
     try:
-        fold.append(argv)
+        _fixture_append(argv)
         raise AssertionError(f"{argv[0]} with a missing field must raise SystemExit")
     except SystemExit as e:
         assert missing_word in str(e.code), (argv, e.code)
@@ -1515,7 +1524,7 @@ os.environ["DOIT_LEDGER_FILE"] = "L-random-local.jsonl"
 RANDOM_LEDGER = fold.EVENTS / "L-random-local.jsonl"
 if RANDOM_LEDGER.is_file():
     RANDOM_LEDGER.unlink()
-fold.append(["verdict", "L-spec-9999", "confirmed=true"])
+_fixture_append(["verdict", "L-spec-9999", "confirmed=true"])
 assert RANDOM_LEDGER.is_file() and len(RANDOM_LEDGER.read_text().splitlines()) == 1, \
     "an actor/type mismatch alone does not refuse the write"
 os.environ["DOIT_LEDGER_FILE"] = "L-operator-01.jsonl"
@@ -3878,7 +3887,7 @@ def test_owed_vocabulary():
         path = fold.EVENTS / os.environ["DOIT_LEDGER_FILE"]
         before = path.read_bytes() if path.exists() else None
         try:
-            fold.append(argv, strict=True)
+            _fixture_append(argv, strict=True)
         except SystemExit as exc:
             assert all(word in str(exc) for word in words), str(exc)
         else:
@@ -3917,15 +3926,15 @@ def test_owed_vocabulary():
         print("L1002-AC2 ok (pre-existing assertions and actor-less open events)")
 
         # A refusal preserves an existing file as well as refusing to create one.
-        fold.append(["observed", "L-spec-9999"], strict=True)
+        _fixture_append(["observed", "L-spec-9999"], strict=True)
         refused(["verdict", "L-spec-9999", "confirmed=true"], "operator", "verdict", "actor mismatch")
         os.environ["DOIT_LEDGER_FILE"] = "L-grader-0001.jsonl"
-        fold.append(["verdict", "L-spec-9999", "confirmed=true"], strict=True)
+        _fixture_append(["verdict", "L-spec-9999", "confirmed=true"], strict=True)
         assert len((fold.EVENTS / "L-grader-0001.jsonl").read_text().splitlines()) == 1
         print("L1002-AC3 ok")
 
         os.environ["DOIT_LEDGER_FILE"] = "L-operator-local.jsonl"
-        fold.append(["owed-corrective", "L-spec-9998", "criterion=AC1", "corrective=L-spec-9999"], strict=True)
+        _fixture_append(["owed-corrective", "L-spec-9998", "criterion=AC1", "corrective=L-spec-9999"], strict=True)
         fresh = fold.read_events()
         stored = next(e for e in fresh if e["type"] == "owed-corrective")
         assert stored["actor"] == "operator" and stored["corrective"] == "L-spec-9999"
@@ -3962,10 +3971,10 @@ def test_owed_vocabulary():
         refused(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={missing_path}"], missing_path)
         proof = pathlib.Path(directory) / "proof.txt"
         proof.write_text("proof\n")
-        fold.append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={proof}"], strict=True)
+        _fixture_append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={proof}"], strict=True)
         assert len((fold.EVENTS / "L-thinker-0001.jsonl").read_text().splitlines()) == 1
         command_proof = "$ cmd\nout"
-        fold.append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={command_proof}"], strict=True)
+        _fixture_append(["owed-met", "L-spec-9998", "criterion=AC1", f"evidence={command_proof}"], strict=True)
         assert len((fold.EVENTS / "L-thinker-0001.jsonl").read_text().splitlines()) == 2
         assert any(e.get("evidence") == command_proof for e in fold.read_events())
         print("L1002-AC6 ok")
@@ -4028,20 +4037,20 @@ def test_owed_vocabulary():
         os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
         warnings = io.StringIO()
         with contextlib.redirect_stderr(warnings), mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
-            fold.append(["worked", "L-spec-9997", "what=deploy"])
+            _fixture_append(["worked", "L-spec-9997", "what=deploy"])
             assert reads.call_count == 0
         assert warnings.getvalue() == "fold: recorded-and-ignored worked by executor\n"
         assert len((fold.EVENTS / "L-executor-0001.jsonl").read_text().splitlines()) == 1
         os.environ["DOIT_LEDGER_FILE"] = "L-spec-writer-0001.jsonl"
         with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
-            fold.append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
+            _fixture_append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
             assert reads.call_count == 0
         os.environ["DOIT_LEDGER_FILE"] = "L-executor-0001.jsonl"
         with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
             refused(["owed-ac", "L-spec-9997", "criterion=AC2"], "executor", "owed-ac")
             assert reads.call_count == 1
         with mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
-            fold.append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
+            _fixture_append(["owed-ac", "L-spec-9997", "criterion=AC1"], strict=True)
             assert reads.call_count == 1
         assert len((fold.EVENTS / "L-executor-0001.jsonl").read_text().splitlines()) == 2
         print("L1002-AC10 ok")
@@ -4052,16 +4061,16 @@ def test_owed_vocabulary():
         for filename, actor in names.items():
             assert fold.actor_of(filename) == actor
             os.environ["DOIT_LEDGER_FILE"] = filename
-            fold.append(["observed", "L-spec-9998"], strict=True)
+            _fixture_append(["observed", "L-spec-9998"], strict=True)
             fresh = fold.read_events()
             assert any(e["_src"].startswith(filename + ":") and e["actor"] == actor for e in fresh)
         os.environ["DOIT_LEDGER_FILE"] = "L-owed-digest-local.jsonl"
-        fold.append(["owed-digest", "L-spec-9998", "path=/report", "counts:={}"], strict=True)
+        _fixture_append(["owed-digest", "L-spec-9998", "path=/report", "counts:={}"], strict=True)
         _, _, ignored, subjects = fold.fold(fold.read_events())
         assert any(e["type"] == "owed-digest" and e["counts"] == {} for e in subjects["L-spec-9998"])
         assert not any(e["type"] == "owed-digest" for e in ignored)
         os.environ["DOIT_LEDGER_FILE"] = "L-grader-0001.jsonl"
-        fold.append(["observed", "L-spec-9998", "--inbox"], strict=True)
+        _fixture_append(["observed", "L-spec-9998", "--inbox"], strict=True)
         assert any(e["actor"] == "inbox" for e in fold.read_events())
         print("L1002-AC11 ok")
 
@@ -4174,12 +4183,12 @@ def test_dependency_hold_vocabulary():
             mock.patch.dict(os.environ, {"DOIT_ROOT": directory, "DOIT_NO_POKE": "1",
                                          "DOIT_LEDGER_FILE": "L-thinker-0001.jsonl"}):
         argv = ["dependency-hold", "L-spec-1043", "waits_for=L-spec-9002", "why=needs producer"]
-        fold.append(argv)
+        _fixture_append(argv)
         path = fold.EVENTS / "L-thinker-0001.jsonl"
         before = path.read_bytes()
         for missing in ("waits_for", "why"):
             try:
-                fold.append([arg for arg in argv if not arg.startswith(missing + "=")])
+                _fixture_append([arg for arg in argv if not arg.startswith(missing + "=")])
             except SystemExit as exc:
                 assert missing + "=" in str(exc), str(exc)
             else:
