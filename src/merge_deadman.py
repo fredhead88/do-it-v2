@@ -3,6 +3,12 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import subprocess
+import re
+import unicodedata
+
+import merge_loop_state
+import notification_policy
+import tg_say
 
 WINDOW = timedelta(minutes=90)
 REPEAT = timedelta(hours=3)
@@ -20,72 +26,72 @@ def stamp(value):
         return None
 
 
-def ready_specs(events):
-    """Track unshipped gated/queued work; newer rework invalidates old readiness."""
-    ready, projects = {}, {}
-    for event in events:
-        sid, kind = event.get('subject'), event.get('type')
-        if not isinstance(sid, str) or not sid.startswith('L-spec-'):
-            continue
-        if event.get('project'):
-            projects[sid] = event['project']
-        if kind in {'shipped', 'spec-killed', 'spec-closed', 'queue-remove', 'window-dropped',
-                    'spec-written', 'spec-amended', 'build-started', 'merge-gate-rework',
-                    'merge-conflict', 'conflict-rework', 'rejected-criterion'}:
-            ready.pop(sid, None)
-        elif kind in {'merge-gate-clean', 'queue-add'} or (kind == 'review' and event.get('n_blocking') == 0):
-            ready.setdefault(sid, stamp(event.get('ts')))
-    return {sid: when for sid, when in ready.items() if when is not None and projects.get(sid) in PROJECTS}
+def _summary(value, limit=400):
+    """Bound untrusted diagnostics before handing plain text to the formatter."""
+    text = str(value)[:8000]
+    text = ''.join(' ' if unicodedata.category(c).startswith('C') else c for c in text)
+    text = re.sub(r'(?i)\b(?:secret|token|password|credential|api[-_ ]?key)\s*[:=]\s*\S+',
+                  '[redacted]', text)
+    text = re.sub(r'\b[A-Za-z0-9_-]{24,}\b', '[redacted]', text)
+    text = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://\S+|(?:~?/|[A-Za-z]:[\\/])\S+',
+                  '[path removed]', text)
+    text = re.sub(r'(?i)\bUTC\b|\+00:00|\d{2}:\d{2}(?::\d{2})?Z\b|\blocalhost\b',
+                  '[time or host removed]', text)
+    text = re.sub(r'[^A-Za-z0-9 ._:;,()=-]', ' ', text)
+    text = ' '.join(text.split())[:limit] or 'unavailable'
+    try:
+        notification_policy.validate_text(text)
+    except ValueError:
+        # Diagnostics must not disable observation by impersonating a message clause.
+        identifiers = re.findall(r'\b(?:L-spec-[0-9]{4}|test_[A-Za-z0-9_.:]+)\b', text)
+        text = ' '.join(identifiers)[:80] + ' diagnostic unavailable'
+    return text
 
 
-def cause(events):
-    """Name observed components, without copying arbitrary diagnostic payloads."""
-    ticks = [e for e in events if e.get('type') == 'tick']
-    labels = []
-    if ticks and (ticks[-1].get('autodispatch_pass_failed') is True or ticks[-1].get('autodispatch_error')):
-        labels.append('dispatch loop erroring')
-    latest_base = {}
-    for event in events:
-        kind = event.get('type', '')
-        text = ' '.join(str(event.get(k, '')) for k in ('reason', 'why', 'condition', 'error', 'reason_class')).lower()
-        if 'quota' in text or 'usage limit' in text or kind == 'quota-exhausted':
-            labels.append('seats paused for quota')
-        if 'chain_lock' in text or 'chain lock' in text or 'chain-lock' in text:
-            labels.append('chain_lock held')
-        if ('ledger' in text and 'lock' in text) or 'locktimeout' in text:
-            labels.append('ledger lock')
-        if kind in {'base-red', 'base-red-nightly', 'nightly-red', 'merge-frozen'}:
-            latest_base[event.get('project')] = event
-    if any(e.get('ids') or e.get('complete') is False or e.get('type') == 'merge-frozen' for e in latest_base.values()):
-        labels.append('base not releasable')
-    return '; '.join(dict.fromkeys(labels)) or 'merge routing or Executor stalled; no recent component diagnostic'
+def cause(state):
+    """Describe only the reader's observed status and ordered failures."""
+    status = _summary(state.status, 24)
+    parts = [f'Merge loop status: {status}.']
+    if state.status == 'undetermined':
+        parts.append('The cause cannot be confirmed.')
+    for failure in state.failures[:3]:
+        attempts = failure.attempts
+        attempts = str(attempts) if type(attempts) is int and attempts >= 0 else 'unknown'
+        parts.append(f'{_summary(failure.spec, 80)}: {_summary(failure.reason)}; attempts: {attempts}.')
+    if not state.failures:
+        parts.append('No failure reason is available.')
+    if len(state.failures) > 3:
+        parts.append(f'{len(state.failures) - 3} more failures.')
+    return ' '.join(parts)
 
 
-def evaluate(events, now, *, merges):
-    """Return one due alarm from explicit events, clock and landed merge times."""
+def evaluate(events, now, *, state, merges=None):
+    """Use queue truth for eligibility and landed times only for the clock."""
     now = stamp(now)
-    rows = sorted((e for e in events if stamp(e.get('ts')) is not None and stamp(e['ts']) <= now),
-                  key=lambda e: stamp(e['ts']))
-    ready = ready_specs(rows)
-    if not ready:
+    if not (state.queued or state.status == 'undetermined'):
         return None
-    landed = [stamp(t) for t in merges.values() if stamp(t) is not None and stamp(t) <= now]
-    landed += [stamp(e['ts']) for e in rows if e.get('type') == 'shipped' and
-               (e.get('project') in PROJECTS or e.get('subject') in ready)]
-    # Start a new observation interval when work first becomes ready.
-    since = max([min(ready.values()), *landed])
-    if now - since < WINDOW:
+    times = merges.values() if merges is not None else [state.last_merge]
+    landed = [t for value in times if (t := stamp(value)) is not None and t <= now]
+    since = max(landed) if landed else None
+    if since is not None and now - since < WINDOW:
         return None
-    prior = [stamp(e['ts']) for e in rows if e.get('type') == 'escalation-blocking'
-             and e.get('subject') == SUBJECT and e.get('kind') == KIND]
+    prior = [t for e in events if e.get('type') == 'escalation-blocking'
+             and e.get('subject') == SUBJECT and e.get('kind') == KIND
+             and (t := stamp(e.get('ts'))) is not None and t <= now]
     if prior and now - max(prior) < REPEAT:
         return None
-    recent = [e for e in rows if now - stamp(e['ts']) <= WINDOW]
-    component = cause(recent)
-    return dict(kind=KIND, owner='operator', since=since.isoformat(), ready=sorted(ready),
-                cause=component, why=f'No factory merge for 90 minutes with merge-ready specs: {component}',
-                default='Keep ready work queued; repair the named stopped component',
-                deadline=now.isoformat(), revert='Resume merging after the stopped component is repaired')
+    return dict(kind=KIND, owner='thinker', since=since.isoformat() if since else None,
+                cause=cause(state), why='Thinker investigation required for merge-loop inactivity.',
+                default='Thinker to investigate the merge loop and report findings.',
+                deadline=now.isoformat(), revert='Resume normal observation when merging recovers')
+
+
+def message(alarm, now):
+    what = ('No factory merge for at least 90 minutes.' if alarm['since'] else
+            'Factory merge timing is unknown; silence duration is unknown.')
+    return notification_policy.format_message(
+        '[DOWN]', what, alarm['cause'],
+        'No operator action is required. The Thinker owns investigation.', by=now)
 
 
 def probe_merges(root, *, runner=subprocess.run):
@@ -113,12 +119,7 @@ def run(events, now, root, *, dry_run=False, sender=None, merges=None):
     import dispatch
     root = Path(root)
     events = list(events)
-    if not any(e.get('type') in {'merge-gate-clean', 'queue-add', 'review'} for e in events):
-        return None
-    merges = probe_merges(root) if merges is None else merges
-    # A root with no watched repositories is not an installed factory.
-    if not merges:
-        return None
+    state = merge_loop_state.read(root=root, now=now)
     dst = root / 'events' / LEDGER
     # Include durable alarms even when a caller reused its pre-alarm snapshot.
     import json
@@ -135,7 +136,7 @@ def run(events, now, root, *, dry_run=False, sender=None, merges=None):
             continue
         if isinstance(event, dict):
             persisted.append(event)
-    alarm = evaluate(list(events) + persisted, now, merges=merges)
+    alarm = evaluate(list(events) + persisted, now, state=state, merges=merges)
     if alarm is None or dry_run:
         return alarm
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -143,14 +144,14 @@ def run(events, now, root, *, dry_run=False, sender=None, merges=None):
                             **alarm)
     if refusal:
         raise ValueError('merge dead-man escalation refused: ' + refusal)
-    # Record before sending: a sender failure or interrupted process cannot flood.
-    message = alarm['why'] + '; ready=' + ', '.join(alarm['ready'][:8])
+    # Record before attempting delivery; restarted callers consult this row.
     try:
-        if sender:
-            sender(message, root)
+        result = tg_say.deliver('merge-deadman', message(alarm, now), label='[DOWN]', root=root)
+        if isinstance(result, tg_say.Delivery) and result.state in {'sent', 'held', 'failed', 'refused'}:
+            alarm['delivery'] = dict(state=result.state, http=result.http)
         else:
-            subprocess.run([str(root / 'telegram/tg-send.sh'), message],
-                           capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        pass
+            alarm['delivery'] = dict(state='failed', http=None, error='invalid delivery result')
+    except Exception as exc:
+        # Transport diagnostics can contain private payloads; expose the error class only.
+        alarm['delivery'] = dict(state='failed', http=None, error=type(exc).__name__)
     return alarm
