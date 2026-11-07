@@ -1351,7 +1351,7 @@ def other_cards(c):
     """Every other spec's card. Same shape as sibling_bodies: a `build-done` need not
     carry a `card` — the pre-wrapper era wrote four that do not, and one of them
     crashed `doit packet builder`, the one dispatch a written spec cannot proceed
-    without. A card with no file on disk has nothing to leak."""
+    without. A card with no file on disk has nothing to leak. A bare test command is shared vocabulary."""
     out = []
     for sid, s in c.specs.items():
         if sid == c.a.subject:
@@ -1359,7 +1359,7 @@ def other_cards(c):
         e = next((x for x in reversed(s["evs"])
                   if x["type"] == "build-done" and pathlib.Path(x.get("card") or "/").is_file()), None)
         if e:
-            out += [(f"another builder's card ({sid})", l) for l in long_lines(pathlib.Path(e["card"]), 30)[:20]]
+            out += [(f"another builder's card ({sid})", l) for l in long_lines(pathlib.Path(e["card"]), 30)[:20] if not re.fullmatch(r"\S*python3?\s+\S+", l)]
     return out
 
 
