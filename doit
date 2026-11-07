@@ -9,6 +9,7 @@ case "${1:-board}" in
   precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
+  merge-news) shift; exec python3 "$SRC/merge_news.py" "$@" ;;
   tg-say) shift; exec python3 "$SRC/tg_say.py" "$@" ;;
   gh-bill) shift; exec python3 "$SRC/gh_bill.py" "$@" ;;
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;

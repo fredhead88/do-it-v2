@@ -803,6 +803,10 @@ EXPECTED_CRONS_ROWS.append({"name": "scratch-db-reaper", "where": "user",
 EXPECTED_CRONS_ROWS.append({"name": "worktree-reaper", "where": "user",
     "schedule": "*/5 * * * *", "command": "{doit} cron-run worktree-reaper -- {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1",
     "path": "{doit}", "sig": r"\bdoit reap-worktrees\b", "owner": "thinker", "project": "do-it-v2"})
+EXPECTED_CRONS_ROWS.append({"name": "merge-news", "where": "user",
+    "schedule": "*/1 * * * *",
+    "command": "DOIT_ROOT={root} {doit} cron-run merge-news -- {doit} merge-news flush >> {root}/logs/merge-news.log 2>&1",
+    "path": "{doit}", "sig": r"\bdoit merge-news flush\b", "owner": "thinker", "project": "do-it-v2"})
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
    f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")
