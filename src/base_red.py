@@ -443,24 +443,50 @@ def _rows(project):
 
 def _known_state(project):
     rows = sorted(_rows(project), key=lambda row: _time(row["ts"]))
-    nightlies = [r for r in rows if r.get("type") == "base-red-nightly" and r.get("complete") is True]
-    nightly = nightlies[-1] if nightlies else None
-    known = {}
-    if nightly:
-        known.update({i: {"sha": nightly["sha"], "source": "nightly", "since": nightly["ts"]}
-                      for i in nightly["ids"]})
+    snapshots = {}
+    for row in rows:
+        if row.get("complete") is not True:
+            continue
+        if row.get("type") == "base-red-nightly":
+            kinds, source = KINDS, "nightly"
+        elif (row.get("type") == "master-full-run" and row.get("suite") == "full"
+              and re.fullmatch(r"[a-f0-9]{40}", row["sha"])
+              and row.get("covered") == ["pg-parity", "pytest"]
+              and isinstance(row.get("green"), bool)
+              and row["green"] == (not row["ids"])
+              and isinstance(row.get("run_ids"), list) and row["run_ids"]
+              and all(isinstance(r, str) and r.isdigit() for r in row["run_ids"])
+              and all(id_kind(i) in {"pytest", "pg-parity"} for i in row["ids"])):
+            # _rows reads only the filename-authorized base-red ledger.
+            kinds, source = ("pytest", "pg-parity"), "master-full"
+        else:
+            continue
+        for kind in kinds:
+            snapshots[kind] = dict(row, source=source)
+    nightly = dict(max(snapshots.values(), key=lambda r: _time(r["ts"])),
+                   snapshots=snapshots) if snapshots else None
+    known = {i: {"sha": row["sha"], "source": row["source"], "since": row["ts"]}
+             for kind, row in snapshots.items() for i in row["ids"] if id_kind(i) == kind}
     for row in rows:
         if (row.get("type") == "base-red" and row.get("source") == "rerun"
-                and row.get("complete") is False
-                and (nightly is None or _time(row["ts"]) >= _time(nightly["ts"]))):
+                and row.get("complete") is False):
             known.update({i: {"sha": row["sha"], "source": "rerun", "since": row["ts"]}
-                          for i in row["ids"]})
+                          for i in row["ids"] if id_kind(i) not in snapshots
+                          or _time(row["ts"]) >= _time(snapshots[id_kind(i)]["ts"])})
     return known, nightly
 
 
 def known_red(project):
-    """Newest complete nightly plus subsequent base-attributed reruns."""
+    """Newest complete snapshot per kind plus subsequent positive reruns."""
     return _known_state(project)[0]
+
+
+def _kind_anchor(anchor, kind):
+    return anchor.get("snapshots", {}).get(kind) if anchor and "snapshots" in anchor else anchor
+
+
+def _fresh(anchor, current):
+    return anchor is not None and timedelta(0) <= current - _time(anchor["ts"]) < timedelta(hours=36)
 
 
 def _append(event, project, sha, *, complete, ids, subject=None, **fields):
@@ -510,19 +536,19 @@ def classify_selected(project, base_sha, ids, *, now=None):
                                        base, check=False).returncode == 0
             except Exception:
                 return False
-        if (anchor is None or not ancestral(anchor["sha"])
-                or not timedelta(0) <= current - _time(anchor["ts"]) < timedelta(hours=36)):
-            return result
+        anchors = {id_kind(n): _kind_anchor(anchor, id_kind(n)) for n in ids}
+        valid = {k: _fresh(a, current) and ancestral(a["sha"]) for k, a in anchors.items()}
         positives = set()
         for node, evidence in known.items():
             try:
-                if (_time(anchor["ts"]) <= _time(evidence["since"]) <= current
+                a = anchors.get(id_kind(node))
+                if (valid.get(id_kind(node)) and _time(a["ts"]) <= _time(evidence["since"]) <= current
                         and ancestral(evidence["sha"])):
                     positives.add(node)
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue
         return dict(known_red=[n for n in ids if n in positives],
-                    rerun_on_base=[n for n in ids if n not in positives], undetermined=False)
+                    rerun_on_base=[n for n in ids if n not in positives], undetermined=not all(valid.values()))
     except Exception:
         return result
 
@@ -631,12 +657,15 @@ def classify(project, base_sha, ids, *, known_red=False, now=None, refresh=False
     if known_red:
         recorded, nightly = _known_state(project)
         current = _time(now) if now is not None else datetime.now(timezone.utc)
+        recorded = {i: meta for i, meta in recorded.items()
+                    if _fresh(_kind_anchor(nightly, id_kind(i)), current)
+                    and _time(meta["since"]) <= current}
         if refresh:
             recorded = {i: meta for i, meta in recorded.items()
                         if meta["sha"] == base["sha"] and _time(meta["since"]) <= current}
         known.update(recorded)
         if not refresh:
-            fresh = nightly is not None and timedelta(0) <= current - _time(nightly["ts"]) < timedelta(hours=36)
+            fresh = all(_fresh(_kind_anchor(nightly, k), current) for k in needed) if needed else _fresh(nightly, current)
             complete = complete or fresh
         elif ids and set(ids) <= known:
             complete, undetermined = True, False

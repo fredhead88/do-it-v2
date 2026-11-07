@@ -808,6 +808,10 @@ EXPECTED_CRONS_ROWS.append({"name": "claude-autoswitch", "where": "user",
     "command": "DOIT_ROOT={root} {doit} cron-run claude-autoswitch -- /usr/bin/python3 {repo}/scripts/claude-autoswitch.py >/dev/null 2>&1",
     "path": "/usr/bin/python3", "sig": '^(?!\\s*#).*\\b(?:python3\\s+\\S*/claude-autoswitch\\.py(?=\\s|$)|cron-run\\s+claude-autoswitch\\s+--)',
     "owner": "thinker", "project": "do-it-v2"})
+EXPECTED_CRONS_ROWS.append({"name": "master-full", "where": "user", "schedule": "*/5 * * * *",
+    "command": "{doit} cron-run master-full -- /usr/bin/python3 {repo}/src/master_full.py albert-scott >> {root}/logs/master-full.log 2>&1",
+    "path": "/usr/bin/python3", "sig": r"master_full\.py\b", "owner": "thinker",
+    "project": "albert-scott", "max_runtime_s": 270})
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
    f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")

@@ -43,7 +43,7 @@ BASE_MANIFEST.write_bytes(subprocess.check_output(
 BASE_ROWS = crons.rows(str(BASE_MANIFEST))
 NAMES = {"claude-autoswitch", "worktree-reaper", "scratch-db-reaper", "doit-base-red-nightly", "tick", "look", "tmp-reaper", "lessons-digest", "backup-watch", "ledger-repack",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-json",
-         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"}
+         "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily", "master-full"}
 
 
 def _write_manifest(path, rows_):
@@ -86,7 +86,7 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == len(BASE_ROWS) + 15, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly + claude-autoswitch: {len(r1)} vs {len(BASE_ROWS)}")
+check(len(r1) == len(BASE_ROWS) + 16, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly + claude-autoswitch + master-full: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 repack = next(row for row in r1 if row["name"] == "ledger-repack")
 check(repack == {
@@ -117,7 +117,7 @@ for row in r1:
     if row["name"] in {"auto-deploy", "portal-latency-daily"}:
         check(row["where"] == "cron.d" and row["project"] == "albert-scott",
               f"AC1: {row['name']} is cron.d/albert-scott: {row}")
-    elif row["name"] in {"base-red-nightly", "base-red-nightly-collect"}:
+    elif row["name"] in {"base-red-nightly", "base-red-nightly-collect", "master-full"}:
         check(row["where"] == "user" and row["project"] == "albert-scott",
               f"AC1: base-red-nightly is user/albert-scott: {row}")
     else:
@@ -311,10 +311,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"claude-autoswitch", "scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
-      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample, stall-sample, pane-watchdog, executor-wake, spec-preflight, ledger-rollup, flow-health-daily and claude-autoswitch: {res5}")
+check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"claude-autoswitch", "master-full", "scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
+      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample, stall-sample, pane-watchdog, executor-wake, spec-preflight, ledger-rollup, flow-health-daily, claude-autoswitch and master-full: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 16, f"AC5: additions including claude-autoswitch and verify-owed retired: {res5}")
+check(len(res5) == len(base_missing) + 17, f"AC5: additions including claude-autoswitch, master-full and verify-owed retired: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "12,27,42,57 * * * *",
@@ -621,7 +621,7 @@ bw6 = next(r for r in rows6 if r["name"] == "backup-watch")
 check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {bw6['max_runtime_s']}")
 for r in rows6:
     if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "base-red-nightly-collect", "ledger-snapshot", "pace-sample", "stall-sample"}:
-        check(r["max_runtime_s"] == ({"spec-preflight": 3300, "flow-health-daily": 600, "doit-base-red-nightly": 7500,
+        check(r["max_runtime_s"] == ({"spec-preflight": 3300, "flow-health-daily": 600, "doit-base-red-nightly": 7500, "master-full": 270,
                                                 "tmp-reaper": 3600, "sweep-owed": 3600}.get(r["name"])),
               f"R14-AC6: {r['name']} exact runtime: {r['max_runtime_s']}")
 buf6 = io.StringIO()
