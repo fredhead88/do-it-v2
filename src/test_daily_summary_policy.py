@@ -172,17 +172,21 @@ class DailySummaryPolicyTests(unittest.TestCase):
 
     def test_maintenance_severity_cannot_authorize_a_phone_interrupt(self):
         import health_alarms
+        import tg_say
+        def health_sender(argv):
+            self.sender(argv)
+            return tg_say.Delivery('sent', 200)
         import window_gate
         # A critical maintenance reading is retained, but is not observed downtime.
         alarm=dict(alarm='disk-used',severity='immediate',reading={'used_fraction':.94},line='disk pressure')
         with patch.object(health_alarms,'evaluate',return_value=[alarm]),contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(health_alarms.run(now=NOW,probes={},sender=self.sender),0)
+            self.assertEqual(health_alarms.run(now=NOW,probes={},sender=health_sender),0)
         self.assertEqual(self.sent,[])
         self.assertTrue(any(e['type']=='health-alarm' for e in fold.read_events(use_cache=False)))
         # Positive production-down and money-loss observations preserve the urgent route.
         for reading in ({'production_down':True},{'money_loss':12.5}):
             with patch.object(health_alarms,'evaluate',return_value=[dict(alarm,alarm='release-failed',reading=reading)]),contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(health_alarms.run(now=NOW+timedelta(hours=len(self.sent)*25),probes={},sender=self.sender),0)
+                self.assertEqual(health_alarms.run(now=NOW+timedelta(hours=len(self.sent)*25),probes={},sender=health_sender),0)
         self.assertEqual(len(self.sent),2)
         with patch.object(window_gate,'ev') as emit,patch.object(window_gate.subprocess,'run') as send:
             window_gate.record_depth(dict(configured=2,depth=1,reason='disk-over-90',disk_pct=94,red_rate=0),[],{})

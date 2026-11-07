@@ -2,6 +2,8 @@
 """Health alarms, pure evaluation and bounded ledger/Telegram delivery."""
 import ledger_files
 import argparse
+import fcntl
+import tempfile
 import json
 import math
 import os
@@ -16,10 +18,11 @@ import backup
 import fold
 import notification_policy
 import scratch
+import tg_say
 
 LOCK_STALE_S = 4200
 ALARMS = ("mirror-stale", "release-failed", "deploy-lock-stale",
-          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals", "ledger-segment-invalid", "flow-health")
+          "sweeper-unobservable", "disk-low", "disk-used", "preflight-refusals", "ledger-segment-invalid", "flow-health", "memory-low")
 LEDGER_NAME = "L-health-local.jsonl"
 RELEASE_LOG = pathlib.Path("/var/log/albert-scott/daily-release.log")
 _PROC = object()
@@ -65,7 +68,40 @@ def disk_alarm(used_fraction):
                 reading=reading, line=f"disk used fraction={used_fraction}" if valid else "disk usage undetermined")
 
 
-def evaluate(events, now, *, probes):
+MEMORY_LIMIT = 3 * 1024**3
+
+
+def mem_available(text):
+    """Linux meminfo uses KiB despite its kB unit spelling."""
+    if not isinstance(text, str):
+        return None
+    rows = re.findall(r"^MemAvailable:\s+(\d+) kB\s*$", text, re.M)
+    return int(rows[0]) * 1024 if len(rows) == 1 else None
+
+
+def memory_observation(available, prior, now):
+    """Advance only elapsed time bracketed by valid low samples."""
+    valid = isinstance(available, int) and not isinstance(available, bool) and available >= 0
+    prior = _dict(prior)
+    def aware(value):
+        try:
+            instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return _time(instant) if instant.tzinfo is not None else None
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+    measured = aware(prior.get('measured_at'))
+    since = aware(prior.get('low_since'))
+    previous = prior.get('available_bytes')
+    continuous = (valid and available < MEMORY_LIMIT and isinstance(previous, int) and not isinstance(previous, bool)
+                  and 0 <= previous < MEMORY_LIMIT and measured is not None and since is not None
+                  and since <= measured <= now and prior.get('episode') == since.isoformat())
+    low_since = since if continuous else now if valid and available < MEMORY_LIMIT else None
+    return dict(measured_at=now.isoformat(), available_bytes=available if valid else None,
+                low_since=low_since.isoformat() if low_since else None,
+                episode=low_since.isoformat() if low_since else None)
+
+
+def evaluate(events, now, *, probes, observation_state=None):
     """Evaluate only supplied state; missing readings remain visible as summary alarms."""
     now = _time(now)
     p = _dict(probes)
@@ -78,6 +114,14 @@ def evaluate(events, now, *, probes):
             reading["undetermined"] = list(unknown)
         result.append(dict(alarm=name, severity="immediate" if immediate and not unknown else "summary",
                            reading=reading, line=_text(line)))
+
+    memory = memory_observation(p.get('memory_available_bytes'), _dict(observation_state).get('memory'), now)
+    if memory['available_bytes'] is None:
+        add('memory-low', dict(available_bytes=None), 'Available memory undetermined', unknown=('memory_available_bytes',))
+    elif memory['low_since'] is not None:
+        duration = (now - _time(memory['low_since'])).total_seconds()
+        add('memory-low', dict(memory, sampled_low_seconds=duration),
+            f"Available memory below 3 GiB across {int(duration//60)} minutes of low samples", duration >= 900)
 
     issues = p.get("ledger_segments", [])
     if issues:
@@ -262,7 +306,11 @@ def live_probes(now):
     except Exception:
         used_fraction = None
     issues = ledger_files.problems(fold.EVENTS) + ledger_files.verify_segments(fold.EVENTS, fold.ROOT / "state")
-    return dict(ledger_segments=issues, used_fraction=used_fraction, backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
+    try:
+        available = mem_available(pathlib.Path('/proc/meminfo').read_text())
+    except (OSError, UnicodeError, ValueError):
+        available = None
+    return dict(memory_available_bytes=available, ledger_segments=issues, used_fraction=used_fraction, backup=pushed, mirror_ahead_s=mirror_ahead(now), release_log_failed=failed,
                 locks=dict(deploy=dict(held=lock_held(fold.ROOT / "deploy.lock"), since=deploy_start),
                            release=dict(held=lock_held("/var/lock/albert-scott-daily-release.lock"), since=release_start)),
                 disk_free_gb=disk)
@@ -283,52 +331,130 @@ def _plan(alarm, events, now):
     prior = [e for e in _events(events, now, window) if e["type"] == "health-alarm" and e.get("alarm") == alarm["alarm"]]
     key = alarm["reading"].get("key", "ongoing")
     append = not any(e.get("severity") == alarm["severity"] and _dict(e.get("reading")).get("key", "ongoing") == key for e in prior)
-    send = alarm["severity"] == "immediate" and notification_policy.health_interrupt(alarm) and not any(e.get("telegram") == "sent" for e in prior)
+    send = alarm["severity"] == "immediate" and (notification_policy.health_interrupt(alarm) or
+           (alarm['alarm'] == 'memory-low' and _number(alarm['reading'].get('sampled_low_seconds'))
+            and alarm['reading']['sampled_low_seconds'] >= 900 and
+            isinstance(alarm['reading'].get('available_bytes'), int) and
+            not isinstance(alarm['reading']['available_bytes'], bool) and
+            0 <= alarm['reading']['available_bytes'] < MEMORY_LIMIT)) and not any(e.get("telegram") == "sent" for e in prior)
     failed = [e for e in prior if e.get("telegram") == "failed"]
     if failed and (now - max(_time(e["ts"]) for e in failed)).total_seconds() < 3600:
         send = False
     return append, send
 
 
+def message(alarm):
+    descriptions = {
+        'memory-low': ('Available memory is low.', 'Low available memory has persisted across at least 15 minutes of samples.'),
+        'release-failed': ('A release needs attention.', 'A failed release has confirmed service impact.'),
+        'ledger-segment-invalid': ('The event ledger needs attention.', 'Ledger checks found a confirmed operational impact.'),
+    }
+    what, real = descriptions.get(alarm['alarm'], ('A machine health check needs attention.',
+                                                'A health check found confirmed service impact or ongoing cost.'))
+    return notification_policy.format_message('[DOWN]', what, real,
+                'Inspect the local health report and restore the affected service.', None,
+                'Keeping diagnostic details in the local health ledger.')
+
+
+def _watchdog_state(path):
+    try:
+        state = json.loads(path.read_text())
+        if state.get('version') == 1 and isinstance(state.get('memory'), dict) and isinstance(state.get('deliveries'), dict):
+            return state
+    except (OSError, UnicodeError, ValueError, AttributeError):
+        pass
+    return dict(version=1, memory={}, deliveries={})
+
+
+def _write_watchdog(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix=path.name+'.', delete=False) as out:
+            tmp = pathlib.Path(out.name)
+            json.dump(state, out, allow_nan=False)
+            out.flush()
+            os.fsync(out.fileno())
+        tmp.replace(path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def _run_locked(now, probes, sender, dry_run):
+    events = _read_ledger()
+    path = fold.ROOT / 'state/health-watchdog.json'
+    state = _watchdog_state(path)
+    probes = live_probes(now) if probes is None else probes
+    alarms = evaluate(events, now, probes=probes, observation_state=state)
+    memory = memory_observation(_dict(probes).get('memory_available_bytes'), state['memory'], now)
+    deliveries = {}
+    plans = []
+    for alarm in alarms:
+        name = alarm['alarm']
+        prior = _dict(state['deliveries'].get(name))
+        episode = memory['episode'] if name == 'memory-low' else prior.get('episode') or now.isoformat()
+        if prior.get('episode') != episode:
+            prior = {}
+        record = dict(prior, episode=episode)
+        append, send = _plan(alarm, events, now)
+        attempted = _time(prior.get('attempted_at'))
+        if prior.get('disposition') == 'held':
+            send = False
+        if (prior.get('disposition') in ('failed', 'refused') and attempted is not None
+                and 0 <= (now-attempted).total_seconds() < 3600):
+            send = False
+        plans.append((alarm, append, send, record))
+        deliveries[name] = record
+    if dry_run:
+        print(json.dumps(dict(alarms=alarms, telegrams=[message(a) for a, _, send, _ in plans if send]), sort_keys=True))
+        return 0
+    for alarm, append, send, record in plans:
+        telegram = 'none'
+        if send:
+            try:
+                if sender is not None:
+                    # Compatibility only: production delivery always uses tg_say.
+                    result = sender([str(fold.ROOT / 'telegram/tg-send.sh'), message(alarm)])
+                else:
+                    result = tg_say.deliver('health-alarms', message(alarm), label='[DOWN]', root=fold.ROOT)
+                telegram = result.state if result.state in ('sent', 'held', 'failed', 'refused') else 'failed'
+                if telegram == 'sent' and result.http != 200:
+                    telegram = 'failed'
+            except Exception:
+                telegram = 'failed'
+            record.update(disposition=telegram, attempted_at=now.isoformat())
+        if append or send:
+            fields = dict(alarm, telegram=telegram, ts=now.isoformat())
+            if not append:
+                fields['retry'] = True
+            previous = os.environ.get('DOIT_LEDGER_FILE')
+            os.environ['DOIT_LEDGER_FILE'] = LEDGER_NAME
+            try:
+                fold.append(['health-alarm', 'health-' + alarm['alarm']] +
+                            [f'{k}:={json.dumps(v)}' for k, v in fields.items()], strict=True)
+            finally:
+                if previous is None:
+                    os.environ.pop('DOIT_LEDGER_FILE', None)
+                else:
+                    os.environ['DOIT_LEDGER_FILE'] = previous
+    _write_watchdog(path, dict(version=1, memory=memory, deliveries=deliveries))
+    print(f'HEALTH CHECK {now.isoformat()}: alarms={len(alarms)}')
+    return 0
+
+
 def run(*, now=None, probes=None, sender=None, dry_run=False):
     try:
         now = _time(now) if now is not None else datetime.now(timezone.utc)
-        events = _read_ledger()
-        alarms = evaluate(events, now, probes=live_probes(now) if probes is None else probes)
-        plans = [(alarm, *_plan(alarm, events, now)) for alarm in alarms]
-        message = lambda alarm: f"HEALTH {alarm['alarm']} {alarm['severity']}: {alarm['line']}"[:1000]
         if dry_run:
-            print(json.dumps(dict(alarms=alarms, telegrams=[message(a) for a, _, send in plans if send]), sort_keys=True))
-            return 0
-        for alarm, append, send in plans:
-            telegram = "none"
-            if send:
-                try:
-                    argv = [str(fold.ROOT / "telegram/tg-send.sh"), message(alarm)]
-                    result = sender(argv) if sender else subprocess.run(argv, capture_output=True, text=True,
-                        env={**os.environ, "TG_SENDER": "health-alarms"}, timeout=60)
-                    lines = (result.stdout or "").splitlines()
-                    telegram = "sent" if result.returncode == 0 and lines and lines[-1] == "200" else "failed"
-                except Exception:
-                    telegram = "failed"
-            if append or send:
-                fields = dict(alarm, telegram=telegram, ts=now.isoformat())
-                if not append:
-                    fields["retry"] = True
-                previous = os.environ.get("DOIT_LEDGER_FILE")
-                os.environ["DOIT_LEDGER_FILE"] = LEDGER_NAME
-                try:
-                    fold.append(["health-alarm", "health-" + alarm["alarm"]] +
-                                [f"{k}:={json.dumps(v)}" for k, v in fields.items()], strict=True)
-                finally:
-                    if previous is None:
-                        os.environ.pop("DOIT_LEDGER_FILE", None)
-                    else:
-                        os.environ["DOIT_LEDGER_FILE"] = previous
-        print(f"HEALTH CHECK {now.isoformat()}: alarms={len(alarms)}")
-        return 0
+            return _run_locked(now, probes, sender, True)
+        directory = fold.ROOT / 'state'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'health-watchdog.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return _run_locked(now, probes, sender, False)
     except (Exception, SystemExit) as exc:
-        print(f"health-alarms: {type(exc).__name__}: {_text(exc)}", file=sys.stderr)
+        print(f'health-alarms: {type(exc).__name__}: {_text(exc)}', file=sys.stderr)
         return 1
 
 

@@ -1019,61 +1019,132 @@ def heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
         return _heartbeat_missed(name, now, events, root=root, sender=sender, dst=dst)
 
 
-def _heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
-    """Observe cron starts/skips and dedupe once delivery succeeds.
+def _heartbeat_time(value):
+    try:
+        instant = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return instant.astimezone(timezone.utc) if instant.tzinfo is not None and instant.utcoffset() is not None else None
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
 
-    Alert identity uses last_start, and ordering uses measured_at. Emitted ts
-    belongs to the writer's clock and is deliberately never used here.
-    """
+
+def _heartbeat_status(last_start, first_missing, now, window=100):
+    if last_start is not None:
+        return "missed" if (now - last_start).total_seconds() > window * 60 else "healthy"
+    return "undetermined"
+
+
+def heartbeat_line(events, now):
+    """Render supplied heartbeat snapshots only; measurement time determines freshness."""
+    from zoneinfo import ZoneInfo
+    now = _heartbeat_time(now)
+    if now is None:
+        return "Look heartbeat undetermined: invalid observation clock."
+    rows = [e for e in events if isinstance(e, dict) and e.get("type") == "operator-alert"
+            and e.get("subject") == "look" and e.get("kind") == "heartbeat-observation"
+            and (stamp := _heartbeat_time(e.get("measured_at"))) is not None and stamp <= now
+            and e.get("status") in ("healthy", "missed", "undetermined")]
+    if rows:
+        measured = max(_heartbeat_time(e["measured_at"]) for e in rows)
+        newest = [e for e in rows if _heartbeat_time(e["measured_at"]) == measured]
+        signatures = {json.dumps([e.get('last_start'), e.get('first_missing_at'), e.get('status')], sort_keys=True) for e in newest}
+        if len(signatures) != 1:
+            return "Look heartbeat undetermined: conflicting observations."
+        row = newest[0]
+        last = _heartbeat_time(row.get("last_start"))
+        missing = _heartbeat_time(row.get("first_missing_at"))
+        if last is not None and last <= measured:
+            status = _heartbeat_status(last, None, now)
+            local = last.astimezone(ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%d %H:%M")
+            return f"Look heartbeat {status}: last start {local}, {int((now-last).total_seconds()//60)} minutes ago."
+        if row.get("last_start") is None and missing is not None and missing <= measured:
+            return f"Look heartbeat undetermined: evidence unavailable for {int((now-missing).total_seconds()//60)} minutes."
+        return "Look heartbeat undetermined: no usable observation."
+    legacy = [_heartbeat_time(e.get("last_start")) for e in events if isinstance(e, dict)
+              and e.get("type") == "operator-alert" and e.get("kind") == "heartbeat-missed" and e.get("subject") == "look"]
+    legacy = [t for t in legacy if t is not None and t <= now]
+    if legacy:
+        return f"Look heartbeat missed: last known start {int((now-max(legacy)).total_seconds()//60)} minutes ago; recovery unconfirmed."
+    return "Look heartbeat undetermined: no usable observation."
+
+
+def _heartbeat_missed(name, now, events, *, root=None, sender=None, dst=None):
+    """Persist observations separately from once-per-episode delivery dispositions."""
     import cron_run
+    import notification_policy
+    import tg_say
     root = pathlib.Path(root) if root is not None else fold.ROOT
     dst = pathlib.Path(dst) if dst is not None else root / "events" / LEDGER_NAME
-    # Half-hourly look gets ten minutes of slack; tick keeps its own cadence.
-    window = 3 * int(os.environ.get("DOIT_TICK_MIN", "5")) if name == "tick" else 40
-    try:
-        rows = _read_cron_store(cron_run.store_path(name, root)) or []
-        starts = [(datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")), r["ts"])
-                  for r in rows if isinstance(r, dict) and r.get("ev") == "start"]
-        newest, last_start = max(starts, key=lambda item: item[0], default=(None, "none"))
-        missed = newest is None or (now - newest).total_seconds() > window * 60
-    except (KeyError, TypeError, ValueError, UnicodeError):
-        newest, last_start, missed = None, "none", True
-    # Skip evidence is independent: a broken skip store must never invalidate
-    # a healthy start, and skips never enter the run/overrun reader's ring.
-    try:
-        rows = _read_cron_store(cron_run.skip_store_path(name, root)) or []
-        skips = [(datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")), r["ts"])
-                 for r in rows if isinstance(r, dict) and r.get("ev") == "skip"]
-        skip_newest, skip_ts = max(skips, key=lambda item: item[0], default=(None, "none"))
-        if skip_newest is not None and (newest is None or skip_newest > newest):
-            skip_missed = (now - skip_newest).total_seconds() > window * 60
-            newest, last_start, missed = skip_newest, skip_ts, skip_missed
-    except (KeyError, TypeError, ValueError, UnicodeError):
-        pass
-    if not missed or _DRY_RUN:
+    window = 3 * int(os.environ.get("DOIT_TICK_MIN", "5")) if name == "tick" else 100
+    candidates = []
+    for path, kind in ((cron_run.store_path(name, root), "start"), (cron_run.skip_store_path(name, root), "skip")):
+        try:
+            rows = _read_cron_store(path) or []
+            candidates.extend(t for r in rows if isinstance(r, dict) and r.get("ev") == kind
+                              and (t := _heartbeat_time(r.get("ts"))) is not None and t <= now)
+        except (ValueError, UnicodeError, TypeError):
+            pass
+    newest = max(candidates, default=None)
+    local_rows = _read_jsonl(dst)
+    history = [e for e in [*events, *local_rows] if isinstance(e, dict)
+               and e.get("type") == "operator-alert" and e.get("subject") == name]
+    observations = [e for e in history if e.get("kind") == "heartbeat-observation"
+                    and _heartbeat_time(e.get("measured_at")) is not None]
+    # The serialized writer's last committed observation records a clock reset.
+    # A pre-reset future measurement must not reset absence on every later run.
+    local_observations = [e for e in local_rows if e.get('type') == 'operator-alert'
+                          and e.get('subject') == name and e.get('kind') == 'heartbeat-observation'
+                          and _heartbeat_time(e.get('measured_at')) is not None]
+    previous = local_observations[-1] if local_observations else max(
+        observations, key=lambda e: _heartbeat_time(e['measured_at']), default={})
+    first_missing = None
+    if newest is None:
+        first_missing = _heartbeat_time(previous.get("first_missing_at"))
+        if (first_missing is None or first_missing > now or
+                _heartbeat_time(previous.get("measured_at")) > now):
+            first_missing = now
+    status = _heartbeat_status(newest, first_missing, now, window)
+    missed = status != "healthy"
+    if _DRY_RUN:
         return missed
-    alerts = [e for e in [*events, *_read_jsonl(dst)]
-              if e.get("type") == "operator-alert" and e.get("kind") == "heartbeat-missed"
-              and e.get("subject") == name]
-    latest = max(alerts, key=lambda e: datetime.fromisoformat(e["measured_at"]), default=None)
-    if latest and latest["last_start"] != "none":
-        previous = datetime.fromisoformat(latest["last_start"].replace("Z", "+00:00"))
-        if newest is None or newest <= previous:
-            last_start = latest["last_start"]
-    same = [e for e in alerts if e.get("last_start") == last_start]
-    if any(e.get("sent") == "yes" for e in same):
+    snapshot = dict(subject=name, kind="heartbeat-observation", sent="no", status=status,
+                    detail=f"{name} heartbeat {status}", last_start=newest.isoformat() if newest else None,
+                    first_missing_at=first_missing.isoformat() if first_missing else None,
+                    measured_at=now.isoformat())
+    _append_watchdog(root, dst, "operator-alert", **snapshot)
+    age = (now - (newest or first_missing)).total_seconds()
+    if not missed or (name != "tick" and age <= 180 * 60):
+        return missed
+    alerts = [e for e in history if e.get("kind") == "heartbeat-missed"
+              and _heartbeat_time(e.get('last_start') or e.get('first_missing_at')) == (newest or first_missing)]
+    if any(e.get("sent") == "yes" or e.get("delivery") in ("held", "sent") for e in alerts):
         return True
-    detail = f"{name} heartbeat missed: no cron start within {window} minutes; last_start={last_start}"
+    attempted = [_heartbeat_time(e.get("attempted_at") or e.get("measured_at")) for e in alerts
+                 if e.get("delivery") != "none"]
+    attempted = [t for t in attempted if t is not None]
+    if attempted and 0 <= (now - max(attempted)).total_seconds() < 3600:
+        return True
+    real = (f"No new heartbeat for {int(age//60)} minutes." if newest else
+            f"Heartbeat evidence has been unavailable for {int(age//60)} minutes.")
+    text = notification_policy.format_message("[DOWN]", f"{name.capitalize()} heartbeat needs attention.", real,
+                "Check the scheduled job and restore heartbeat reporting.", None,
+                "Watching for a newer start or lock skip.")
     error = None
     try:
-        sent = "yes" if (sender(detail) if sender is not None else _send_operator(detail, root)) == 0 else "no"
+        result = sender(text) if sender is not None else tg_say.deliver("look", text, label="[DOWN]", root=root)
+        if isinstance(result, int) and not isinstance(result, bool) and sender is not None:
+            delivery = "sent" if result == 0 else "failed"
+        else:
+            delivery = result.state if result.state in ("sent", "held", "failed", "refused") else "failed"
+            if delivery == "sent" and result.http != 200:
+                delivery = "failed"
     except Exception as exc:
-        sent, error = "no", exc
-    if sent == "yes" or not same:
-        _append_watchdog(root, dst, "operator-alert", subject=name, kind="heartbeat-missed",
-                         sent=sent, detail=detail, last_start=last_start,
-                         measured_at=now.isoformat(timespec="seconds"),
-                         **({"sender_error": str(error)} if error else {}))
+        delivery, error = "failed", exc
+    _append_watchdog(root, dst, "operator-alert", subject=name, kind="heartbeat-missed",
+                     sent="yes" if delivery == "sent" else "no", delivery=delivery, detail=text,
+                     last_start=newest.isoformat() if newest else None,
+                     first_missing_at=first_missing.isoformat() if first_missing else None,
+                     measured_at=now.isoformat(), attempted_at=now.isoformat(),
+                     **({"sender_error": str(error)} if error else {}))
     if error is not None:
         raise error
     return True

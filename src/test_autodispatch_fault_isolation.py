@@ -337,6 +337,8 @@ class RepeatFailureAlarmTests(Scratch):
         config = self.root / 'look.toml'
         config.write_text('ci = []\n[push]\nprojects = ["fixture"]\n')
         with patch.object(look.look_wallclock, 'run', return_value=dict(briefs=[], events=[])), \
+             patch('tg_say.deliver', return_value=__import__('tg_say').Delivery('sent', 200)), \
+             patch('tg_say._transport', side_effect=AssertionError('real transport forbidden')), \
              patch.object(look, '_send_operator', return_value=0), \
              patch.object(fold, 'NOW', now):
             return look.run(self.read() if rows is None else rows, now=now,

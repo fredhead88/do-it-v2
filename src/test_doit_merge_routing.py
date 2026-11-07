@@ -54,7 +54,7 @@ class MergeRoutingTests(unittest.TestCase):
         self.assertEqual(watch.due([queued(age=120)], [], NOW), [])
         with tempfile.TemporaryDirectory(prefix='queue-no-step-') as tmp:
             root = Path(tmp)
-            with patch('look._send_operator', side_effect=AssertionError('no notification expected')):
+            with patch('tg_say.deliver', side_effect=AssertionError('no notification expected')), patch('tg_say._transport', side_effect=AssertionError('real transport forbidden')), patch('look._send_operator', side_effect=AssertionError('no notification expected')):
                 self.assertEqual(len(watch.check(events, {}, NOW, root, steps=[])), 1)
                 self.assertEqual(watch.check(events, {}, NOW, root, steps=[]), [])
             rows = [json.loads(line) for line in (root / 'events/L-look-local.jsonl').read_text().splitlines()]

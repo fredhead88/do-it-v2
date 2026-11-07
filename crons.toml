@@ -36,7 +36,7 @@ project = "do-it-v2"
 [[row]]
 name = "look"
 where = "user"
-schedule = "3,33 * * * *"
+schedule = "33 * * * *"
 command = "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1"
 path = "{doit}"
 sig = '\bdoit look\b'

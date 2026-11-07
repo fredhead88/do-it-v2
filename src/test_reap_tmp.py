@@ -690,7 +690,7 @@ EXPECTED_CRONS_ROWS = [
     {"name": "tick", "where": "user", "schedule": "*/{tick_min} * * * *",
      "command": "DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick >> {root}/logs/tick.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit tick\b", "owner": "thinker", "project": "do-it-v2"},
-    {"name": "look", "where": "user", "schedule": "3,33 * * * *",
+    {"name": "look", "where": "user", "schedule": "33 * * * *",
      "command": "{doit} cron-run look -- {doit} look >> {root}/logs/look.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit look\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "tmp-reaper", "where": "user", "schedule": "*/15 * * * *",

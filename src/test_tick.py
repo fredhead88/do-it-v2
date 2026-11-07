@@ -247,6 +247,20 @@ class LauncherTests(unittest.TestCase):
 
 import look as _watchdog_look
 _watchdog_look._send_operator = lambda text, root: 0
+import tg_say
+# No fixture is allowed to reach a real Telegram transport.
+tg_say.deliver = lambda *a, **kw: tg_say.Delivery('sent', 200)
+tg_say._transport = lambda *a, **kw: (_ for _ in ()).throw(AssertionError('real transport forbidden'))
+
+# Subprocess CLI fixtures inherit the same fail-closed transport boundary.
+_transport_hooks = TMP / 'transport-hooks'
+_transport_hooks.mkdir(exist_ok=True)
+(_transport_hooks / 'sitecustomize.py').write_text("""import tg_say
+tg_say.deliver = lambda *a, **kw: tg_say.Delivery('sent', 200)
+tg_say._transport = lambda *a, **kw: (_ for _ in ()).throw(AssertionError('real transport forbidden'))
+""")
+os.environ['PYTHONPATH'] = str(_transport_hooks) + os.pathsep + str(pathlib.Path(__file__).resolve().parent)
+os.environ['HOME'] = str(TMP / 'home')
 _real_heartbeat_missed = _watchdog_look.heartbeat_missed
 # Historical fixtures count every tick-ledger line; keep their cron healthy.
 _watchdog_look.heartbeat_missed = lambda *args, **kw: False
@@ -1945,7 +1959,8 @@ proc = _sp.run([DOIT_BIN, "wait", "--max", "0.2"], capture_output=True, text=Tru
 assert proc.returncode == 0, f"0187-AC5: exit 0: {proc.returncode} {proc.stderr}"
 assert proc.stdout.strip() == "interval", f"0187-AC5: prints 'interval': {proc.stdout!r}"
 tickfile5 = r5 / "events" / "L-tick-local.jsonl"
-assert tickfile5.exists() and len(tickfile5.read_text().splitlines()) == 1, \
+assert tickfile5.exists() and len([json.loads(line) for line in tickfile5.read_text().splitlines()
+                                if json.loads(line).get('type') == 'tick']) == 1, \
     f"0187-AC5: L-tick-local.jsonl gains exactly one line: {tickfile5}"
 
 print("tick: 0187 R3 checks pass")
@@ -2379,17 +2394,18 @@ finally:
 assert fakelook17b.calls == [], "AC17: within 40 minutes, no look-stale brief"
 fold.EVENTS = saved_events
 
-# L-spec-1960 AC3/AC5: healthy half-hourly passes and the exact safety margin.
+# The legacy look-stale brief retains its 40-minute policy. The hourly
+# heartbeat observation/page policy is exercised through the real path in AC10.
 import crons as _manifest_crons1960
 import inspect as _inspect1960
 look_period1960 = _manifest_crons1960.interval_s(next(
     row['schedule'] for row in _manifest_crons1960.rows() if row['name'] == 'look'))
-margin_message1960 = "1960 AC5: threshold must exceed the look row's period plus one tick"
+margin_message1960 = "legacy look-stale policy is unchanged; look now runs hourly"
 threshold1960 = int(re.search(r'total_seconds\(\) > (\d+) \* 60',
                               _inspect1960.getsource(tick._record)).group(1)) * 60
-assert threshold1960 == 40 * 60 and threshold1960 - look_period1960 >= 600, margin_message1960
+assert threshold1960 == 40 * 60 and look_period1960 == 3600, margin_message1960
 for age1960, expected1960 in ((31 * 60, []), (40 * 60, []), (None, [("look-stale", "look-stale", "thinker")]),
-                              (look_period1960 + 300, [])):
+                              (look_period1960 + 300, [("look-stale", "look-stale", "thinker")])):
     fold.EVENTS = _isolated_events()
     state1960 = {} if age1960 is None else {"last_pass": (
         fold.NOW - datetime.timedelta(seconds=age1960)).isoformat()}
@@ -2949,46 +2965,53 @@ def _watchdog_start(root, when):
 
 
 for outcome in (0, 1, "raise"):
-    root = pathlib.Path(tempfile.mkdtemp())
-    calls = []
-    def _watchdog_send(text, root):
-        calls.append(text)
-        if outcome == "raise":
-            raise RuntimeError("watchdog sender exploded")
-        return outcome
-    with patch.object(fold, "ROOT", root), patch.object(fold, "EVENTS", root / "events"), \
-         patch.object(fold, "NOW", _wnow), patch.object(_watchdog_look, "_send_operator", side_effect=_watchdog_send):
-        _watchdog_start(root, _wnow - datetime.timedelta(minutes=39))
-        assert tick._record() is not None
-        assert not calls, "watchdog: 39-minute heartbeat gap stays healthy"
-        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=2)):
-            assert tick._record() is not None
-            assert tick._record() is not None
-        if outcome == "raise":
+    with tempfile.TemporaryDirectory(prefix='tick-heartbeat-') as directory:
+        root = pathlib.Path(directory)
+        calls = []
+        def _watchdog_send(sender, text, *, label, root):
+            assert sender == 'look' and label == '[DOWN]'
+            calls.append(text)
+            if outcome == 'raise':
+                raise RuntimeError('watchdog sender exploded')
+            return tg_say.Delivery('sent', 200) if outcome == 0 else tg_say.Delivery('failed')
+        with patch.dict(os.environ, DOIT_ROOT=str(root), HOME=str(root)), \
+             patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', root / 'events'), \
+             patch.object(fold, 'NOW', _wnow), patch.object(tg_say, 'deliver', side_effect=_watchdog_send):
+            _watchdog_start(root, _wnow - datetime.timedelta(minutes=39))
+            for minutes in (0, 2, 62, 141):
+                with patch.object(fold, 'NOW', _wnow + datetime.timedelta(minutes=minutes)):
+                    assert tick._record() is not None
+            assert not calls, '41-minute gap and misses through 180 minutes never page'
+            at = _wnow + datetime.timedelta(minutes=142)
+            with patch.object(fold, 'NOW', at):
+                assert tick._record() is not None
+                assert tick._record() is not None
+            assert len(calls) == 1, 'summary-only miss never suppresses later page'
+            with patch.object(fold, 'NOW', at + datetime.timedelta(minutes=59)):
+                assert tick._record() is not None
+            assert len(calls) == 1, 'failed sends wait an hour'
+            with patch.object(fold, 'NOW', at + datetime.timedelta(hours=1)), \
+                 patch.object(tg_say, 'deliver', return_value=tg_say.Delivery('sent', 200)):
+                assert tick._record() is not None
             raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
-            assert "watchdog sender exploded" in [e for e in raw if e["type"] == "tick"][-1]["look_error"]
-        with patch.object(_watchdog_look, "_send_operator", return_value=0):
-            with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=2)):
+            alerts = [e for e in raw if e.get('kind') == 'heartbeat-missed']
+            assert [e['sent'] for e in alerts] == (['yes'] if outcome == 0 else ['no', 'yes'])
+            assert all(e['subject'] == 'look' and 'actor' not in e for e in alerts)
+            child = subprocess.run([sys.executable, '-c',
+                "import fold,json; print(json.dumps([e for e in fold.read_events() if e.get('kind')=='heartbeat-missed']))"],
+                capture_output=True, text=True, check=True, env={**os.environ, 'DOIT_PROJECT': '',
+                    'PYTHONPATH': str(pathlib.Path(__file__).resolve().parent)})
+            from_disk = json.loads(child.stdout)
+            assert [e['sent'] for e in from_disk] == [e['sent'] for e in alerts]
+            recovered = at + datetime.timedelta(hours=2)
+            _watchdog_start(root, recovered)
+            with patch.object(fold, 'NOW', recovered):
                 assert tick._record() is not None
+            with patch.object(fold, 'NOW', recovered + datetime.timedelta(minutes=181)), \
+                 patch.object(tg_say, 'deliver', return_value=tg_say.Delivery('sent', 200)):
                 assert tick._record() is not None
-        raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
-        alerts = [e for e in raw if e["type"] == "operator-alert"]
-        assert [e["sent"] for e in alerts] == (["yes"] if outcome == 0 else ["no", "yes"]), alerts
-        assert all(e["subject"] == "look" and e["kind"] == "heartbeat-missed" and "actor" not in e for e in alerts)
-        assert alerts[0]["last_start"] == (_wnow - datetime.timedelta(minutes=39)).isoformat(timespec="seconds")
-        assert alerts[0]["measured_at"] == (_wnow + datetime.timedelta(minutes=2)).isoformat(timespec="seconds")
-        child = subprocess.run([sys.executable, "-c",
-            "import fold,json; print(json.dumps([e for e in fold.read_events() if e['type']=='operator-alert']))"],
-            capture_output=True, text=True, check=True, env={**os.environ, "DOIT_ROOT": str(root), "DOIT_PROJECT": "",
-                "PYTHONPATH": str(pathlib.Path(__file__).resolve().parent)})
-        from_disk = json.loads(child.stdout)
-        assert len(from_disk) == len(alerts) and all(e["actor"] == "tick" for e in from_disk), from_disk
-        _watchdog_start(root, _wnow + datetime.timedelta(minutes=3))
-        with patch.object(fold, "NOW", _wnow + datetime.timedelta(minutes=44)), \
-             patch.object(_watchdog_look, "_send_operator", return_value=0):
-            assert tick._record() is not None
-        raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
-        assert len([e for e in raw if e.get("sent") == "yes"]) == 2, "watchdog: second outage sends again"
+            raw = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+            assert len([e for e in raw if e.get('kind') == 'heartbeat-missed' and e.get('sent') == 'yes']) == 2
 print("watchdog AC10 ok")
 
 import hashlib
