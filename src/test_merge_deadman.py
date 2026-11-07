@@ -282,6 +282,7 @@ class DeadmanTests(unittest.TestCase):
              patch.object(merge_loop_state, 'read', return_value=state('rejecting')), \
              patch.object(dispatch, 'now', return_value=NOW.isoformat()), \
              patch.object(tg_say, 'deliver', return_value=tg_say.Delivery('sent', 200)) as send, \
+             patch('tg_say._transport', side_effect=AssertionError('real transport forbidden')), \
              patch.object(look, '_send_operator', side_effect=AssertionError('legacy send')):
             test = self
             class Runner:

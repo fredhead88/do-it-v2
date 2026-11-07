@@ -19,6 +19,7 @@ os.environ["DOIT_ROOT"] = str(pathlib.Path(_ISO.name) / "root")
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold
 import health_alarms as health
+import tg_say
 
 NOW = datetime(2026, 10, 18, 12, tzinfo=timezone.utc)
 DOIT = pathlib.Path(__file__).resolve().parent.parent / "doit"
@@ -29,7 +30,7 @@ def event(kind, age=0, **fields):
 
 
 def healthy():
-    return dict(used_fraction=0.5, backup=dict(ts=NOW.isoformat(), age_s=0, ok=True), mirror_ahead_s=0,
+    return dict(memory_available_bytes=8 * 1024**3, used_fraction=0.5, backup=dict(ts=NOW.isoformat(), age_s=0, ok=True), mirror_ahead_s=0,
                 release_log_failed=[], locks={k: dict(held=False, since=None)
                                               for k in ("deploy", "release")},
                 disk_free_gb={"/": 100, "scratch": 100})
@@ -204,7 +205,7 @@ class HealthTests(unittest.TestCase):
             with patch.object(pathlib.Path, "read_text", side_effect=PermissionError):
                 self.assertEqual(health.release_log(log, NOW), (None, None))
                 self.assertIsNone(health.lock_held(lock))
-        source = pathlib.Path(health.__file__).read_text()
+        source = __import__("inspect").getsource(health.lock_held)
         self.assertNotRegex(source, r"fcntl\.(flock|lockf)|LOCK_EX|st_mtime")
         # Every external of the assembled probe is stubbed.
         with patch.object(health.backup, "last_push", return_value=healthy()["backup"]), \
@@ -251,10 +252,15 @@ class RunTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.calls = []
+        for stub in (patch.object(tg_say, 'deliver', return_value=tg_say.Delivery('sent', 200)),
+                     patch.object(tg_say, '_transport', side_effect=AssertionError('real transport forbidden'))):
+            stub.start()
+            self.addCleanup(stub.stop)
+
 
     def send(self, argv):
         self.calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "200\n", "")
+        return tg_say.Delivery('sent', 200)
 
     def run_alarm(self, probes, minutes=0, sender=None, **kwargs):
         return health.run(now=NOW + timedelta(minutes=minutes), probes=probes,
@@ -309,7 +315,7 @@ class RunTests(unittest.TestCase):
         for minutes, count in ((0, 1), (10, 1), (361, 2)):
             self.assertEqual(self.run_alarm(p, minutes), 0)
             self.assertEqual(len(self.calls), count)
-        self.assertTrue(self.calls[0][1].startswith("HEALTH deploy-lock-stale"))
+        self.assertTrue(self.calls[0][1].startswith("[DOWN]"))
         self.assertLessEqual(len(self.calls[0][1]), 1000)
         self.assertEqual(self.calls[0][0], str(self.root / "telegram/tg-send.sh"))
         p = healthy()
@@ -317,7 +323,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.run_alarm(p), 0)
         self.assertEqual(len(self.calls), 2)
         p["disk_free_gb"]["/"] = 4
-        failed = lambda argv: subprocess.CompletedProcess(argv, 1, "200\n", "")
+        failed = lambda argv: tg_say.Delivery('failed', 200)
         self.assertEqual(self.run_alarm(p, sender=failed), 0)
         self.assertEqual([r for r in self.rows() if r["alarm"] == "disk-low" and r["severity"] == "immediate"][-1]["telegram"], "failed")
         self.assertEqual(self.run_alarm(p, 30), 0)
@@ -343,15 +349,16 @@ class RunTests(unittest.TestCase):
         p = healthy()
         p["disk_free_gb"]["/"] = 4
         for minutes, stdout in ((0, "429\n"), (61, ""), (122, "200\n500\n")):
-            sender = lambda argv: subprocess.CompletedProcess(argv, 0, stdout, "")
+            sender = lambda argv: tg_say.Delivery('sent', int(stdout.splitlines()[-1]) if stdout else None)
             self.assertEqual(self.run_alarm(p, minutes, sender=sender), 0)
         def broken(argv):
             raise OSError("sender unavailable")
         self.assertEqual(self.run_alarm(p, 183, sender=broken), 0)
         self.assertTrue(all(r["telegram"] == "failed" for r in self.rows()))
-        with patch.object(health.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "200\n", "")) as send:
+        with patch('tg_say.deliver', return_value=__import__('tg_say').Delivery('sent', 200)) as send:
             self.assertEqual(health.run(now=NOW + timedelta(minutes=244), probes=p), 0)
-            self.assertEqual(send.call_args.kwargs["env"]["TG_SENDER"], "health-alarms")
+            self.assertEqual(send.call_args.args[0], "health-alarms")
+            self.assertEqual(send.call_args.kwargs["root"], self.root)
 
     def test_ac11(self):
         import crons
@@ -419,7 +426,7 @@ subprocess.run = run
         calls = []
         def sender(argv):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "200\n", "")
+            return tg_say.Delivery('sent', 200)
         table = []
         for minutes, count in ((0, 1), (360, 1), (720, 1), (1439, 1), (1441, 2)):
             self.assertEqual(health.run(now=NOW + timedelta(minutes=minutes), probes=p, sender=sender), 0)
@@ -439,6 +446,97 @@ subprocess.run = run
         body = json.dumps(dict(disk_used=table, disk_low="again at 361 minutes", release_failed="86400 seconds"))
         print(json.dumps(dict(url="cli://health/AC9", status=0, body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
         print("L1496-AC9 ok")
+
+
+class WatchdogQuietTests(unittest.TestCase):
+    def setUp(self):
+        RunTests.setUp(self)
+        import tg_say
+        self.outcome = tg_say.Delivery('sent', 200)
+        self.delivery_calls = []
+        def deliver(sender, text, *, label, root):
+            import notification_policy
+            notification_policy.validate_message(text, label)
+            self.assertEqual((sender, label, root), ('health-alarms', '[DOWN]', self.root))
+            self.delivery_calls.append(text)
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            return self.outcome
+        for stub in (patch.object(tg_say, 'deliver', side_effect=deliver),
+                     patch.object(tg_say, '_transport', side_effect=AssertionError('real transport forbidden'))):
+            stub.start()
+            self.addCleanup(stub.stop)
+
+    def test_ac3(self):
+        from test_look_heartbeat import receipt
+        self.assertEqual(health.mem_available('MemAvailable: 3145728 kB\n'), 3 * 1024**3)
+        for text in ('', 'MemAvailable: -1 kB', 'MemAvailable: NaN kB', 'MemAvailable: 2 GB'):
+            self.assertIsNone(health.mem_available(text))
+        p = dict(healthy(), memory_available_bytes=2 * 1024**3, swap_used_bytes=99 * 1024**3)
+        state = {}
+        for seconds, severity in ((0, 'summary'), (899, 'summary'), (900, 'immediate')):
+            clock = NOW + timedelta(seconds=seconds)
+            rows = health.evaluate([], clock, probes=p, observation_state=state)
+            self.assertEqual(next(a for a in rows if a['alarm'] == 'memory-low')['severity'], severity)
+            state = dict(memory=health.memory_observation(p['memory_available_bytes'], state.get('memory'), clock))
+        for value in (None, -1, float('nan'), float('inf'), 3 * 1024**3, True):
+            reading = health.memory_observation(value, state['memory'], NOW + timedelta(hours=1))
+            self.assertIsNone(reading['low_since'])
+        # A reversed clock cannot retain the old low interval.
+        self.assertEqual(health.memory_observation(1, state['memory'], NOW - timedelta(seconds=1))['low_since'], (NOW - timedelta(seconds=1)).isoformat())
+        self.assertFalse(any(a['alarm'] == 'memory-low' for a in health.evaluate([], NOW, probes=healthy())))
+        receipt('AC3', dict(boundaries='0,14:59,15:00', units='GiB', invalid_resets=True))
+
+    def test_ac4(self):
+        from test_look_heartbeat import receipt
+        import tg_say
+        for name in ('release-failed', 'ledger-segment-invalid'):
+            alarm = dict(alarm=name, severity='immediate', reading=dict(production_down=True),
+                         line='/private/log at 2026-01-01T10:00:00Z raw diagnostic')
+            text = health.message(alarm)
+            self.assertNotIn('/private', text)
+            self.assertNotIn('10:00', text)
+            with patch.object(health, 'evaluate', return_value=[alarm]):
+                self.assertEqual(health.run(now=NOW, probes=healthy()), 0)
+        self.assertEqual(len(self.delivery_calls), 2)
+        for i, outcome in enumerate((tg_say.Delivery('held'), tg_say.Delivery('failed'),
+                                     tg_say.Delivery('refused'), tg_say.Delivery('sent', 500), RuntimeError('fixture'))):
+            p = dict(healthy(), memory_available_bytes=1)
+            at = NOW + timedelta(days=2+i)
+            self.assertEqual(health.run(now=at, probes=p), 0)
+            self.outcome = outcome
+            self.assertEqual(health.run(now=at+timedelta(minutes=15), probes=p), 0)
+            count = len(self.delivery_calls)
+            self.assertEqual(health.run(now=at+timedelta(minutes=74), probes=p), 0)
+            self.assertEqual(len(self.delivery_calls), count)
+            self.outcome = tg_say.Delivery('sent', 200)
+            self.assertEqual(health.run(now=at+timedelta(minutes=75), probes=p), 0)
+            self.assertEqual(len(self.delivery_calls), count + (outcome != tg_say.Delivery('held')))
+            health.run(now=at+timedelta(hours=2), probes=healthy())
+        receipt('AC4-health', dict(diagnostic_normalization=True, dispositions=5))
+
+    def test_ac6(self):
+        from test_look_heartbeat import receipt
+        import tg_say
+        p = dict(healthy(), memory_available_bytes=1)
+        self.assertEqual(health.run(now=NOW, probes=p), 0)
+        env = dict(os.environ, PYTHONPATH=str(DOIT.parent / 'src'))
+        code = "import health_alarms as h,tg_say; from datetime import datetime; calls=[]; tg_say.deliver=lambda *a,**k: calls.append(a) or tg_say.Delivery('refused'); assert h.run(now=datetime.fromisoformat(%r),probes=%r)==0; assert not calls" % ((NOW+timedelta(minutes=14)).isoformat(), p)
+        subprocess.check_call([sys.executable, '-c', code], env=env)
+        self.outcome = tg_say.Delivery('held')
+        self.assertEqual(health.run(now=NOW+timedelta(minutes=15), probes=p), 0)
+        code = "import fold,json; from pathlib import Path; print(json.dumps(dict(events=fold.read_events(),state=json.loads((fold.ROOT/'state/health-watchdog.json').read_text()))))"
+        env = dict(os.environ, PYTHONPATH=str(DOIT.parent / 'src'))
+        data = json.loads(subprocess.check_output([sys.executable, '-c', code], env=env, text=True))
+        self.assertEqual(data['state']['memory']['low_since'], NOW.isoformat())
+        self.assertIn('held', [r['telegram'] for r in data['events']])
+        code = "import health_alarms as h,tg_say; from datetime import datetime; calls=[]; tg_say.deliver=lambda *a,**k: calls.append(a) or tg_say.Delivery('refused'); assert h.run(now=datetime.fromisoformat(%r),probes=%r)==0; assert not calls" % ((NOW+timedelta(hours=9)).isoformat(), p)
+        subprocess.check_call([sys.executable, '-c', code], env=env)
+        self.assertEqual(len(self.delivery_calls), 1)
+        before = {f: f.read_bytes() for part in ('events', 'state') for f in (self.root / part).rglob('*') if f.is_file()}
+        health.run(now=NOW+timedelta(hours=10), probes=p, dry_run=True)
+        self.assertEqual(before, {f: f.read_bytes() for part in ('events', 'state') for f in (self.root / part).rglob('*') if f.is_file()})
+        receipt('AC6-health', dict(independent_rows=len(data['events']), interval_survives=True, held_restart=True, dry_bytes_unchanged=True))
 
 
 if __name__ == "__main__":

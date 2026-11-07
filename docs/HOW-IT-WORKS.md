@@ -50,7 +50,7 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 ## Cron manifest
 Source: `crons.toml`. Name | schedule | where | path, then command.
 - tick | */{tick_min} * * * * | user | {doit}  DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick
-  >> {root}/logs/tick.log 2>&1; look | 3,33 * * * * | user | {doit}  {doit} cron-run look -- {doit}
+  >> {root}/logs/tick.log 2>&1; look | 33 * * * * | user | {doit}  {doit} cron-run look -- {doit}
   look >> {root}/logs/look.log 2>&1; tmp-reaper | */15 * * * * | user | {doit}  {doit} cron-run
   tmp-reaper -- {doit} reap-tmp
   lessons-digest | 7 * * * * | user | {repo}/scripts/lessons_digest.py  {doit} cron-run

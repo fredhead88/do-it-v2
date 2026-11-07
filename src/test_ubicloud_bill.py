@@ -112,7 +112,8 @@ class Costs(unittest.TestCase):
             output, log, messages = io.StringIO(), io.StringIO(), []
             with patch.dict(os.environ, DOIT_ROOT=td), patch.object(gh_bill, "CONFIG", cfg), \
                  patch.object(gh_bill, "_runner_inputs", return_value=(None, {"CI_SELF_HOSTED": "false"}, True, True, 8, "")), \
-                 patch.object(gh_bill, "_send", side_effect=messages.append), \
+                 patch('tg_say._transport', side_effect=AssertionError('real transport forbidden')), \
+                 patch('tg_say.deliver', side_effect=lambda sender, text, **kw: (messages.append(text) or __import__('tg_say').Delivery('sent', 200))), \
                  patch("ghlimit.run", side_effect=AssertionError("network forbidden")), \
                  patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("network forbidden")), \
                  patch("sys.stdout", output), patch("sys.stderr", log):

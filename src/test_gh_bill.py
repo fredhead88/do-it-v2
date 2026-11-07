@@ -9,7 +9,10 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
+import contextlib
+import io
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -154,6 +157,19 @@ class Command(unittest.TestCase):
                         TG_LOG=str(self.home / "messages"), RUNNER_LOG=str(self.home / "runner-log"),
                         REAL_RUNNER=str(HERE / "ci_runner.py"), DOIT_PROJECT="do-it-v2",
                         GH_LIMIT_STATE=str(self.home / "quota"), DOIT_REAL_GH=str(self.home / "gh"))
+        hooks = self.home / 'hooks'
+        hooks.mkdir()
+        (hooks / 'sitecustomize.py').write_text("""import tg_say, os, json
+from pathlib import Path
+def deliver(sender, text, *, label, root):
+    assert sender == 'gh-bill' and label == '[YOU]' and str(root) == os.environ['DOIT_ROOT']
+    with open(os.environ['TG_LOG'], 'a') as stream:
+        stream.write(json.dumps([text]) + '\\n')
+    return tg_say.Delivery('sent', 200)
+tg_say.deliver = deliver
+tg_say._transport = lambda *a, **kw: (_ for _ in ()).throw(AssertionError('real transport forbidden'))
+""")
+        self.env['PYTHONPATH'] = str(hooks) + os.pathsep + str(HERE)
         self.env.pop("DOIT_LEDGER_FILE", None)
         self.env.pop("DOIT_TEST_LIVE_ROOT", None)
 
@@ -213,7 +229,7 @@ class Command(unittest.TestCase):
                 self.assertEqual(len(self.lines("messages")) - before_messages, name in {"alert", "alert-50", "alert-75", "alert-90"})
                 if name in {'alert','alert-50','alert-75','alert-90'}:
                     message = self.lines('messages')[-1][0]
-                    self.assertEqual(message, gh_bill.render_telegram(decision))
+                    self.assertEqual(message, gh_bill._billing_message(gh_bill.render_telegram(decision)))
                     self.assertNotIn('{', message)
                     self.assertNotIn('"', message)
                 sets = [r for r in self.lines("runner-log") if r["kind"] == "set"]
@@ -309,6 +325,117 @@ class Command(unittest.TestCase):
         self.assertEqual(self.lines("messages"), [])  # Runner repair belongs to the Thinker.
         self.assertEqual(self.fresh_fold()["kept"][-1]["action"], "flip-refused")
         receipt("AC5-set-refusal", result)
+
+
+class WatchdogQuietTests(unittest.TestCase):
+    def setUp(self):
+        import tg_say
+        Command.setUp(self)
+        self.clock = datetime(2031, 1, 10, 12, tzinfo=timezone.utc)
+        self.state.write_text(json.dumps(dict(months={'2031-01': dict(limit=450, sent=[])})))
+        self.calls = []
+        self.outcome = tg_say.Delivery('sent', 200)
+        self.items = [dict(date='2031-01-01', netAmount=230)]
+        test = self
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return test.clock
+        self.cfg = self.home / 'github-only.toml'
+        self.cfg.write_text('default=450\nafter_r1=120\n')
+        for stub in (patch.dict(os.environ, self.env), patch.object(gh_bill, 'datetime', Clock),
+                     patch.object(gh_bill, 'CONFIG', self.cfg),
+                     patch.object(gh_bill, 'read_usage', side_effect=lambda *a: (self.items, '')),
+                     patch.object(gh_bill, '_runner_inputs', return_value=(None, {'CI_SELF_HOSTED': 'true'}, True, True, 8, '')),
+                     patch.object(tg_say, 'deliver', side_effect=self.deliver),
+                     patch.object(tg_say, '_transport', side_effect=AssertionError('real transport forbidden'))):
+            stub.start()
+            self.addCleanup(stub.stop)
+
+    def deliver(self, sender, text, *, label, root):
+        import notification_policy
+        notification_policy.validate_message(text, label)
+        self.assertEqual((sender, label, root), ('gh-bill', '[YOU]', self.root))
+        self.calls.append(text)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    def run_bill(self, dry=False):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = gh_bill.main(['--dry-run'] if dry else [])
+        return rc, json.loads(out.getvalue())
+
+    def test_ac5(self):
+        import tg_say
+        for i, outcome in enumerate((tg_say.Delivery('held'), tg_say.Delivery('failed'),
+                                     tg_say.Delivery('refused'), tg_say.Delivery('sent', 500), RuntimeError('fixture'),
+                                     tg_say.Delivery('sent', 200))):
+            self.clock = datetime(2031, i+1, 10, 12, tzinfo=timezone.utc)
+            month = self.clock.strftime('%Y-%m')
+            self.state.write_text(json.dumps(dict(months={month: dict(limit=450, sent=[])})))
+            self.items = [dict(date=self.clock.date().isoformat(), netAmount=0),
+                          dict(date=self.clock.date().replace(day=1).isoformat(), netAmount=230)]
+            self.calls.clear()
+            self.outcome = outcome
+            self.run_bill()
+            self.assertEqual(len(self.calls), 1)
+            self.clock += timedelta(minutes=59)
+            self.run_bill()
+            self.assertEqual(len(self.calls), 1)
+            self.clock += timedelta(minutes=1)
+            self.outcome = tg_say.Delivery('sent', 200)
+            self.run_bill()
+            terminal = outcome in (tg_say.Delivery('held'), tg_say.Delivery('sent', 200))
+            self.assertEqual(len(self.calls), 1 if terminal else 2)
+            saved = json.loads(self.state.read_text())
+            self.assertEqual(saved['months'][month]['sent'], [] if outcome == tg_say.Delivery('held') else [50])
+        self.state.unlink()
+        self.items = []
+        self.calls.clear()
+        self.outcome = tg_say.Delivery('held')
+        self.run_bill()
+        self.run_bill()
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn('spending limit', self.calls[0])
+        # Both combined routes use the same wrapper; diagnostics cannot leak.
+        import ubicloud_bill
+        for action in ('none', 'alert'):
+            self.calls.clear()
+            self.clock += timedelta(days=1)
+            result = dict(action=action, date=self.clock.date().isoformat(), reason='',
+                          mtd=10, yday=20, pct_of_limit=2, limit=450, projection=30)
+            def combine(decision, *args):
+                decision.update(combined_alert=True)
+                return 'local diagnostics'
+            self.cfg.write_text('default=450\nafter_r1=120\n[ubicloud_runner_prices]\nx=1.0\n')
+            with patch.object(gh_bill, 'load_limits', return_value={'ubicloud_runner_prices': {'x': 1}}), \
+                 patch.object(gh_bill, 'limit_for', return_value=450), \
+                 patch.object(gh_bill, 'decide', return_value=result), \
+                 patch.object(ubicloud_bill, 'combine', side_effect=combine), \
+                 patch.object(ubicloud_bill, 'alert_message', return_value='Combined cost $30.00 /private/raw 2031-01-01T00:00:00Z'):
+                self.run_bill()
+            self.assertEqual(len(self.calls), 1)
+            self.assertNotIn('/private', self.calls[0])
+            self.assertIn('Combined cost $30.00', self.calls[0])
+        receipt('watchdog-AC5', dict(branches=3, dispositions=6, held_limit_once=True, normalized=True))
+
+    def test_ac6(self):
+        import tg_say
+        self.outcome = tg_say.Delivery('held')
+        self.run_bill()
+        data = Command.fresh_fold(self)
+        self.assertEqual(data['kept'][-1]['action'], 'alert-50')
+        code = "import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))"
+        saved = json.loads(subprocess.check_output([sys.executable, '-c', code, str(self.state)], text=True))
+        self.assertIn('held', [r['disposition'] for r in saved['notifications'].values()])
+        self.assertEqual(saved['months']['2031-01']['sent'], [])
+        self.run_bill()
+        self.assertEqual(len(self.calls), 1)
+        before = self.state.read_bytes(), (self.root / 'events/L-gh-bill-local.jsonl').read_bytes()
+        self.run_bill(dry=True)
+        self.assertEqual(before, (self.state.read_bytes(), (self.root / 'events/L-gh-bill-local.jsonl').read_bytes()))
+        receipt('watchdog-AC6', dict(independent_rows=len(data['kept']), held_state=True, dry_bytes_unchanged=True))
 
 
 if __name__ == "__main__":

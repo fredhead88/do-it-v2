@@ -6,6 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 import importlib.util
 import json
 import math
+import re
+import tempfile
+
+import notification_policy
+import tg_say
 import os
 from pathlib import Path
 import statistics
@@ -189,12 +194,62 @@ def _runner_inputs(today):
         return runner, {"CI_SELF_HOSTED": None}, None, None, None, f"runner evidence unreadable: {exc}"
 
 
-def _send(message):
-    sender = os.environ.get("GH_BILL_TG") or str(Path.home() / ".do-it/telegram/tg-send.sh")
-    result = subprocess.run([sender, message], capture_output=True, text=True,
-                            env={**os.environ,"TG_SENDER":"gh-bill"})
-    if result.returncode:
-        raise RuntimeError("Telegram delivery failed")
+def _send(message, root):
+    return tg_say.deliver('gh-bill', message, label='[YOU]', root=root)
+
+
+def _component(text):
+    # Untrusted component diagnostics stay in the bill-check record.
+    text = re.sub(r'\S*(?:/|\\)\S*', '', str(text))
+    text = re.sub(r'\S*(?:UTC|Z\b|\+00:00)\S*', '', text)
+    text = ' '.join(text.split())
+    try:
+        notification_policy.validate_text(text)
+        return text
+    except ValueError:
+        return 'Combined cloud cost needs inspection; diagnostic details are in the local billing report.'
+
+
+def _billing_message(component):
+    return notification_policy.format_message('[YOU]', 'Review cloud spending.', _component(component),
+                'Inspect recent costs and control optional paid runs.', None, 'Recording the billing decision locally.')
+
+
+def _notify(state, identity, text, now, root):
+    records = state.setdefault('notifications', {})
+    previous = records.get(identity, {})
+    if previous.get('disposition') in ('sent', 'held'):
+        return previous['disposition']
+    try:
+        attempted = datetime.fromisoformat(previous['attempted_at'])
+        if attempted.tzinfo is not None and 0 <= (now-attempted).total_seconds() < 3600:
+            return previous.get('disposition', 'failed')
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        result = _send(text, root)
+        disposition = result.state if result.state in ('sent', 'held', 'failed', 'refused') else 'failed'
+        if disposition == 'sent' and result.http != 200:
+            disposition = 'failed'
+    except Exception:
+        disposition = 'failed'
+    records[identity] = dict(disposition=disposition, attempted_at=now.isoformat())
+    return disposition
+
+
+def _write_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix=path.name+'.', delete=False) as stream:
+            tmp = Path(stream.name)
+            json.dump(state, stream, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        tmp.replace(path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
 
 
 def _append(decision):
@@ -214,7 +269,8 @@ def main(argv=None):
     parser.add_argument("--jobs-file", help="offline GitHub jobs API fixture: {jobs: [...]}")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    today = datetime.now(timezone.utc).date()
+    now = datetime.now(timezone.utc)
+    today = now.date()
     yesterday = today - timedelta(days=1)
     month = yesterday.strftime("%Y-%m")
     root = Path(os.environ.get("DOIT_ROOT", str(Path.home() / ".do-it")))
@@ -222,6 +278,8 @@ def main(argv=None):
     state_error = ""
     try:
         state = json.loads(path.read_text()) if path.exists() else {"months": {}}
+        if not isinstance(state.get('notifications', {}), dict):
+            raise ValueError('invalid notification state')
         months = state["months"]
         saved = months.get(month, {})
         if not isinstance(months, dict) or not isinstance(saved, dict) or not isinstance(saved.get("sent", []), list):
@@ -257,31 +315,34 @@ def main(argv=None):
     try:
         previous_month = (yesterday.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
         previous_limit = months.get(previous_month, {}).get("limit")
-        if not state_error and limit is not None and month not in months and previous_limit != limit:
-            _send(f"NEEDS YOU: GitHub Actions spending limit for {yesterday:%B}: "
-                  f"recommend setting it to ${limit:,.0f} in GitHub billing settings.")
-        action = decision["action"]
-        import notification_policy
+        limit_identity = f'limit:{month}:{limit}'
+        if not state_error and limit is not None and previous_limit != limit and (month not in months or
+                limit_identity in state.get('notifications', {})):
+            disposition = _notify(state, limit_identity, _billing_message(
+                f'GitHub Actions spending limit for {yesterday:%B}: recommend setting it to ${limit:,.0f} in GitHub billing settings.'), now, root)
+            decision['limit_delivery'] = disposition
+        action = decision['action']
+        disposition = 'none'
         if notification_policy.bill_interrupt(decision):
-            message = render_telegram(decision)
-            if decision.get("combined_alert"):
-                message += "\n" + ubicloud_bill.alert_message(decision)
-            elif decision.get("ubicloud_error"):
-                message += "\nCombined cloud cost unavailable; check Ubicloud jobs, inventory and prices."
-            _send(message)
-        elif decision.get("combined_alert"):
-            _send(ubicloud_bill.alert_message(decision))
+            component = render_telegram(decision)
+            if decision.get('combined_alert'):
+                component += "\n" + ubicloud_bill.alert_message(decision)
+            elif decision.get('ubicloud_error'):
+                component += "\nCombined cloud cost unavailable; check Ubicloud jobs, inventory and prices."
+            identity = f'threshold:{month}:{action[6:]}' if action.startswith('alert-') else f'cost:{yesterday}:daily'
+            disposition = _notify(state, identity, _billing_message(component), now, root)
+        elif decision.get('combined_alert'):
+            disposition = _notify(state, f'cost:{yesterday}:combined',
+                                  _billing_message(ubicloud_bill.alert_message(decision)), now, root)
+        decision['notification_delivery'] = disposition
         # Unknown billing reads remain in bill-check and the daily summary.
         if not state_error and limit is not None:
-            sent = list(saved.get("sent", []))
-            level = 90 if action == "flip" else int(action[6:]) if action.startswith("alert-") else None
+            sent = list(saved.get('sent', []))
+            level = int(action[6:]) if action.startswith('alert-') and disposition == 'sent' else None
             if level is not None:
                 sent = sorted(set(sent) | {n for n in LEVELS if n <= level})
-            state["months"][month] = {"limit": limit, "sent": sent}
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(f".json.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(state))
-            tmp.replace(path)
+            state['months'][month] = dict(saved, limit=limit, sent=sent)
+            _write_state(path, state)
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         exit_code = 1
         decision["reason"] += f"; notification/state failure: {exc}"

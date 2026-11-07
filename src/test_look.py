@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 _FIXTURE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="test-look-root-"))
 (_FIXTURE_ROOT / "events").mkdir(parents=True, exist_ok=True)
 os.environ["DOIT_ROOT"] = str(_FIXTURE_ROOT)
+os.environ["HOME"] = str(_FIXTURE_ROOT / "home")
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import crons, dispatch, fold, look, look_wallclock, pane_resume, panes  # noqa: E402
@@ -33,6 +34,11 @@ fold.ROOT, fold.EVENTS = _FIXTURE_ROOT, _FIXTURE_ROOT / "events"
 
 # All watchdog deliveries are local fakes, including pre-existing run fixtures.
 look._send_operator = lambda text, root: 0
+import tg_say
+# No fixture is allowed to reach a real Telegram transport.
+tg_say.deliver = lambda *a, **kw: tg_say.Delivery('sent', 200)
+tg_say._transport = lambda *a, **kw: (_ for _ in ()).throw(AssertionError('real transport forbidden'))
+
 
 pane_resume.PROJECTS = pathlib.Path(tempfile.mkdtemp())
 panes.SESSIONS = pathlib.Path(tempfile.mkdtemp())
@@ -2238,17 +2244,18 @@ with patch.dict(os.environ, DOIT_TICK_MIN="5"):
         ok(not calls, "watchdog: healthy heartbeat sends nothing")
         now = _WNOW + timedelta(minutes=6)
         if first == "missing":
-            with patch.object(look, "_send_operator", return_value=1):
+            with patch('tg_say.deliver', return_value=tg_say.Delivery('failed')):
                 look.heartbeat_missed("tick", now, [], root=root)
         else:
             look.heartbeat_missed("tick", now, [], root=root, sender=sender)
         look.heartbeat_missed("tick", now, [], root=root, sender=sender)
+        now += timedelta(hours=1)
         for _ in range(2):
             look.heartbeat_missed("tick", now, [], root=root, sender=lambda text: calls.append(text) or 0)
-        alerts = look._read_jsonl(root / "events" / look.LEDGER_NAME)
+        alerts = [e for e in look._read_jsonl(root / "events" / look.LEDGER_NAME) if e.get("kind") == "heartbeat-missed"]
         ok([e["sent"] for e in alerts] == (["yes"] if first == 0 else ["no", "yes"]), "watchdog: at most no then yes")
         ok(alerts[0]["last_start"] == iso(_WNOW - timedelta(minutes=10))
-           and alerts[0]["measured_at"] == iso(now) and all("actor" not in e for e in alerts), "watchdog: injected time recorded")
+           and alerts[0]["measured_at"] == iso(now - timedelta(hours=1)) and all("actor" not in e for e in alerts), "watchdog: injected time recorded")
         count = len(calls)
         _wstart(root, "tick", now)
         ok(not look.heartbeat_missed("tick", now, [], root=root, sender=sender), "watchdog: fresh start ends outage")
@@ -2281,20 +2288,20 @@ def _skip_heartbeat_checks():
         def verdict(name):
             return look.heartbeat_missed(name, _WNOW, [], root=root,
                                          sender=lambda text: calls.append(text) or 0)
-        # L-spec-1960 AC4/AC5: starts alone prove the 40-minute look window.
+        # L-spec-1960 AC4/AC5: starts alone prove the 100-minute look window.
         period = crons.interval_s(next(row['schedule'] for row in crons.rows() if row['name'] == 'look'))
         message = "1960 AC5: threshold must exceed the look row's period plus one tick"
-        ok(40 * 60 - period >= 600, message)
-        for age, missed in ((31 * 60, False), (39 * 60, False), (40 * 60, False),
-                            (41 * 60, True), (period + 300, False)):
+        ok(100 * 60 - period >= 600, message)
+        for age, missed in ((31 * 60, False), (39 * 60, False), (100 * 60, False),
+                            (101 * 60, True), (period + 300, False)):
             _write_cron_store(root, "look", [dict(ev="start", ts=iso(_WNOW - timedelta(seconds=age)))])
             ok(verdict("look") is missed, f"{message}; age={age}, expected missed={missed}")
         for name in ("tick", "look"):
             skips = cron_run.skip_store_path(name, root)
-            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=50)))])
+            _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=150)))])
             skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=1)))) + "\n")
             ok(not verdict(name), "1532 AC5: a recent skip proves cron fired after a stale start")
-            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=50)))) + "\n")
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=150)))) + "\n")
             ok(verdict(name), "1532 AC5: a stale skip never hides a missed heartbeat")
             for age in (1, 50):
                 _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=age)))])
@@ -2314,7 +2321,7 @@ def _skip_heartbeat_checks():
                 ok(verdict(name) == baseline, "1532 AC5: unreadable skip store preserves the verdict")
                 skips.rmdir()
             _write_cron_store(root, name, [dict(ev="start", ts=iso(_WNOW - timedelta(minutes=1)))])
-            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=50)))) + "\n")
+            skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW - timedelta(minutes=150)))) + "\n")
             ok(not verdict(name), "1532 AC5: an older skip never replaces a newer start")
             cron_run.store_path(name, root).unlink()
             skips.write_text(json.dumps(dict(ev="skip", ts=iso(_WNOW))) + "\n")
@@ -2587,8 +2594,8 @@ for send_status in (0, 1):
     _wstart(root, "tick", _WNOW - timedelta(minutes=60))
     with patch.object(fold, 'ROOT', root), patch.object(fold, 'EVENTS', root / 'events'):
         look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: send_status)
-        look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
-        rows = [e for e in fold.read_events(use_cache=False) if e['type'] == 'operator-alert']
+        look.heartbeat_missed('tick', _WNOW + timedelta(hours=1), [], root=root, sender=lambda text: 0)
+        rows = [e for e in fold.read_events(use_cache=False) if e['type'] == 'operator-alert' and e.get('kind') == 'heartbeat-missed']
     ok([e['sent'] for e in rows] == (['yes'] if send_status == 0 else ['no', 'yes']),
        '2045 AC2: retry failed delivery, then dedupe successful delivery')
     ok(rows[0]['last_start'] == iso(_WNOW - timedelta(minutes=60))
@@ -2599,12 +2606,12 @@ for send_status in (0, 1):
 root = newroot()
 with patch.object(look, '_read_cron_store', side_effect=RuntimeError('fixture unreadable')):
     try:
-        look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
+        look.heartbeat_missed('tick', _WNOW + timedelta(hours=1), [], root=root, sender=lambda text: 0)
     except RuntimeError as exc:
         ok(str(exc) == 'fixture unreadable', '2045 AC2: undetermined read reaches caller')
     else:
         raise AssertionError('watchdog swallowed undetermined read')
-rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+rows = [e for e in look._read_jsonl(root / 'events' / look.LEDGER_NAME) if e.get('kind') == 'heartbeat-missed']
 ok(not rows, '2045 AC2: undetermined read emits no alert')
 root = newroot()
 _wstart(root, 'tick', _WNOW - timedelta(minutes=60))
@@ -2616,10 +2623,10 @@ except RuntimeError as exc:
     ok(str(exc) == 'fixture sender exploded', '2045 AC2: send error reaches tick')
 else:
     raise AssertionError('watchdog swallowed sender error')
-rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+rows = [e for e in look._read_jsonl(root / 'events' / look.LEDGER_NAME) if e.get('kind') == 'heartbeat-missed']
 ok(len(rows) == 1 and rows[0]['sent'] == 'no', '2045 AC2: raised sender leaves one failed-send row')
-look.heartbeat_missed('tick', _WNOW, [], root=root, sender=lambda text: 0)
+look.heartbeat_missed('tick', _WNOW + timedelta(hours=1), [], root=root, sender=lambda text: 0)
 look.heartbeat_missed('tick', _WNOW, [], root=root, sender=_raised_sender)
-rows = look._read_jsonl(root / 'events' / look.LEDGER_NAME)
+rows = [e for e in look._read_jsonl(root / 'events' / look.LEDGER_NAME) if e.get('kind') == 'heartbeat-missed']
 ok([e['sent'] for e in rows] == ['no', 'yes'], '2045 AC2: raised sender is retried until delivery')
 print('2045 AC2 heartbeat cases pass')

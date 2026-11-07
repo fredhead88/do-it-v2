@@ -10,7 +10,7 @@ import crons
 class CadenceTests(unittest.TestCase):
     def test_approved_cadence(self):
         self.assertIn('portal-latency-daily', crons.paused_names())
-        expected = {'look': '3,33 * * * *', 'sweep-owed': '11 0,6,12,18 * * *',
+        expected = {'look': '33 * * * *', 'sweep-owed': '11 0,6,12,18 * * *',
                     'owed-digest': '0 6 * * *', 'ledger-snapshot': '2 * * * *',
                     'health-alarms': '6,36 * * * *', 'balance': '8 * * * *',
                     'backup-watch': '*/15 * * * *',
