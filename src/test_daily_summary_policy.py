@@ -196,7 +196,8 @@ class PaneIncidentTests(unittest.TestCase):
             root=Path(tmp);sent=[];items=[]
             with (patch.object(inbox,'STATE',str(root/'state.json')),patch.object(inbox,'LOG',str(root/'log')),
                  patch.object(inbox,'open_items',side_effect=lambda:items),patch.object(inbox,'pane',return_value=None),
-                 patch.object(inbox,'telegram',side_effect=lambda text:sent.append(text) or True),patch.object(inbox.sys,'argv',['inbox'])):
+                 patch.object(inbox,'self_pane',return_value=None),
+                 patch.object(inbox.tg_say,'_transport',side_effect=lambda sender,text,root:sent.append(text) or inbox.tg_say.Delivery('sent',200)),patch.object(inbox.sys,'argv',['inbox'])):
                 for i in range(6):
                     items.append(dict(src=f'q:{i}',subject='L-spec-9001',kind=None,type='question',ask='routine question',owner='thinker'))
                     inbox.main()

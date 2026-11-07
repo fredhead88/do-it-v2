@@ -377,3 +377,13 @@ path = "{doit}"
 sig = '\bdoit merge-news flush\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "thinker-inbox"
+where = "user"
+schedule = "*/5 * * * *"
+command = "DOIT_ROOT={root} {doit} cron-run thinker-inbox -- /usr/bin/python3 {repo}/src/thinker_inbox.py"
+path = "/usr/bin/python3"
+sig = '(?:^|\s)(?:\S*/)?(?:thinker-inbox|thinker_inbox)\.py(?=\s|$)|\bcron-run\s+thinker-inbox\s+--\s'
+owner = "thinker"
+project = "do-it-v2"
