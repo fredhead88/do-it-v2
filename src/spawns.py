@@ -16,7 +16,8 @@ TERMINAL = ("spawn-done", "spawn-failed", "spawn-stale")
 # run beside a build by design and are never checked.
 CONFLICTS = {"builder": {"builder", "grader", "reviewer"},
              "grader": {"builder", "grader"},
-             "reviewer": {"builder", "reviewer"}}
+             "reviewer": {"builder", "reviewer"},
+             "charter-reviewer": {"charter-reviewer"}}
 
 
 

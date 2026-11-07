@@ -234,7 +234,7 @@ def test_ac8():
     out_rev = proving.summary("L-charter-9008", charter, mine_plain, NOW, title="t8", review_owed=True,
                               open_briefs=[], checks={"S8n": []})
     rev_items = [it for it in out_rev["items"] if it["kind"] == "charter-review"]
-    assert len(rev_items) == 1 and rev_items[0]["owner"] == "executor", out_rev["items"]
+    assert len(rev_items) == 1 and rev_items[0]["owner"] == "tick", out_rev["items"]
 
     mine_with_review = [spec("S8n", "shipped", [], "L-charter-9008", rejects=0)]
     out_gated = proving.summary("L-charter-9008", charter, mine_with_review, NOW, title="t8",
@@ -797,3 +797,40 @@ def test_close_rule_1506():
 
 
 test_close_rule_1506()
+
+
+# L-spec-2157: the production CLI and pure summary agree about tick ownership.
+def test_close_review_tick_owner():
+    import fold
+    cid, sid = 'L-charter-9957', 'L-spec-9957'
+    for phase in ('charter-proving', 'charter-reopened'):
+        rows = [dict(type=kind, subject=subject, ts=stamp(days),
+                     actor=sorted(fold.EMITS.get(kind, {'operator'}))[0], **fields)
+                for kind, subject, days, fields in (
+                    ('charter-filed', cid, 5, {'covers': 'none'}),
+                    ('l1-complete', cid, 4, {}),
+                    ('spec-written', sid, 4, {'charter': cid}),
+                    ('spec-closed', sid, 3, {'reason': 'fixture'}),
+                    ('sweep-fixpoint', cid, 2, {}),
+                    (phase, cid, 1, {'reason': 'fixture', 'deadline': stamp(-2),
+                                    'spec': sid, 'criterion': 'AC1', 'failed_src': 'f:1'}))]
+        _, charters, ignored, _ = fold.fold(rows)
+        assert not ignored, ignored
+        review = [i for i in charters[cid]['proving']['items'] if i['kind'] == 'charter-review']
+        assert len(review) == 1 and review[0]['owner'] == 'tick', review
+        with tempfile.TemporaryDirectory(prefix='close-owner-') as name:
+            root = pathlib.Path(name)
+            (root / 'events').mkdir()
+            for row in rows:
+                with (root / 'events' / f"L-{row['actor']}-9957.jsonl").open('a') as stream:
+                    stream.write(json.dumps(dict(v=1, **row)) + '\n')
+            env = dict(os.environ, DOIT_ROOT=str(root), HOME=str(root / 'home'), DOIT_PROJECT='')
+            result = subprocess.run([sys.executable, PROVING_PATH, '--json'], env=env,
+                                    capture_output=True, text=True, check=True)
+            output = json.loads(result.stdout)
+            review = [i for c in output for i in c['items'] if i['kind'] == 'charter-review']
+            assert len(review) == 1 and review[0]['owner'] == 'tick', review
+        print('2157-AC5', phase, 'charter-review owner=tick pure+CLI paid_runner_calls=0')
+
+
+test_close_review_tick_owner()

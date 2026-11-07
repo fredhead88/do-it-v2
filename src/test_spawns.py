@@ -152,6 +152,42 @@ from contextlib import ExitStack
 from unittest.mock import patch
 import hashlib
 
+# L-spec-2157: actual gate/subject-lock races in separate processes, no backend.
+def charter_gate_child(cid):
+    code = '''
+import fold, spawns, sys
+def fail(why, **kw):
+    print(kw['reason'])
+    sys.exit(7)
+lock = spawns.gate(fold.ROOT, 'charter-reviewer', sys.argv[1], None,
+                   fold.read_events(use_cache=False), fail)
+if lock:
+    lock.close()
+print('admitted')
+'''
+    return subprocess.run([sys.executable, '-c', code, cid], capture_output=True, text=True,
+                          env=dict(os.environ, PYTHONPATH=str(HERE)), timeout=10)
+
+
+charter_id = 'L-charter-9957'
+lock, refused = spawns.acquire(TMP, 'charter-reviewer', charter_id, None, [])
+assert lock and refused is None
+try:
+    raced = charter_gate_child(charter_id)
+    assert (raced.returncode, raced.stdout.strip()) == (7, 'dispatch-in-progress'), raced.stdout
+finally:
+    lock.close()
+write_events('L-charter-reviewer-9957.jsonl', [
+    start('L-charter-reviewer-9957', charter_id, **live)])
+blocked = charter_gate_child(charter_id)
+assert (blocked.returncode, blocked.stdout.strip()) == (7, 'duplicate-dispatch'), blocked.stdout
+different = charter_gate_child('L-charter-9958')
+assert (different.returncode, different.stdout.strip()) == (0, 'admitted'), different.stdout
+payload = json.dumps(dict(lock_refused=True, open_start_refused=True, different_charter_admitted=True,
+                          processes=2, paid_runner_calls=0), sort_keys=True)
+print(json.dumps(dict(url='cli://close-reviews/race', status=0,
+                     body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
 matrix = [
     ('young-dead', 1, dict(live, waiter_pid=dead.pid), None, False, 'spawn-failed'),
     ('pid-reused', 1, dict(live, waiter_proc_start='reused'), None, False, 'spawn-failed'),

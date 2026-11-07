@@ -1192,6 +1192,7 @@ assert_not_honored(1602, "unknown")
 CHARTER_AC4C = "L-charter-2200"
 write_event("L-operator-2200", {"type": "charter-filed", "subject": CHARTER_AC4C, "covers": "none"})
 write_event("L-executor-2200", {"type": "sweep-fixpoint", "subject": CHARTER_AC4C})
+write_event("L-charter-reviewer-2200", {"type": "charter-review-complete", "subject": CHARTER_AC4C})
 _, charters_ac4c, _, _ = fold.fold(carry.scan_events(lambda e: True))
 check(charters_ac4c[CHARTER_AC4C]["state"] == "L2-complete",
       f"AC4(c) precondition: the fixture charter really is L2-complete: {charters_ac4c[CHARTER_AC4C]}")

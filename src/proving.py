@@ -342,7 +342,7 @@ def summary(charter_id, charter_evs, mine, now, *, title, review_owed, open_brie
     if review_owed and not blocking:                         # charter-review
         items.append({"kind": "charter-review", "spec": None, "criterion": None,
                       "text": "charter review is owed", "due_at": base_due,
-                      "status": None, "owner": "executor"})
+                      "status": None, "owner": "tick"})
 
     all_due = [entered_or_now]                                # blocking owed rows, discharged too
     for s in mine:

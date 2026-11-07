@@ -1247,13 +1247,13 @@ def _owed(covers=None, filed=True, reviewed=False):
     return fold.charter_review_owed(fx[4].get(RC, []))
 
 
-# AC1 — the explicit "none" string short-circuits False, review landed or not.
-assert _owed("none", reviewed=False) is False, "AC1: Covers: none never owes a review"
+# Open Covers: none charters now take the ordinary newest-verdict close path.
+assert _owed("none", reviewed=False) is True, "AC1: open Covers: none owes a review"
 assert _owed("none", reviewed=True) is False, "AC1: still False once a review lands too"
 
-# AC2 — case-insensitive "null" and whitespace-padded " NONE " short-circuit the same way.
+# Case-insensitive null and padded NONE follow the same open-charter rule.
 for spelling in ("null", "NULL", "Null", " NONE "):
-    assert _owed(spelling, reviewed=False) is False, (spelling, "AC2")
+    assert _owed(spelling, reviewed=False) is True, (spelling, "AC2")
 
 # AC3 — a non-empty id list is the UNCHANGED existing rule: True with no review,
 # False once one lands.
@@ -1273,9 +1273,36 @@ assert _owed(filed=False, reviewed=True) is False, "AC4b: ...until a review land
 none_fx = ledger(**{"L-thinker-0001.jsonl": [{"ts": stamp(1), "type": "charter-filed",
                                               "subject": RC, "covers": "none"}]})
 none_cl = fold.closable(none_fx[0], RC)
-assert none_cl["review_owed"] is False, none_cl
+assert none_cl["review_owed"] is True, none_cl
 _none_specs = [s for s in none_fx[1].values() if s["charter"] == RC]
 assert _none_specs == [], "no specs on this fixture charter, by construction"
+
+# L-spec-2157 AC1: explicit matrix, including standing-close timestamp ties.
+for label, covers in [('none', 'none'), ('padded', ' NONE '), ('null', 'null'),
+                      ('absent', ...), ('JSON-null', None), ('goals', 'G1')]:
+    for verdicts in ([], ['charter-review-complete'], ['charter-review-not-complete'],
+                     ['charter-review-complete', 'charter-review-not-complete']):
+        for reopen in ('open', 'closed', 'older', 'equal', 'newer'):
+            fields = {} if covers is ... else {'covers': covers}
+            rows = [dict(type='charter-filed', ts=stamp(10), **fields)]
+            rows += [dict(type=v, ts=stamp(9-i)) for i, v in enumerate(verdicts)]
+            if reopen != 'open':
+                rows.append(dict(type='charter-closed', ts=stamp(5)))
+            if reopen in ('older', 'equal', 'newer'):
+                rows.append(dict(type='charter-reopened', ts=stamp({'older': 6, 'equal': 5, 'newer': 4}[reopen])))
+            historical = label in ('none', 'padded', 'null') and reopen in ('closed', 'older', 'equal')
+            expected = False if historical else not verdicts or verdicts[-1] != 'charter-review-complete'
+            actual = fold.charter_review_owed(rows)
+            assert actual == expected, (label, verdicts, reopen, expected, actual)
+            print('2157-AC1', label, verdicts, reopen, 'expected=', expected, 'actual=', actual)
+
+for historical_id in ('L-charter-0046', 'L-charter-0047', 'L-charter-0062'):
+    rows = [dict(type=k, subject=historical_id, actor=sorted(fold.EMITS[k])[0], ts=stamp(10-i), **kw)
+            for i, (k, kw) in enumerate([
+                ('charter-filed', {'covers': 'none'}), ('l1-complete', {}),
+                ('sweep-fixpoint', {}), ('charter-closed', {'label': 'accepted', 'reason': 'historical'})])]
+    assert fold.fold(rows)[1][historical_id]['state'] == 'L2-complete'
+    print('2157-AC1 historical', historical_id, 'expected=L2-complete actual=L2-complete')
 
 # ── R4/R8/R13/R15/AC8 · the four new EMITS entries, exactly their actors ──────
 # R10/L-spec-0192 widens spec-carried to admit the executor's own `doit carry`
@@ -2120,6 +2147,8 @@ def _kill_fixture271(s2_files, superseded_by=S2_271):
             {"ts": stamp(3), "type": "charter-filed", "subject": CID271, "covers": "none"}],
         "L-executor-01.jsonl": [
             {"ts": stamp(0), "type": "sweep-fixpoint", "subject": CID271}],
+        "L-charter-reviewer-01.jsonl": [
+            {"ts": stamp(0), "type": "charter-review-complete", "subject": CID271}],
     }
     files.update(s2_files)
     return ledger(**files)
@@ -3338,7 +3367,7 @@ assert charters0472_2[C0472_1]["proving"]["phase"] == "reopened", charters0472_2
 print("0472-AC2 ok")
 
 # ── 0472-AC3 · an L2-complete charter (L-charter-1101 shape: l1-complete,
-# sweep-fixpoint, one accepted spec, covers: "none") stays L2-complete even
+# sweep-fixpoint, one accepted spec, covers: "none", standing close) stays L2-complete even
 # carrying a charter-proving event — proving.phase() is never reached ───────
 S0472_3, C0472_3 = "L-spec-9411", "L-charter-9411"
 built0472_3 = [{"ts": stamp(3), "type": "spec-written", "subject": S0472_3, "charter": C0472_3},
@@ -3354,7 +3383,9 @@ _, specs0472_3, charters0472_3, _, _ = ledger(**{
     "L-operator-9411.jsonl": [{"ts": stamp(3), "type": "charter-filed", "subject": C0472_3,
                                "covers": "none"},
                               {"ts": stamp(3), "type": "l1-complete", "subject": C0472_3}],
-    "L-tick-9411.jsonl": [{"ts": stamp(0), "type": "charter-proving", "subject": C0472_3,
+    "L-tick-9411.jsonl": [{"ts": stamp(1), "type": "charter-closed", "subject": C0472_3,
+                           "label": "accepted", "reason": "historical standing close"},
+                          {"ts": stamp(0), "type": "charter-proving", "subject": C0472_3,
                            "reason": "entered", "deadline": stamp(-3)}]})
 assert specs0472_3[S0472_3]["state"] == "accepted", specs0472_3[S0472_3]["state"]
 assert charters0472_3[C0472_3]["state"] == "L2-complete", charters0472_3[C0472_3]["state"]
@@ -4957,6 +4988,7 @@ def test_close_rule_1506():
             'L-operator-1506.jsonl': [dict(type='charter-filed', subject=cid, covers='none', ts=stamp(15)),
                                      dict(type='l1-complete', subject=cid, ts=stamp(3))],
             'L-executor-1506.jsonl': [dict(type='sweep-fixpoint', subject=cid, ts=stamp(1))],
+            'L-charter-reviewer-1506.jsonl': [dict(type='charter-review-complete', subject=cid, ts=stamp(1))],
             'L-spec-writer-1506.jsonl': [],
             'L-grader-1506.jsonl': [], 'L-reviewer-1506.jsonl': []}
         for sid, declaration in zip(sids, declarations):
