@@ -91,6 +91,7 @@ def scan(source):
 
 # Every exception is an exact (file, function), with its own reason.
 ALLOW = {
+    ('tg_check.py', 'lambda_silent'): 'Read-only segment integrity and symlink checks at the effective root; decisions use ledger_files virtual sources without cache writes.',
     ('base_red.py', '_nightly_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up (additional classified hit).',
     ('base_red.py', '_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up.',
     ('dispatch.py', 'alloc'): 'Raw glob applies only to generic directories; event allocations use ledger_files.names.',

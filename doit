@@ -10,6 +10,7 @@ case "${1:-board}" in
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   tg-say) shift; exec python3 "$SRC/tg_say.py" "$@" ;;
+  tg-check) shift; exec python3 "$SRC/tg_check.py" "$@" ;;
   gh-bill) shift; exec python3 "$SRC/gh_bill.py" "$@" ;;
   ci-runner) shift; exec python3 "$SRC/ci_runner.py" "$@" ;;
   readiness) shift; exec python3 "$SRC/build_readiness.py" "$@" ;;
@@ -220,6 +221,8 @@ doit — a ledger that derives state, and the guards that read it
   doit adopt-candidate <L-spec-N> <sha> --by <actor> --reason TEXT
                                            reconcile a repaired spec branch and hand it back to Verification
   doit tg-say --sender NAME --label LABEL --what T --real T --you T [--by T] [--doing T]
+  doit tg-check [--doit-repo PATH] [--albert-repo PATH] [--root PATH] [--push-dir PATH]
+                local caller accounting; --offbox --lambda-decision-ref SOURCE:ROW checks off-box silence
   doit gh-bill [--usage-file F] [--dry-run]   check GitHub billing policy
   doit ci-runner status [--json] | doit ci-runner set <CI_SELF_HOSTED|CI_PG_SELF_HOSTED> <true|false> --why TEXT
   doit ci-shadow [--dry-run] [--json]   compare hosted CI with self-hosted shadows
