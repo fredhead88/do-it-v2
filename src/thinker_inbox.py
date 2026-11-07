@@ -11,8 +11,10 @@ unanswered `question` from the moment it is asked, not only once overdue.
 - Every item is typed into the Thinker pane, batched, when the pane is idle. Operator-owned items (the
   realm's OPERATOR_RE, or `irreversible`) are flagged so the Thinker sends the operator a plain-English
   explanation and recommendation. Raw builder questions never go to the operator (operator: "jargon").
-- Three consecutive missing-pane passes trigger one delivery-outage alert.
-  Ordinary unanswered questions stay with the Thinker and the daily summary.
+- Operator work and items over four hours old share one [YOU] batch per pass.
+  Deadman owns its alert; lane-stale work stays quiet while the delivery pane is up.
+- Three consecutive missing-pane passes trigger one [DOWN] alert per episode.
+  While the pane is absent, item heads-ups stay queued until recovery.
 Answer every item with `/home/albert/do-it-v2/doit thinker-answer <src> "<why>"`. That writes a `decision` with the
 item's own subject and `ref=<src>`, so fold, the board and the realm all see it answered.
 
@@ -22,15 +24,17 @@ Read-only on the ledger; writes only its state file and log. Run by cron every 5
 import datetime as dt, json, os, pathlib, re, subprocess, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
+import notification_policy
+import tg_say
+from zoneinfo import ZoneInfo
 
 ROOT = str(fold.ROOT)
 STATE = f"{ROOT}/state/thinker-inbox.json"
 LOG = f"{ROOT}/logs/thinker-inbox.log"
 PANE_FILE = f"{ROOT}/state/thinker-pane"          # e.g. %152; written by the Thinker session
-TG = f"{ROOT}/telegram/tg-send.sh"
-PROJECT = "albert-scott"
+SELF_FILE = f"{ROOT}/state/thinker-self-pane"
+ESCALATE_FILE = "/var/tmp/push/foreman/ESCALATE.md"
 MAX_AGE_D = 21
-ESCALATE_MIN = 60
 OPERATOR_RE = re.compile(  # verbatim from the realm (realm.html OPERATOR_RE) so both agree on ownership
     r"\b(money|refund|payment|payout|charge|invoice|bill|credential|secret|token|password|api[- ]?key|"
     r"irreversible|drop (table|column)|delete (data|rows|records)|destroy|truncate|production write|"
@@ -45,13 +49,52 @@ def now():
 def log(msg):
     os.makedirs(os.path.dirname(LOG), exist_ok=True)
     with open(LOG, "a") as f:
-        f.write(f"{now().isoformat(timespec='seconds')} {msg}\n")
+        os.chmod(LOG, 0o600)
+        f.write(f"{now().astimezone(ZoneInfo('Asia/Jerusalem')).isoformat(timespec='seconds')} {msg}\n")
 
 
 def ask_of(e):
     if e.get("kind") == "owed-expired":
         return f"owed check(s) {e.get('criteria')} expired unobserved; default: {e.get('default')}"
     return str(e.get("asks") or e.get("why") or e.get("text") or e.get("kind") or "escalation")
+
+
+def _original_age(item, at):
+    """Unknown or future event times cannot establish how long work has waited."""
+    try:
+        stamp = dt.datetime.fromisoformat(item.get("ts").replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return None
+        age = at - stamp
+        return age if age >= dt.timedelta(0) else None
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def should_page(item, now):
+    """Deadman and pane-up lane nudges stay quiet; then apply ownership or age."""
+    if item.get("kind") == "merge-deadman":
+        return False
+    if (item.get("kind") == "lane-stale" or str(item.get("subject", "")).startswith("lane-stale:")) and item.get("pane_up", True):
+        return False
+    if item.get("owner") == "operator":
+        return True
+    age = _original_age(item, now)
+    return age is not None and age > dt.timedelta(minutes=240)
+
+
+def queue_line(items, now):
+    """Render overlapping queue counts without disclosing any item content."""
+    total = operator = old = deadman = unknown = 0
+    for item in items:
+        total += 1
+        operator += item.get("owner") == "operator"
+        deadman += item.get("kind") == "merge-deadman"
+        age = _original_age(item, now)
+        unknown += age is None
+        old += age is not None and age > dt.timedelta(minutes=240)
+    return (f"Thinker queue: {total} open; {operator} operator-owned; {old} over 4 hours; "
+            f"{deadman} merge-deadman; {unknown} age unknown.")
 
 
 def open_items():
@@ -79,6 +122,8 @@ def open_items():
         owner = "operator" if (e.get("irreversible") or OPERATOR_RE.search(scrub)) else "thinker"
         if e.get("kind") == "owed-expired":
             owner = "thinker"   # the default text names no operator act; the Thinker rules on re-date/waive/accept
+        if e.get("kind") == "merge-deadman":
+            owner = "thinker"   # deadman owns its alert, regardless of classifier words or irreversible
         out.append({"src": src, "subject": e.get("subject"), "type": e["type"], "kind": e.get("kind"),
                     "ask": ask, "deadline": e.get("deadline"), "ts": e.get("ts"), "owner": owner})
     out.sort(key=lambda i: str(i["ts"]))
@@ -158,13 +203,84 @@ def type_into(p, msg):
     return subprocess.run(["tmux", "send-keys", "-t", p, "Enter"]).returncode == 0
 
 
-def telegram(msg):
+def direct(i):
+    return (str(i["src"]).startswith("L-planner-") or i["owner"] == "operator"
+            or str(i["subject"]).startswith("L-charter-"))
+
+
+def self_pane():
     try:
-        result = subprocess.run([TG, msg], capture_output=True, text=True, timeout=30,
-                                env={**os.environ, "TG_SENDER": "thinker-inbox"})
-        return result.returncode == 0 and result.stdout.splitlines()[-1:] == ["200"]
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+        p = pathlib.Path(SELF_FILE).read_text().strip()
+    except OSError:
+        return None
+    return p if p and _alive(p) else None
+
+
+def item_fields(i):
+    # Only public ledger identifiers enter the sample; never relay arbitrary
+    # subjects, asks, source refs or diagnostics to the operator's phone.
+    subject = str(i.get("subject") or "")
+    subject = subject if re.fullmatch(r"L-(?:spec|charter)-[0-9]{4,6}", subject) else "Queued work"
+    summary = subject + (": operator decision" if i.get("owner") == "operator" else ": waiting over four hours")
+    return dict(what="Work needs your attention.", real=summary,
+                you="Ask the Thinker for an explanation and recommendation.")
+
+
+def _refusal(st, refs, stamp, reason):
+    for ref in refs:
+        st["tg_refused"][ref] = stamp
+    save_state(st)
+    for ref in refs:
+        log(f"refused ref={json.dumps(ref)} reason={reason}")
+
+
+def _page(st, candidates, stamp):
+    selected, summaries = [], []
+    for row in sorted(candidates, key=lambda i: str(i["src"])):
+        try:
+            fields = item_fields(row)
+            notification_policy.format_message("[YOU]", **fields)
+        except ValueError:
+            _refusal(st, [row["src"]], stamp, "format-invalid")
+            continue
+        selected.append(row["src"])
+        summaries.append(fields["real"])
+    if not selected:
+        return
+    omitted = max(0, len(selected) - 3)
+    try:
+        text = notification_policy.format_message(
+            "[YOU]", f"{len(selected)} eligible items need your attention.",
+            "; ".join(summaries[:3]) + f". {omitted} omitted from this sample.",
+            "Ask the Thinker for an explanation and recommendation.")
+    except ValueError:
+        _refusal(st, selected, stamp, "format-invalid")
+        return
+    result = tg_say.deliver("thinker-inbox", text, label="[YOU]", root=ROOT)
+    if result.state == "refused":
+        _refusal(st, selected, stamp, "delivery-refused")
+    elif result.state in ("sent", "held"):
+        target = "tg" if result.state == "sent" else "tg_pending"
+        st[target].update(dict.fromkeys(selected, stamp))
+        save_state(st)
+
+
+def _outage(st):
+    try:
+        text = notification_policy.format_message(
+            "[DOWN]", "The Thinker's delivery session is unavailable.",
+            "Pending work stays queued.", "Reopen flow and resume the Thinker.")
+    except ValueError:
+        st["pane_refused"] = True
+        save_state(st)
+        log("outage-refused reason=format-invalid")
+        return
+    result = tg_say.deliver("thinker-inbox", text, label="[DOWN]", root=ROOT)
+    if result.state in ("sent", "held", "refused"):
+        st[{"sent": "pane_alerted", "held": "pane_pending", "refused": "pane_refused"}[result.state]] = True
+        save_state(st)
+        if result.state == "refused":
+            log("outage-refused reason=delivery-refused")
 
 
 def short(i):
@@ -186,51 +302,70 @@ def main():
         return
     st = load_state()
     live = {i["src"] for i in items}
-    st["delivered"] = {k: v for k, v in st["delivered"].items() if k in live}
-    st["tg"] = {k: v for k, v in st["tg"].items() if k in live}
-    t_now = now().isoformat(timespec="seconds")
-
-    # operator-owned items come to the Thinker first, who sends the operator a plain-English
-    # explanation and recommendation. Raw builder questions are jargon (operator, 2026-10-11).
-    th = items
-    new = [i for i in th if i["src"] not in st["delivered"]]
+    for key in ("delivered", "tg", "tg_refused", "tg_pending"):
+        st[key] = {k: v for k, v in st.get(key, {}).items() if k in live}
+    stamp = now().isoformat(timespec="seconds")
     p = pane()
     st["pane_misses"] = 0 if p else st.get("pane_misses", 0) + 1
+    if p:
+        for key in ("pane_alerted", "pane_pending", "pane_refused"):
+            st[key] = False
+    save_state(st)
+
+    sp = self_pane()
+    if sp:
+        dnew = [i for i in items if direct(i) and i["src"] not in st["delivered"]]
+        if dnew:
+            msg = ("[thinker-inbox DIRECT] " + " ; ".join(
+                ("FOR THE OPERATOR: " if i["owner"] == "operator" else "") + short(i) for i in dnew))[:3500]
+            if type_into(sp, msg):
+                st["delivered"].update(dict.fromkeys((i["src"] for i in dnew), stamp))
+                save_state(st)
+                log(f"direct {len(dnew)}")
+        try:
+            lines = pathlib.Path(ESCALATE_FILE).read_text().splitlines()
+        except OSError:
+            lines = None
+        if lines is not None:
+            seen = st.get("esc_lines")
+            if seen is None or seen > len(lines):
+                st["esc_lines"] = len(lines)
+                save_state(st)
+            else:
+                fresh = [line for line in lines[seen:] if line.strip()]
+                if not fresh or type_into(sp, ("[foreman-escalation] " + " || ".join(line[:400] for line in fresh))[:3500]):
+                    st["esc_lines"] = len(lines)
+                    save_state(st)
+
+    new = [i for i in items if i["src"] not in st["delivered"]]
     if new and p and pane_idle(p):
         groups = {}
         for i in new:
             groups.setdefault(i["kind"] or i["type"], []).append(i)
         parts = []
-        for k, l in groups.items():
-            if len(l) > 3 and k != "master-full-red":
-                parts.append(f"{len(l)}x {k} ({', '.join(x['subject'] for x in l[:12])}{'…' if len(l) > 12 else ''})")
+        for kind, group in groups.items():
+            if len(group) > 3 and kind != "master-full-red":
+                parts.append(f"{len(group)}x {kind} ({', '.join(str(x['subject']) for x in group[:12])}{'…' if len(group) > 12 else ''})")
             else:
-                parts += [("FOR THE OPERATOR, send them a plain-English explanation and your recommendation: " if x["owner"] == "operator" else "") + short(x) for x in l]
+                parts += [("FOR THE OPERATOR, send them a plain-English explanation and your recommendation: "
+                           if x["owner"] == "operator" else "") + short(x) for x in group]
         msg = (f"[thinker-inbox] {len(new)} new item(s) waiting on the Thinker: " + " ; ".join(parts) +
                f". Full list: python3 {ROOT}/thinker-inbox.py --list. Answer each with /home/albert/do-it-v2/doit thinker-answer <src> \"<why>\".")
         # Master-full incident details include every failed id and tested merge.
         # Do not mark those incidents delivered after truncating their payload.
         message = msg if any(i["kind"] == "master-full-red" for i in new) else msg[:3500]
         if type_into(p, message):
-            for i in new:
-                st["delivered"][i["src"]] = t_now
-            log(f"delivered {len(new)} to {p}")
+            st["delivered"].update(dict.fromkeys((i["src"] for i in new), stamp))
+            save_state(st)
+            log(f"delivered {len(new)}")
 
-    # A delivery outage is one incident, regardless of the number of questions.
-    # A slow answer with a healthy pane is a Thinker task, not a phone alert.
     if p:
-        st['pane_alerted'] = False
-    elif st['pane_misses'] >= 3 and not st.get('pane_alerted'):
-        sent = telegram("NEEDS YOU: The Thinker's delivery session is unavailable. "
-                        "Recommendation: reopen flow and resume the Thinker; pending work stays queued.")
-        if sent:
-            st['pane_alerted'] = True
-            for i in th:
-                st['tg'][i['src']] = t_now
-            log('tg-pane-outage')
-        else:
-            log('tg-pane-outage-failed')
-    save_state(st)
+        acknowledged = set(st["tg"]) | set(st["tg_pending"]) | set(st["tg_refused"])
+        candidates = [i for i in items if i["src"] not in acknowledged
+                      and should_page(dict(i, pane_up=True), now())]
+        _page(st, candidates, stamp)
+    elif st["pane_misses"] >= 3 and not any(st.get(key) for key in ("pane_alerted", "pane_pending", "pane_refused")):
+        _outage(st)
 
 
 if __name__ == "__main__":

@@ -119,7 +119,8 @@ class InboxTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         for key, value in {'STATE': str(self.root / 'state/inbox.json'),
                            'PANE_FILE': str(self.root / 'state/thinker-pane'),
-                           'LOG': str(self.root / 'logs/inbox.log')}.items():
+                           'LOG': str(self.root / 'logs/inbox.log'),
+                           'SELF_FILE': str(self.root / 'state/thinker-self-pane')}.items():
             p = patch.object(inbox, key, value)
             p.start()
             self.addCleanup(p.stop)
@@ -127,11 +128,14 @@ class InboxTests(unittest.TestCase):
                          ask='fixture question', owner='thinker')
         self.sent = []
         for key, value in {'open_items': lambda: [self.item], 'pane_idle': lambda p: True,
-                           'type_into': lambda *a: True,
-                           'telegram': lambda msg: self.sent.append(msg) or True}.items():
+                           'type_into': lambda *a: True}.items():
             p = patch.object(inbox, key, value)
             p.start()
             self.addCleanup(p.stop)
+        p = patch.object(inbox.tg_say, '_transport',
+                         side_effect=lambda sender, text, root: self.sent.append(text) or inbox.tg_say.Delivery('sent', 200))
+        p.start()
+        self.addCleanup(p.stop)
         p = patch.object(inbox.sys, 'argv', ['thinker-inbox'])
         p.start()
         self.addCleanup(p.stop)
@@ -144,8 +148,8 @@ class InboxTests(unittest.TestCase):
             inbox.main()
             inbox.main()
         self.assertEqual(len(self.sent), 1)
-        self.assertIn('NEEDS YOU:', self.sent[0])
-        self.assertIn('Recommendation:', self.sent[0])
+        self.assertTrue(self.sent[0].startswith('[DOWN]'))
+        self.assertIn('You: Reopen flow', self.sent[0])
         with patch.object(inbox, 'pane', return_value='%84'):
             inbox.main()
         self.assertEqual(inbox.load_state()['pane_misses'], 0)
@@ -159,12 +163,13 @@ class InboxTests(unittest.TestCase):
 
     def test_failed_send_remains_eligible(self):
         with patch.object(inbox, 'pane', return_value=None), \
-                patch.object(inbox, 'telegram', side_effect=[False, True]) as send:
+                patch.object(inbox.tg_say, '_transport', side_effect=[inbox.tg_say.Delivery('failed', 503), inbox.tg_say.Delivery('sent', 200)]) as send:
             for _ in range(3):
                 inbox.main()
             self.assertEqual(inbox.load_state()['tg'], {})
             inbox.main()
-            self.assertIn('question:1', inbox.load_state()['tg'])
+            self.assertEqual(inbox.load_state()['tg'], {})
+            self.assertTrue(inbox.load_state()['pane_alerted'])
             self.assertEqual(send.call_count, 2)
 
     def test_stale_pointer_falls_back_and_resaves(self):
