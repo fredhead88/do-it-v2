@@ -4082,6 +4082,98 @@ def selective_memo_checks():
     check(len(FAILS) == start, "selective memo matrix")
 
 
+def pg_partition_naming_checks():
+    """Real pg_result, completed-job transport only; no CI dispatch."""
+    import copy
+    import base_red
+    fixture = HERE / "fixtures/base_red"
+    raw = (fixture / "pg-parity-partitioned.log").read_text()
+    nodes = json.loads((fixture / "pg-parity-partitioned.provenance.json").read_text())["expected_nodes"]
+    legacy = "Run the spec-202 PG-parity data-layer suite against real Postgres"
+    ingest = "Run spec-1158 all-orders/ingestion-pipeline/MCF-channel ingest tests"
+    scratch = "Run spec-839/895/926/949 scratch-database tests (pg_scratch)"
+    inventory = [legacy, ingest, scratch]
+    print("pg partition failed-test-step inventory: " + json.dumps(inventory))
+    check(window_gate.PG_REHEARSAL_TEST_STEPS == set(inventory), "partition rehearsal step inventory")
+    doc = dict(checks={window_gate.PG_CHECK: dict(run_id=101)})
+    job = dict(name=window_gate.PG_CHECK, databaseId=1101, conclusion="failure", status="completed",
+               steps=[dict(name=scratch, conclusion="failure")])
+    observations = []
+    def invoke(jobs, log=raw, rehearsal=True, unreadable=False, metadata=doc):
+        def transport(argv, **kwargs):
+            if argv[:3] != ["gh", "run", "view"]:
+                raise AssertionError("unexpected transport: " + repr(argv))
+            body = json.dumps(dict(jobs=jobs)) if "--json" in argv else log
+            return subprocess.CompletedProcess(argv, 1 if unreadable and "--log-failed" in argv else 0, body, "")
+        with patch.object(window_gate.subprocess, "run", side_effect=transport):
+            return window_gate.pg_result(HERE.parent, metadata, rehearsal=rehearsal)
+    def refuses(label, jobs, log=raw, reason=None, **kwargs):
+        try:
+            answer = invoke(jobs, log, **kwargs)
+        except RuntimeError as exc:
+            check(reason is None or reason in str(exc), "partition refusal reason: " + label)
+            observations.append(dict(case=label, error=str(exc)))
+        else:
+            check(False, "partition must refuse " + label + ": " + repr(answer))
+    for step in inventory:
+        current = copy.deepcopy(job)
+        current["steps"][0]["name"] = step
+        for label, keep in (("two-red", {0, 1}), ("first-red", {0}), ("second-red", {1})):
+            variant = "\n".join(line for line in raw.splitlines()
+                                if not any("FAILED " + node in line for i, node in enumerate(nodes) if i not in keep))
+            # Job/step/timestamp wrappers are the actual pg_result transport shape.
+            variant = "\n".join("pg-parity (Postgres)\t" + step + "\t2026-11-07T00:00:00Z " + line
+                                for line in variant.splitlines())
+            result = invoke([current], variant)
+            expected = {nodes[i] for i in keep}
+            check(result[0] is True and set(result[1]) == expected and all(result[1].values()),
+                  "partition named " + step + ": " + label)
+            observations.append(dict(step=step, case=label, expected=sorted(expected), actual=sorted(result[1])))
+        if step != legacy:
+            refuses("default " + step, [current], rehearsal=False, reason="non-test step")
+        else:
+            check(set(invoke([current], rehearsal=False)[1]) == set(nodes), "partition default spec-202 names")
+        current["conclusion"] = "success"
+        current["steps"][0]["conclusion"] = "success"
+        for rehearsal in (False, True):
+            check(invoke([current], rehearsal=rehearsal) == (False, {}), "partition success both modes")
+    refuses("missing metadata", [job], metadata={})
+    refuses("missing job", [])
+    refuses("duplicate job", [job, job])
+    for conclusion in ("cancelled", "in_progress", None, "timed_out"):
+        current = dict(job, conclusion=conclusion)
+        refuses("incomplete " + str(conclusion), [current])
+    refuses("unreadable log", [job], unreadable=True)
+    for step in ("Set up scratch", "Clean up scratch"):
+        current = dict(job, steps=job["steps"] + [dict(name=step, conclusion="failure")])
+        refuses(step, [current], reason="non-test step")
+    refuses("scratch without names", [job], log="no test summary", reason="no failing test id")
+    legacy_job = dict(job, steps=[dict(name=legacy, conclusion="failure")])
+    for rehearsal in (False, True):
+        check(invoke([legacy_job], "no test summary", rehearsal=rehearsal) == (True, {}),
+              "partition legacy no-id remains failed")
+    for marker in ("Scratch cluster B shutdown failed", "Scratch parallel execution failed; readiness undetermined"):
+        mixed = raw + "\n" + marker
+        refuses(marker, [job], log=mixed, reason=marker)
+        envelope = "\n".join("pg-parity\t" + scratch + "\t" + line for line in mixed.splitlines())
+        parsed = base_red.parse_log(envelope)
+        check(parsed["pytest"] == set(nodes) and any(marker in x for x in parsed["undetermined"]),
+              "partition mixed parser " + marker)
+        with patch.object(window_gate, "candidate_logs", return_value=[("101", envelope)]):
+            candidate = window_gate.candidate_failures(HERE.parent, dict(doc=doc))
+        check(candidate["pytest"] == set(nodes) and any(marker in x for x in candidate["undetermined"]),
+              "partition mixed gate consumer " + marker)
+    with tempfile.TemporaryDirectory(prefix="partition-message-") as directory:
+        sentinel = pathlib.Path(directory) / "not-created"
+        message = "FAILED " + nodes[0] + " - $(touch " + str(sentinel) + "); `false`"
+        result = invoke([job], message)
+        check(set(result[1]) == {nodes[0]} and not sentinel.exists(), "partition message remains inert")
+    body = json.dumps(observations, sort_keys=True)
+    print(json.dumps(dict(url="scratch://pg-partition-naming/AC3", status=200,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=observations)))
+
+
+pg_partition_naming_checks()
 selective_window_checks()
 selective_memo_checks()
 
