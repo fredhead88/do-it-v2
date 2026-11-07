@@ -316,7 +316,7 @@ def compare(tip, base):
     return existing, new, uncertain
 
 
-def compact(tip, base):
+def compact(tip, base, invocation_id=None):
     """Publish details for failing tip nodes, rather than every passing test."""
     for index, row in enumerate(tip):
         wanted = set(row['failing_ids'])
@@ -326,6 +326,12 @@ def compact(tip, base):
                 for key in ('results', 'collected'):
                     step[key] = {node: value for node, value in step.get(key, {}).items()
                                  if node in wanted}
+    bundle = {"commands": tip, "base": base}
+    if invocation_id is not None:
+        bundle["invocation_id"] = invocation_id
+    return bundle
+
+
 
 
 def stamp_bundle(bundle, key):

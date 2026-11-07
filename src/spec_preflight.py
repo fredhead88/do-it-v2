@@ -22,7 +22,8 @@ import scratch
 import verification
 
 TEST_CAP_S = 600
-TICK_MAX = 4
+TICK_MAX = 4  # Legacy threshold, no longer a selection cap.
+TICK_BUDGET_S = 240
 DOIT = Path(__file__).resolve().parent.parent / "doit"
 HEX = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 TEST_TOKEN = re.compile(r"(?<![\w/])(?:[\w./-]+/)?test_[\w.-]+\.py(?:::[\w.\[\]/:-]+)?")
@@ -274,7 +275,9 @@ def _check_tests(body, text, project, checkout, env, writes):
 
 
 def _validate(body):
-    assert set(body) == {"spec", "findings", "red_on_master", "undetermined"}
+    assert set(body) - {"lag_s"} == {"spec", "findings", "red_on_master", "undetermined"}
+    if "lag_s" in body:
+        assert type(body["lag_s"]) in (int, float) and body["lag_s"] >= 0
     assert isinstance(body["spec"], str)
     for row in body["findings"]:
         assert set(row) == {"check", "id", "line"} and type(row["check"]) is int and 1 <= row["check"] <= 4
@@ -389,6 +392,7 @@ def _append(root, body, *, spec_written=None):
 def tick(*, root=None, now=None):
     root = Path(root) if root is not None else fold.ROOT
     now = now or datetime.now(timezone.utc)
+    deadline = time.monotonic() + TICK_BUDGET_S
     try:
         events = _events(root)
     except (OSError, ValueError) as exc:
@@ -396,15 +400,19 @@ def tick(*, root=None, now=None):
         return 2
     waiting = pending(events)
     eligible = [sid for sid in waiting if _eligible(sid, events, now)]
-    picked = eligible[:TICK_MAX]
     written = {e.get("subject"): e for e in events if e.get("type") == "spec-written"}
+    eligible.sort(key=lambda sid: datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00")))
     identities = {}
-    for sid in picked:
+    for sid in eligible:
         try:
             identities[sid] = _text_identity(root, written[sid])
         except OSError:
             identities[sid] = None
-    for sid in picked:
+    processed, lags = 0, []
+    for sid in eligible:
+        if time.monotonic() >= deadline:
+            break
+        processed += 1
         try:
             if identities[sid] is None:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
@@ -417,14 +425,19 @@ def tick(*, root=None, now=None):
             if not unchanged:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
+            stamp = datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00"))
+            body["lag_s"] = (now - stamp).total_seconds()
             _append(root, body, spec_written=written[sid])
+            lags.append(f"{sid}:{body['lag_s']}")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print("preflight append: " + str(exc), file=sys.stderr)
             return 1
-    print(f"spec-preflight: processed={min(len(eligible), TICK_MAX)} "
-          f"deferred={max(0, len(eligible)-TICK_MAX)} (tick cap {TICK_MAX}); "
+    print(f"spec-preflight: processed={processed} "
+          f"deferred={len(eligible)-processed} (tick budget {TICK_BUDGET_S}s); "
           f"skipped={len(waiting)-len(eligible)} "
-          "(requires a valid timestamp under 3 days old, no later build-started, and no closed state)")
+          "(requires a valid timestamp under 3 days old, no later build-started, and no closed state); "
+          f"lag_s={', '.join(lags) or 'none'}; "
+          f"deferred specs={', '.join(eligible[processed:]) or 'none'}")
     return 0
 
 

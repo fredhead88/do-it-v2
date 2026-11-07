@@ -665,7 +665,7 @@ class BuildRunnerTests(unittest.TestCase):
         self.spec("python3 -c 'import sys;sys.stdout.buffer.write(bytes(range(256))*781+bytes(range(64)))'")
         bundle, path = self.bundle()
         self.assertEqual(set(bundle), {"spec", "project", "sha", "base_sha", "spec_sha256", "bundle_key", "master_sha", "local_master_sha", "criteria", "runner_version", "started_at",
-                                       "env", "rewrites", "commands", "base", "comparison", "judgment_only"})
+                                       "env", "rewrites", "commands", "base", "comparison", "judgment_only", "invocation_id"})
         self.assertRegex(bundle["started_at"], r"^\d{4}-\d\d-\d\dT")
         self.assertTrue(bundle["runner_version"])
         row = bundle["commands"][0]
@@ -696,6 +696,8 @@ class BuildRunnerTests(unittest.TestCase):
         self.assertEqual(self.env["DOIT_LEDGER_FILE"], "L-executor-0001.jsonl")
         event, = self.events()
         self.assertNotIn("actor", event)
+        self.assertTrue(event["invocation_id"])
+        self.assertEqual(event["invocation_id"], bundle["invocation_id"])
         self.assertEqual({k: event[k] for k in ("sha", "base_sha")}, {k: bundle[k] for k in ("sha", "base_sha")})
         self.assertEqual((event["n_commands"], event["n_failed"], event["n_new"]), (1, 0, 0))
         wrong = dict(event)
@@ -810,6 +812,7 @@ class BuildRunnerTests(unittest.TestCase):
                 self.assertEqual(len(events), prior + 1)
                 self.assertEqual(events[-1]["type"], "evidence-bundle-failed")
                 self.assertTrue(events[-1]["reason"])
+                self.assertTrue(events[-1]["invocation_id"])
                 self.assertFalse(list((self.root / "content").rglob("*.json")))
                 self.assertFalse([e for e in self.folded()["kept"] if e["type"] == "evidence-bundle"])
                 self.assert_clean()

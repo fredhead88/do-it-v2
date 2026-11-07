@@ -564,6 +564,7 @@ def _bundle_base(repo, project, done, sha, env, deadline):
 
 def run(spec, requested_sha=None, criteria=None, *, fresh=False):
     sweep_short_tmpdirs()
+    invocation_id = evidence_revision.new_invocation_id()
     started = datetime.now(timezone.utc).isoformat()
     sha, project = requested_sha or "unresolved", None
     tails = path = None
@@ -631,12 +632,12 @@ def run(spec, requested_sha=None, criteria=None, *, fresh=False):
             # AC7: a base which could not provision supplies no clean ids.
             base, base_logs, missing = [], [], []
         comparison = _compare(project, base_sha, tip, base, tip_logs, base_logs, missing)
-        runner_evidence.compact(tip, base)
+        compacted = runner_evidence.compact(tip, base, invocation_id=invocation_id)
         bundle = {"spec": spec, "project": project, "sha": sha, "base_sha": base_sha,
                   "spec_sha256": evidence_revision.digest(text),
                   "master_sha": master_sha, "local_master_sha": local_master_sha, "criteria": sorted(criteria) if criteria is not None else None,
                   "runner_version": VERSION, "started_at": started, "env": summary,
-                  "rewrites": rewrites, "commands": tip, "base": base,
+                  "rewrites": rewrites, **compacted,
                   "comparison": comparison, "judgment_only": judgment}
         runner_evidence.stamp_bundle(bundle, revision)
         data = (json.dumps(bundle, indent=2) + "\n").encode()
@@ -649,7 +650,7 @@ def run(spec, requested_sha=None, criteria=None, *, fresh=False):
         temporary.write_bytes(data)
         temporary.replace(path)
         _event(spec, project, "evidence-bundle", path=str(path), sha=sha, base_sha=base_sha,
-               bundle_key=revision, criteria=bundle['criteria'],
+               invocation_id=invocation_id, bundle_key=revision, criteria=bundle['criteria'],
                bundle_sha256=hashlib.sha256(data).hexdigest(), n_commands=len(tip),
                n_failed=sum(r["exit"] != 0 for r in tip), n_new=len(comparison["new"]))
         return path
@@ -673,7 +674,7 @@ def run(spec, requested_sha=None, criteria=None, *, fresh=False):
         fields = {"env": NO_PROD_ENV} if isinstance(exc, ProductionDataUnavailable) else {}
         if isinstance(exc, WallCap):
             fields["reason_code"] = "wall-cap"
-        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, **fields)
+        _event(spec, project, "evidence-bundle-failed", sha=sha, reason=reason, invocation_id=invocation_id, **fields)
         raise Undetermined(reason) from None
     finally:
         resources.close()

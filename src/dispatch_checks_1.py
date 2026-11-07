@@ -219,9 +219,13 @@ assert evs[3]["deviation"] == "significant" and evs[3]["type"] == "build-deviati
 assert evs[5]["root_cause"] == "false-premise", "a declaration is an event typed by its term"
 stray.unlink()
 
-grade = lambda vs, **kw: {"verdicts": vs, "matches_intent": "yes", "card_ok": "yes", "could_not_run": False,
-                          "contamination": False, "declarations": [],
-                          "checkers": [{"id": "gate", "version": "1", "coverage_note": "n1", "result": "pass"}], **kw}
+def grade(vs, *, criteria=("AC1",), **kw):
+    # Independently supplied fixture spec; never infer the expected ids from vs.
+    global GRADER_CRITERIA
+    GRADER_CRITERIA = list(criteria) if criteria is not None else None
+    return {"verdicts": vs, "matches_intent": "yes", "card_ok": "yes", "could_not_run": False,
+            "contamination": False, "declarations": [],
+            "checkers": [{"id": "gate", "version": "1", "coverage_note": "n1", "result": "pass"}], **kw}
 met, unmet = {"ac": "AC1", "verdict": "met", "reason": "r"}, {"ac": "AC2", "verdict": "unmet", "reason": "no evidence"}
 rejects = lambda: fold.fold(fold.read_events())[0]["L-spec-0001"]["rejects"]
 
@@ -246,16 +250,19 @@ def _lift_cap435(subject="L-spec-0001", _n=[0]):
     f.write_text(json.dumps({"v": 1, "ts": ts, "type": "decision", "subject": subject, "regrade": "yes"}) + "\n")
 
 
-code, types, evs, _ = spawn("grader", out=grade([met, unmet]))
+code, types, evs, _ = spawn("grader", out=grade([met], criteria=None), subject="L-spec-2046missing")
+assert code == 1 and "verdict" not in types and "criteria unavailable" in evs[-1]["why"], evs
+
+code, types, evs, _ = spawn("grader", out=grade([met, unmet], criteria=("AC1", "AC2")))
 assert types == ["verdict", "rejected-criterion", "checker-coverage-change", "spawn-done"], types
 assert evs[0]["confirmed"] is False and evs[1]["criterion"] == "AC2" and rejects() == 1
 code, types, evs, _ = spawn("grader", out=grade([met], card_ok="cannot-assess", could_not_run=True))
 assert evs[0]["confirmed"] is False and "gate-infra" in types and "criterion-cleared" not in types
 assert "checker-coverage-change" not in types, "same coverage note: no change event"
-code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "AC2", "verdict": "met", "reason": "now evidenced"}]))
+code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "AC2", "verdict": "met", "reason": "now evidenced"}], criteria=("AC1", "AC2")))
 assert "criterion-cleared" in types and evs[0]["confirmed"] is True and rejects() == 0, "a re-grade that names it met clears it"
 _lift_cap435()
-code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "DONE-COND", "verdict": "unmet", "reason": "residue"}]))
+code, types, evs, _ = spawn("grader", out=grade([met, {"ac": "DONE-COND", "verdict": "unmet", "reason": "residue"}], criteria=("AC1", "DONE-COND")))
 assert rejects() == 1
 _lift_cap435()
 code, types, evs, _ = spawn("grader", out=grade([met], card_ok="no"))
@@ -273,7 +280,7 @@ assert [e["criterion"] for e in evs if e["type"] == "criterion-cleared"] == ["DO
 cannot_assess = {"ac": "AC7", "verdict": "cannot-assess", "reason": "post-merge check-run does not exist yet",
                  "reason_code": "criterion-unevaluable-from-packet"}
 _lift_cap435()
-code, types, evs, _ = spawn("grader", out=grade([met, cannot_assess]))
+code, types, evs, _ = spawn("grader", out=grade([met, cannot_assess], criteria=("AC1", "AC7")))
 assert types[0] == "verdict" and evs[0]["confirmed"] is False and evs[0]["cannot_assess"] == ["AC7"], evs[0]
 assert "rejected-criterion" not in types, "cannot-assess is not unmet — no rejected-criterion for it"
 _lift_cap435()

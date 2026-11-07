@@ -131,10 +131,10 @@ class ReadTests(unittest.TestCase):
                     self.spec(sid)
                     self.event(kind, sid)
                 stdout, stderr = self.tick()
-                self.assert_appends(expected[:4])
+                self.assert_appends(expected)
                 self.assertTrue(stdout.startswith(
-                    f"spec-preflight: processed={min(count, 4)} deferred={max(0, count-4)} "
-                    "(tick cap 4); skipped=2"), stdout)
+                    f"spec-preflight: processed={count} deferred=0 "
+                    "(tick budget 240s); skipped=2"), stdout)
                 self.assertEqual(stderr, "")
 
     def test_midpass_rewrite_and_restamp(self):
@@ -219,7 +219,7 @@ class ReadTests(unittest.TestCase):
     def test_empty_pass(self):
         stdout, stderr = self.tick()
         self.assert_appends([])
-        self.assertTrue(stdout.startswith("spec-preflight: processed=0 deferred=0 (tick cap 4); skipped=0"))
+        self.assertTrue(stdout.startswith("spec-preflight: processed=0 deferred=0 (tick budget 240s); skipped=0"))
         self.assertEqual(stderr, "")
 
     def test_direct_call_fallbacks_and_supplied_events(self):

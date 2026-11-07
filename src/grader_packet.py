@@ -1,4 +1,5 @@
 """Read runner evidence for a blind grader; never execute bundle commands."""
+from collections import Counter
 import hashlib
 import evidence_revision
 import json
@@ -231,9 +232,40 @@ def gate(events, subject, packet, emit, fail):
     return bundle
 
 
-def validate_output(output, bundle):
+def spec_criteria_ids(spec_text: str) -> list[str]:
+    import packet
+    body = "\n".join(packet.criteria(spec_text))
+    return [cid for cid, _, _ in packet._criterion_spans(body, allow_bullets=True)]
+
+
+def validate_output(output, bundle, criteria=None):
     """Return a named validation error before any verdict/hold is emitted."""
     data = bundle["bundle"] if bundle else {}
+    if criteria is None:
+        try:
+            spec = data.get("spec", "")
+            if not isinstance(spec, str) or not re.fullmatch(r"L-spec-\d+", spec):
+                return "verdicts: criteria unavailable (bundle has no valid spec)"
+            criteria = spec_criteria_ids((root() / "content" / f"{spec}.md").read_text())
+        except (OSError, ValueError, SystemExit):
+            return "verdicts: criteria unavailable (spec unreadable or has no criteria)"
+    if (not criteria or not all(isinstance(cid, str) and cid for cid in criteria)
+            or len(criteria) != len(set(criteria))):
+        return "verdicts: criteria unavailable or ambiguous"
+    ids = [row["ac"] for row in output["verdicts"]]
+    counts = Counter(ids)
+    missing = [cid for cid in criteria if cid not in counts]
+    extra = list(dict.fromkeys(cid for cid in ids if cid not in criteria))
+    duplicate = [cid for cid, count in counts.items() if count > 1]
+    errors = []
+    if missing:
+        errors.append(f"missing {', '.join(missing)} ({len(ids)} of {len(criteria)})")
+    if extra:
+        errors.append("extra " + ", ".join(extra))
+    if duplicate:
+        errors.append("duplicate " + ", ".join(duplicate))
+    if errors:
+        return "verdicts: " + "; ".join(errors)
     pre_existing = data.get("comparison", {}).get("pre_existing", [])
     if any(x not in pre_existing for x in output.get("pre_existing", [])):
         return "pre_existing: id absent from bundle comparison.pre_existing"

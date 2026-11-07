@@ -141,6 +141,8 @@ def check_evidence1109():
         ledger.write_text(json.dumps(done) + "\n")
         directory = root / "content" / "evidence" / subject
         directory.mkdir(parents=True)
+        (root / "content" / (subject + ".md")).write_text(
+            "## Acceptance criteria\nAC1 [backend]: bundle.\nAC2 [backend]: diff.\n")
         tail = directory / "0.tail"
         tail.write_text("all passed")
         bundle = {"spec": subject, "sha": ready, "base_sha": "a" * 40,
@@ -256,7 +258,8 @@ def check_evidence1109():
                     mock.patch.object(grading_env, '_prove_tools', side_effect=AssertionError('tool proof attempted')):
                 for command in ("python3 -m pytest /opt/fixture/tests", "git diff HEAD"):
                     (root / "content" / (subject + ".md")).write_text(
-                        "## Acceptance criteria\nAC1 [backend]: fixture\nreview_path: run " + command + "\n")
+                        "## Acceptance criteria\nAC1 [backend]: fixture\nreview_path: run " + command
+                        + "\nAC2 [backend]: diff.\n")
                     rows = drive()
                     assert any(r["type"] == "verdict" for r in rows), rows
                     assert not any(r["type"] in ("grading-preflight-failed", "capability-hold") for r in rows)
@@ -1037,7 +1040,7 @@ if __name__ == "__main__":
     raw_ev("spec-writer", "fx482ac2", "owed-ac", subj_ac2_482, GT(0), criterion="AC2")
     met_ac3_482 = {"ac": "AC3", "verdict": "met", "reason": "r"}
     code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "env-file"), _ca482("AC2", "browser"),
-                                                      met_ac3_482]), subject=subj_ac2_482)
+                                                      met_ac3_482], criteria=("AC1", "AC2", "AC3")), subject=subj_ac2_482)
     vev2_482 = next(e for e in evs if e["type"] == "verdict")
     assert vev2_482["missing_capability"] == [{"ac": "AC1", "capability": "env-file"}], vev2_482
     assert set(vev2_482["cannot_assess"]) == {"AC1", "AC2"}, vev2_482
@@ -1050,7 +1053,7 @@ if __name__ == "__main__":
     # giving the subject one harmless admitted event first.
     raw_ev("spec-writer", "fx482ac2bpre", "spec-written", subj_ac2b_482, GT(-1))
     raw_ev("executor", "fx482ac2b", "owed-ac", subj_ac2b_482, GT(0), criterion="AC4")
-    code, types, evs, _ = spawn("grader", out=grade([_ca482("AC4", "env-file")]), subject=subj_ac2b_482)
+    code, types, evs, _ = spawn("grader", out=grade([_ca482("AC4", "env-file")], criteria=("AC4",)), subject=subj_ac2b_482)
     vev2b_482 = next(e for e in evs if e["type"] == "verdict")
     assert vev2b_482["missing_capability"] == [{"ac": "AC4", "capability": "env-file"}], \
         "AC2: an executor-authored owed-ac with no prior declaration never suppresses"
@@ -1092,7 +1095,7 @@ if __name__ == "__main__":
     assert "capability-hold" in types and "escalation-blocking" in types, \
         "AC4: after an unblocked close, the next non-owed cannot-assess opens a fresh hold"
     subj_ac4c_482 = "L-spec-9456"
-    code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "browser"), _ca482("AC2", "review-account")]),
+    code, types, evs, _ = spawn("grader", out=grade([_ca482("AC1", "browser"), _ca482("AC2", "review-account")], criteria=("AC1", "AC2")),
                                subject=subj_ac4c_482)
     hold_subjs_482 = {e["subject"] for e in evs if e["type"] == "capability-hold"}
     assert hold_subjs_482 == {f"capability:browser:{subj_ac4c_482}", f"capability:review-account:{subj_ac4c_482}"}, \
@@ -1139,7 +1142,7 @@ if __name__ == "__main__":
     # W44: after a ruling and release, even a stale grader output cannot
     # reopen the hold. A mixed output still holds on its unruled AC alone.
     subj44 = "L-spec-9444"
-    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")]), subject=subj44)
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")], criteria=("AC9", "AC10")), subject=subj44)
     hold44 = next(e for e in rows44 if e['type'] == 'capability-hold')
     assert hold44['criteria'] == ['AC9', 'AC10'], hold44
     raw_ev('thinker', 'w44ruling9', 'decision', subj44, FT(1), criterion='AC9',
@@ -1147,12 +1150,12 @@ if __name__ == "__main__":
     raw_ev('operator', 'w44ruling10', 'decision', subj44, FT(2),
            why='AC10 is ruled met: amended verification exits 0.', evidence='fixture/all.json')
     raw_ev('thinker', 'w44release', 'unblocked', hold44['subject'], FT(3))
-    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")]), subject=subj44)
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10")], criteria=("AC9", "AC10")), subject=subj44)
     assert code == 0 and 'verdict' in types, (code, types)
     assert not {'capability-hold', 'escalation-blocking'} & set(types), types
     assert next(e for e in rows44 if e['type'] == 'verdict')['missing_capability'] == []
     assert hold44['subject'] not in fold.capability_holds(fold.read_events())
-    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10"), _ca482("AC11")]), subject=subj44)
+    code, types, rows44, _ = spawn("grader", out=grade([_ca482("AC9"), _ca482("AC10"), _ca482("AC11")], criteria=("AC9", "AC10", "AC11")), subject=subj44)
     assert code == 0 and 'capability-hold' in types, (code, types)
     assert next(e for e in rows44 if e['type'] == 'capability-hold')['criteria'] == ['AC11']
     print('W44 ruled release stays released across stale regrade; unruled AC still holds')
@@ -1258,7 +1261,7 @@ if __name__ == "__main__":
         "AC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
     met_8034 = {"ac": "AC2", "verdict": "met", "reason": "r"}
 
-    code6a, types6a, evs6a, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+    code6a, types6a, evs6a, _ = spawn("grader", out=grade([met_8034], criteria=("AC2",)), subject=SUBJ_8034_6)
     assert code6a == 0 and "spawn-failed" not in types6a, (code6a, types6a, evs6a)
     routed6a = [e for e in evs6a if e["type"] == "criterion-routed"]
     assert len(routed6a) == 1 and routed6a[0]["criterion"] == "AC1" and routed6a[0]["capability"] == "browser" \
@@ -1268,14 +1271,14 @@ if __name__ == "__main__":
     N += 1
 
     # a second, unchanged dispatch appends no new criterion-routed row
-    code6b, types6b, evs6b, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+    code6b, types6b, evs6b, _ = spawn("grader", out=grade([met_8034], criteria=("AC2",)), subject=SUBJ_8034_6)
     assert code6b == 0 and not any(t == "criterion-routed" for t in types6b), types6b
     N += 1
 
     # rework: the browser criterion is dropped -> the next dispatch appends to=none
     SPEC_8034_6.write_text(
         "## Acceptance criteria\n\nAC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
-    code6c, types6c, evs6c, _ = spawn("grader", out=grade([met_8034]), subject=SUBJ_8034_6)
+    code6c, types6c, evs6c, _ = spawn("grader", out=grade([met_8034], criteria=("AC2",)), subject=SUBJ_8034_6)
     routed6c = [e for e in evs6c if e["type"] == "criterion-routed"]
     assert len(routed6c) == 1 and routed6c[0]["criterion"] == "AC1" and routed6c[0]["to"] == "none", routed6c
     print("8034-AC6 ok (non-seat grader route)")
@@ -1289,7 +1292,7 @@ if __name__ == "__main__":
         "## Acceptance criteria\n\nAC1 [ui]: browser criterion.\nreview_path: log in as x, go to /y\n\n"
         "AC2 [backend]: plain criterion.\nreview_path: nothing special here.\n")
     _seat_view_6 = pathlib.Path(tempfile.mkdtemp())
-    code6s, raw6s = _gv_drive(SUBJ_8034_6S, view_build=lambda *a: _seat_view_6, serve_out=grade([met_8034]))
+    code6s, raw6s = _gv_drive(SUBJ_8034_6S, view_build=lambda *a: _seat_view_6, serve_out=grade([met_8034], criteria=("AC2",)))
     assert code6s == 0 and not any(e["type"] == "spawn-failed" for e in raw6s), raw6s
     routed6s = [e for e in raw6s if e["type"] == "criterion-routed"]
     assert len(routed6s) == 1 and routed6s[0]["criterion"] == "AC1" and routed6s[0]["to"] == "owed", raw6s
@@ -1298,7 +1301,7 @@ if __name__ == "__main__":
 
     # AC7 (events_for half): dispatch never derives a criterion-routed from a
     # grader Output, whatever its fields look like.
-    ev_for_7 = dispatch.events_for("grader", grade([met_8034]), argparse.Namespace(subject=SUBJ_8034_6),
+    ev_for_7 = dispatch.events_for("grader", grade([met_8034], criteria=("AC2",)), argparse.Namespace(subject=SUBJ_8034_6),
                                    {"subject": SUBJ_8034_6})
     assert not any(t == "criterion-routed" for t, _ in ev_for_7), ev_for_7
     print("8034-AC7(events_for) ok")
@@ -1312,17 +1315,17 @@ if __name__ == "__main__":
         "AC08 [ui]: unrejected.\nreview_path: log in as x, go to /y\n"
         "AC15 [backend]: plain contract.\nreview_path: inspect contract\n")
     unmet52 = {"ac": "AC07", "verdict": "unmet", "reason": "contract not built"}
-    code52, _, evs52, _ = spawn("grader", out=grade([unmet52]), subject=s52)
+    code52, _, evs52, _ = spawn("grader", out=grade([unmet52], criteria=("AC07",)), subject=s52)
     assert code52 == 0 and {e["criterion"] for e in evs52 if e["type"] == "criterion-routed"} == {"AC07", "AC08"}, evs52
     assert any(e["type"] == "rejected-criterion" and e["criterion"] == "AC07" for e in evs52), evs52
     _gv_build_done(s52, ready_sha="rework52")
     code52, _, evs52, _ = spawn("grader", out=grade([
-        {"ac": "AC07", "verdict": "met", "reason": "contract now built"}]), subject=s52)
+        {"ac": "AC07", "verdict": "met", "reason": "contract now built"}], criteria=("AC07",)), subject=s52)
     assert code52 == 0 and any(e["type"] == "criterion-cleared" and e["criterion"] == "AC07" for e in evs52), evs52
     assert [(e["criterion"], e["to"]) for e in evs52 if e["type"] == "criterion-routed"] == [("AC07", "none")], evs52
     assert not fold.standing_rejects([e for e in fold.read_events() if e.get("subject") == s52])
     code52, _, evs52, _ = spawn("grader", out=grade([
-        {"ac": "AC15", "verdict": "met", "reason": "r"}]), subject=s52)
+        {"ac": "AC15", "verdict": "met", "reason": "r"}], criteria=("AC15",)), subject=s52)
     assert code52 == 0 and [(e["criterion"], e["to"]) for e in evs52 if e["type"] == "criterion-routed"] == [("AC07", "owed")], evs52
     print("W52: route + reject, rework, revoke, clear, normal routing restored")
 

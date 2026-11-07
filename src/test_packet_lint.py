@@ -227,3 +227,15 @@ for accept, fires in (("AC1 [backend]: commit abc1234.", True),
             if r['id'] == 'PL-014']
     check(bool(rows) == fires and all(r['severity'] == 'warn' for r in rows), accept)
 print('L-spec-1663 AC2 lint ok')
+
+# L-spec-2046 AC2: callers need no checklist/severity knowledge.
+for fixture, blocked in ((CD_PREFIX, True),
+        (spec_text(accept="AC1 [backend]: works.\n  review_path: run `cd /opt/albert-scott && /usr/bin/true`."), True),
+        (spec_text(verify=PORTABLE + " && /usr/bin/true"), False)):
+    blocks = packet_lint.spec_written_blocks(fixture)
+    check(blocks == packet_lint.split(packet_lint.run(fixture, packet_lint.CHECKLIST, "spec"))[0],
+          "spec-written uses the canonical blocking findings")
+    check(any(row.startswith("PL-010:") for row in blocks) == blocked, str(blocks))
+    if not blocked:
+        check(blocks == [], str(blocks))
+print('L-spec-2046 AC2 spec-written blocks ok')
