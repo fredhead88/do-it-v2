@@ -55,6 +55,8 @@ class DigestTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.sent = []
+        # These argv/HTTP regressions deliberately exercise the pre-cutover route.
+        self.assertFalse((self.root / 'state/tg-cutover-done').exists())
         self.install(fixture())
 
     def install(self, events):
