@@ -73,35 +73,39 @@ class ScriptTests(unittest.TestCase):
             self.run_script('remember-thinker-pane.sh', **env)
             self.assertEqual((self.root / 'state/thinker-pane').read_text(), '%91\n')
 
-    def test_sender_logs_first_line_time_sender_on_every_attempt(self):
+    def test_sender_logs_metadata_and_truthful_results(self):
         (self.root / 'telegram').mkdir()
-        (self.root / 'telegram.token').write_text('fixture-token\n')
-        (self.root / 'telegram/chat_id').write_text('fixture-chat\n')
+        (self.root / 'telegram.token').write_text('synthetic')
+        (self.root / 'telegram/chat_id').write_text('12345')
+        text = '[YOU] Fixture\nConfirmed\nYou: Read the result'
         for code in ('200', '429'):
-            result = self.run_script('tg-send.sh', 'NEEDS YOU: fixture\nprivate second line', FAKE_HTTP=code)
+            result = subprocess.run(['bash', str(SCRIPTS / 'tg-send.sh'), text],
+                                    env=self.env | {'FAKE_HTTP': code}, capture_output=True, text=True)
+            self.assertEqual(result.returncode == 0, code == '200')
             self.assertEqual(result.stdout.strip(), code)
         log = self.root / 'logs/tg-send.jsonl'
         rows = [json.loads(line) for line in log.read_text().splitlines()]
-        self.assertEqual(len(rows), 2)
-        for row in rows:
-            self.assertEqual(row['first_line'], 'NEEDS YOU: fixture')
-            self.assertEqual(row['sender'], 'fixture-sender')
-            self.assertRegex(row['time'], r'^\d{4}-\d\d-\d\dT.*\+00:00$')
-        self.assertNotIn('fixture-token', log.read_text())
-        self.assertNotIn('fixture-chat', log.read_text())
-        self.assertNotIn('second line', log.read_text())
+        self.assertEqual(len(rows), 4)
+        for before, after in zip(rows[::2], rows[1::2]):
+            self.assertEqual(before['id'], after['id'])
+            self.assertEqual(before['event'], 'attempt')
+            self.assertIsNone(before['http'])
+            self.assertEqual(after['event'], 'result')
+            self.assertEqual(after['sender'], 'fixture-sender')
+            self.assertRegex(after['time'], r'\+0[23]:00$')
+        self.assertNotIn('Fixture', log.read_text())
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
 
     def test_log_failure_prevents_transport_and_tokens_without_newline_work(self):
         (self.root / 'telegram').mkdir()
         (self.root / 'telegram.token').write_text('fixture-token')
-        (self.root / 'telegram/chat_id').write_text('fixture-chat')
-        self.run_script('tg-send.sh', 'fixture')
+        (self.root / 'telegram/chat_id').write_text('12345')
+        self.run_script('tg-send.sh', '[YOU] Fixture\nConfirmed\nYou: Read')
         calls = self.root / 'curl-calls'
         self.assertEqual(calls.read_text().splitlines(), ['called'])
         (self.root / 'logs/tg-send.jsonl').unlink()
         (self.root / 'logs/tg-send.jsonl').symlink_to(self.root / 'do-not-follow')
-        result = subprocess.run(['bash', str(SCRIPTS / 'tg-send.sh'), 'fixture'], env=self.env,
+        result = subprocess.run(['bash', str(SCRIPTS / 'tg-send.sh'), '[YOU] Fixture\nConfirmed\nYou: Read'], env=self.env,
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls.read_text().splitlines(), ['called'])
