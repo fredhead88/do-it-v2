@@ -41,7 +41,7 @@ BASE_MANIFEST = TMP / "base-crons.toml"
 BASE_MANIFEST.write_bytes(subprocess.check_output(
     ["git", "show", f"{base}:crons.toml"], cwd=REAL_MANIFEST.parent))
 BASE_ROWS = crons.rows(str(BASE_MANIFEST))
-NAMES = {"worktree-reaper", "scratch-db-reaper", "doit-base-red-nightly", "tick", "look", "tmp-reaper", "lessons-digest", "backup-watch", "ledger-repack",
+NAMES = {"claude-autoswitch", "worktree-reaper", "scratch-db-reaper", "doit-base-red-nightly", "tick", "look", "tmp-reaper", "lessons-digest", "backup-watch", "ledger-repack",
          "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-json",
          "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"}
 
@@ -86,7 +86,7 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == len(BASE_ROWS) + 14, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly: {len(r1)} vs {len(BASE_ROWS)}")
+check(len(r1) == len(BASE_ROWS) + 15, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly + claude-autoswitch: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
 repack = next(row for row in r1 if row["name"] == "ledger-repack")
 check(repack == {
@@ -311,10 +311,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
-      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample, stall-sample, pane-watchdog, executor-wake, spec-preflight, ledger-rollup and flow-health-daily: {res5}")
+check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"claude-autoswitch", "scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
+      f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample, stall-sample, pane-watchdog, executor-wake, spec-preflight, ledger-rollup, flow-health-daily and claude-autoswitch: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 15, f"AC5: thirteen additions and verify-owed retired: {res5}")
+check(len(res5) == len(base_missing) + 16, f"AC5: additions including claude-autoswitch and verify-owed retired: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "12,27,42,57 * * * *",
@@ -330,8 +330,8 @@ first_install = seat_crontab.read_bytes()
 check(first_install.count(b"# doit-cron:seat-usage") == 1, "1129-AC9: exactly one installed row")
 crons.install("seat-usage", crontab_path=str(seat_crontab))
 check(seat_crontab.read_bytes() == first_install, "1129-AC9: second install unchanged")
-print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 11; "
-      f"absent {len(res5)} = base {len(base_missing)} + 12; install idempotent")
+print(f"1129-AC9 rows {len(r1)} = base {len(BASE_ROWS)} + 15; "
+      f"absent {len(res5)} = base {len(base_missing)} + 16; install idempotent")
 
 # AC5's second, minimal fixture: the only matching line is commented.
 d5b = TMP / "ac5b"

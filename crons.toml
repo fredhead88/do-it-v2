@@ -346,3 +346,13 @@ path = "{doit}"
 sig = '\bdoit reap-worktrees\b'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "claude-autoswitch"
+where = "user"
+schedule = "*/5 * * * *"
+command = "DOIT_ROOT={root} {doit} cron-run claude-autoswitch -- /usr/bin/python3 {repo}/scripts/claude-autoswitch.py >/dev/null 2>&1"
+path = "/usr/bin/python3"
+sig = '^(?!\s*#).*\b(?:python3\s+\S*/claude-autoswitch\.py(?=\s|$)|cron-run\s+claude-autoswitch\s+--)'
+owner = "thinker"
+project = "do-it-v2"

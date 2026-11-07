@@ -7,8 +7,8 @@ and switch back when the other one resets.
 Every run (cron, every 5 min):
 - reads session (5-hour) and weekly usage for both saved accounts from the
   OAuth usage endpoint (tokens are read from disk, never printed);
-- refreshes unreadable saved credentials with the CLI OAuth protocol;
-- alerts once after two unreadable passes for the active account;
+- refreshes unreadable inactive saved credentials with the CLI OAuth protocol;
+- logs a blind episode once after two unreadable passes for the active account;
 - if active usage is unreadable and a pane shows a quota pause, switches to a
   readable account below its limits;
 - if the active account is at or above SWITCH_AT on either limit and the other
@@ -17,7 +17,8 @@ Every run (cron, every 5 min):
   BACK_AT on both limits (or its last known weekly reset has passed and it
   cannot be read), switches back to 1.
 A switch is never started within COOLDOWN_MIN of the previous one (claude-switch
-needs ~12 min to settle). Every decision is logged; each switch is sent to Telegram.
+needs ~12 min to settle). Decisions, switches and blind-episode notifications
+are logged locally.
 """
 import datetime as dt
 import json
@@ -30,10 +31,10 @@ import urllib.request
 
 HOME = pathlib.Path.home()
 DIR = HOME / ".do-it/private/claude-accounts"
-STATE = HOME / ".do-it/state/claude-autoswitch.json"
-LOG = HOME / ".do-it/logs/claude-autoswitch.log"
+ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", str(HOME / ".do-it")))
+STATE = ROOT / "state/claude-autoswitch.json"
+LOG = ROOT / "logs/claude-autoswitch.log"
 SWITCH = HOME / ".do-it/bin/claude-switch.sh"
-TG = HOME / ".do-it/telegram/tg-send.sh"
 SWITCH_AT, BACK_AT, COOLDOWN_MIN, PRIMARY = 99, 90, 15, "1"
 NOW = dt.datetime.now(dt.timezone.utc)
 

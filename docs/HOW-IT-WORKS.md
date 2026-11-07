@@ -108,9 +108,10 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   scratch-db-reaper | 17 * * * * | user | {doit}  {doit} cron-run scratch-db-reaper -- {doit}
   reap-scratch-db; worktree-reaper | */5 * * * * | user | {doit}  {doit} cron-run worktree-reaper --
   {doit} reap-worktrees >> {root}/logs/worktree-reaper.log 2>&1
+  claude-autoswitch | */5 * * * * | user | /usr/bin/python3  DOIT_ROOT={root} {doit} cron-run
+  claude-autoswitch -- /usr/bin/python3 {repo}/scripts/claude-autoswitch.py >/dev/null 2>&1
 
 ## Tick event types
-
 Source: literal `dispatch.emit` and `look.emit_once` calls in `src/tick.py`,
 plus every action in `lane_rules.toml`.
 - autodispatch-failed; autodispatch-skipped; autodispatched; charter-closed; charter-proving;
@@ -119,7 +120,6 @@ plus every action in `lane_rules.toml`.
   queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped
 
 ## Member verdicts
-
 Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
 - After a red window with unnamed owners, each remaining member is verified alone on the window
   base, at most 4 CI runs at once (member_verify_parallel).
