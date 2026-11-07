@@ -161,6 +161,7 @@ class Fx:
         self.base_reader = lambda project, sha: {"sha": sha, "complete": True}
         self.log_reader = lambda repo, doc: []
         self.service = types.SimpleNamespace(_owner=lambda repo: "o/r", parse_log=base_red.parse_log,
+            _classify_selected_attempt=base_red._classify_selected_attempt,
             classify=lambda project, sha, ids, **kwargs: {
                 "complete": True, "pre_existing": [n for n in ids if n in self.known],
                 "new": [n for n in ids if n not in self.known]})
@@ -3915,6 +3916,174 @@ def flake_only_checks():
     check(fx.events('window-verified')[-1].get('flakes') == ids[:1] and
           fx.events('window-verified')[-1]['kept'] == ['B'], 'C21 remainder ships with flake record')
 
+
+
+def selective_window_checks():
+    import base_red as br
+    import window_attribution as wa
+    from datetime import datetime, timedelta, timezone
+    start = len(FAILS)
+    old, node = "api/tests/test_z.py::test_old", "api/tests/test_x.py::test_new"
+    unsupported = ["pg-parity::x", "dashboard/src/broken.test.ts"]
+    cases = ("known", "mixed", "stale", "missing", "red", "unresolved", "exception", "append-failed",
+             "exit2", "known-unsupported", "unknown-unsupported", "unnamed", "failed-check")
+    for case in cases:
+        fx = Fx({"A": "api/tests/test_x.py", "B": "other.txt"})
+        fx.base_reader = lambda project, sha: dict(sha=sha, complete=False)
+        # Use production adapters and real singleton support checks against a fixture tree.
+        workflow = fx.repo / wa.WORKFLOW
+        workflow.parent.mkdir(parents=True, exist_ok=True)
+        workflow.write_text("inputs:\n  tree_sha:\n  node_ids:\n  probe_id:\n")
+        sh(["add", str(workflow.relative_to(fx.repo))], fx.repo)
+        sh(["commit", "-m", "fixture targeted transport"], fx.repo)
+        newbase = sh(["rev-parse", "HEAD"], fx.repo)
+        sh(["update-ref", "refs/heads/master", newbase], fx.repo)
+        sh(["push", "origin", "master"], fx.repo)
+        fx.base = newbase
+        known_ids = [old] if case in ("known", "mixed", "stale") else []
+        if case == "known-unsupported":
+            known_ids = unsupported
+        failures = [old] if case == "known" else [old, node] if case in ("mixed", "stale") else [node]
+        if "unsupported" in case:
+            failures = [*unsupported, node]
+        age = timedelta(hours=37) if case == "stale" else timedelta(hours=1)
+        ts = (datetime.now(timezone.utc)-age).isoformat()
+        anchor = None if case == "missing" else dict(sha=fx.base, ts=ts)
+        evidence = {n: dict(sha=fx.base, since=ts, source="nightly") for n in known_ids}
+        fx.service.classify_selected = br.classify_selected
+        fx.service.rerun_on_base = br.rerun_on_base
+        fx.service.recheck = lambda *a: (_ for _ in ()).throw(AssertionError("selective must skip local recheck"))
+        fx.run_n(1, 2 if case == "exit2" else 1, red(failures))
+        if case == "unnamed":
+            fx.run_n(1, 1, "SUMMARY pytest_baseline_gate.py check: FAIL new=2 changed=0\n" + red([node]))
+        if case == "failed-check":
+            fx.run_n(1, 1, json.dumps(dict(verdict="red", checks={window_gate.PYTEST_CHECK: "failed"},
+                                         new_failures=[], run_url="scratch://unnamed-check")))
+        fx.run_n(2, 0, GREEN)
+        dispatches, candidates = [], []
+        def probe(repo, sha, ids, **kw):
+            if sha != fx.base:
+                candidates.append(dict(sha=sha, ids=ids))
+                return dict(states=dict.fromkeys(ids, "red"))
+            dispatches.append(dict(sha=sha, ids=ids))
+            if case == "exception":
+                raise TimeoutError("fixture timeout")
+            return dict(sha=sha, states={n: "undetermined" if case == "unresolved" else
+                                        "red" if case == "red" or n == old else "green" for n in ids})
+        before = fx.master()
+        with patch.object(br, "_known_state", return_value=(evidence, anchor)), \
+             patch.object(br, "record", **({"side_effect": ValueError("append unavailable")} if case == "append-failed" else {})), \
+             patch.object(wa, "probe", side_effect=probe):
+            # Append failure is a red observation whose record could not commit.
+            if case == "append-failed":
+                original_probe = probe
+                def failed_append_probe(repo, sha, ids, **kw):
+                    answer = original_probe(repo, sha, ids, **kw)
+                    if sha == fx.base:
+                        answer["states"] = dict.fromkeys(ids, "red")
+                    return answer
+                with patch.object(wa, "probe", side_effect=failed_append_probe):
+                    rc = fx.go()
+            else:
+                rc = fx.go()
+        uncertain = case in ("unresolved", "exception", "append-failed", "exit2", "unknown-unsupported", "unnamed", "failed-check")
+        drops = [e["subject"] for e in fx.events("window-dropped")]
+        if uncertain:
+            check(rc == 2 and fx.master() == before and not drops and not fx.events("window-bisected"),
+                  "selective uncertainty preserves master/members " + case)
+        elif case in ("known", "red"):
+            check(rc == 0 and not drops and bool(fx.events("window-pre-existing")), "selective positive exemption " + case)
+        else:
+            check(rc == 1 and drops == ["A"], "selective green reaches existing attribution " + case)
+        expected = [] if case in ("known", "exit2", "unnamed", "failed-check") else (
+            sorted([old, node]) if case == "stale" else [node])
+        check([d["ids"] for d in dispatches] == ([expected] if expected else []),
+              "selective exact supported unexplained subset " + case)
+        check(all(d["sha"] == fx.base for d in dispatches), "selective root base identity " + case)
+        body = dict(case=case, exit_code=rc, candidate=candidates, base=fx.base, requested=dispatches,
+                    pre_existing=[e["ids"] for e in fx.events("window-pre-existing")],
+                    attribution=[e["nodes"] for e in fx.events("window-dropped")], dropped=drops,
+                    master_before=before, master_after=fx.master())
+        raw = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url="scratch://base-red-selective/AC4/"+case, status=200,
+                              body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=body)))
+    check(len(FAILS) == start, "selective window matrix")
+
+
+def selective_memo_checks():
+    import window_attribution as wa
+    start = len(FAILS)
+    node = "api/tests/test_x.py::test_new"
+    for outcome in ("new", "pre_existing", "undetermined", "exception", "append-failed"):
+        for attempt in range(2):
+            fx = Fx({"A": "a.txt", "B": "b.txt", "C": "c.txt", "D": "d.txt"})
+            fx.base_reader = lambda project, sha: dict(sha=sha, complete=False)
+            calls, halves = [], []
+            def rerun(project, sha, ids):
+                calls.append(dict(base=sha, ids=ids))
+                if outcome == "exception":
+                    raise RuntimeError("probe unavailable")
+                return dict(pre_existing=ids if outcome in ("pre_existing", "append-failed") else [],
+                            new=ids if outcome == "new" else [],
+                            undetermined=outcome in ("undetermined", "append-failed"))
+            fx.service.classify_selected = lambda project, sha, ids: dict(known_red=[], rerun_on_base=ids, undetermined=True)
+            fx.service.rerun_on_base = rerun
+            fx.service.recheck = lambda *a: (_ for _ in ()).throw(AssertionError("no local recheck"))
+            # Capture the production judge closure at its first return; drive the
+            # unchanged bisect helper as a callback harness, never enable it in the gate.
+            captured = []
+            def trace(frame, event, arg):
+                if (frame.f_code.co_name == "judge" and event == "return"
+                        and frame.f_code.co_filename == window_gate.__file__ and not captured):
+                    captured.append(frame.f_back.f_locals["judge"])
+                return trace
+            def verify(repo, cand, required, window):
+                return dict(state="red", nodes=[node], url="scratch://memo", doc={}, output="")
+            failures = {k: set() for k in ("pytest", "pg-parity", "vitest", "suite-error")}
+            failures.update(pytest={node}, undetermined=[], pg_files={})
+            sys.settrace(trace)
+            try:
+                # Call the harness while the attempt still owns the closure.
+                # A return trace callback cannot recursively trace itself.
+                def run_harness(frame, event, arg):
+                    trace(frame, event, arg)
+                    if captured and not halves and event == "return" and frame.f_code.co_name == "judge":
+                        halves.append("started")
+                        judge = captured[0]
+                        cand = frame.f_locals["cand"]
+                        def half(c, kept):
+                            answer = judge(c, kept, half=True)
+                            halves.append(answer["state"])
+                            return answer
+                        window_gate.bisect_window("memo", ["A", "B", "C", "D"],
+                            lambda batch: (cand, batch, {}), half, lambda *a: None, lambda *a: None)
+                        half(cand, ["A"])
+                    return run_harness
+                sys.settrace(run_harness)
+                with patch.object(window_gate, "verify", side_effect=verify), \
+                     patch.object(window_gate, "candidate_failures", return_value=failures), \
+                     patch.object(window_gate, "base_pg", return_value=(dict(state="green"), [])), \
+                     patch.object(window_gate, "owners", return_value=[]), \
+                     patch.object(window_gate, "targeted_attribution", return_value=dict(
+                         environment=[], drop={}, proven={}, unresolved=[node], mode="singles")), \
+                     patch.object(wa, "probe", return_value=dict(states={node: "red"})):
+                    rc = fx.go()
+            finally:
+                sys.settrace(None)
+            check(len(calls) == 1 and calls[0] == dict(base=fx.base, ids=[node]),
+                  "selective memo one probe across full/halves " + outcome)
+            expected = "green" if outcome == "pre_existing" else "red" if outcome == "new" else "undetermined"
+            check(len(halves) >= 4 and all(state == expected for state in halves[1:]),
+                  "selective memo sticky outcome " + outcome)
+            body = dict(outcome=outcome, attempt=attempt, base=fx.base, probes=calls, halves=halves, local_rechecks=0)
+            raw = json.dumps(body, sort_keys=True)
+            print(json.dumps(dict(url="scratch://base-red-selective/AC4/memo", status=200,
+                                  body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=body)))
+    check(len(FAILS) == start, "selective memo matrix")
+
+
+selective_window_checks()
+selective_memo_checks()
 
 flake_only_checks()
 infra_checks()

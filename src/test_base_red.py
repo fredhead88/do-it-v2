@@ -1652,5 +1652,222 @@ print(json.dumps({'raw_count': len(raw), 'admitted_count': len(admitted),
                      'hostile text as data; no paid calls, project leakage or invalid repository traversal')
 
 
+def selective_response(ac, body):
+    raw = json.dumps(body, sort_keys=True)
+    print(json.dumps(dict(url="scratch://base-red-selective/" + ac, status=200,
+        body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=body)))
+
+
+class SelectiveFixture(unittest.TestCase):
+    setUp = BaseRedTests.setUp
+    run_doc = BaseRedTests.run_doc
+    gh = BaseRedTests.gh
+    binary = BaseRedTests.binary
+    events = BaseRedTests.events
+
+    def git(self, *args):
+        return subprocess.check_output(["git", "-C", str(self.repo), *args], text=True).strip()
+
+    def workflow(self):
+        (self.repo / ".github/workflows/targeted-attribution.yml").write_text(
+            "inputs:\n  tree_sha:\n  node_ids:\n  probe_id:\n")
+        self.git("add", ".")
+        self.git("-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-qm", "probe")
+        self.sha = self.git("rev-parse", "HEAD")
+
+
+class SelectiveClassificationTests(SelectiveFixture):
+    def test_partitions_and_boundaries(self):
+        import window_attribution as wa
+        now = datetime(2026, 11, 6, tzinfo=timezone.utc)
+        old, other = "api/tests/test_x.py::test_a", "api/tests/test_x.py::test_b"
+        anchor = dict(sha=self.sha, ts=now.isoformat())
+        def meta(sha=None, since=None):
+            return dict(sha=sha or self.sha, since=since or anchor["ts"], source="nightly")
+        cases = [
+            ("known", [old], {old: meta()}, anchor, [old], [], False),
+            ("unknown", [other], {old: meta()}, anchor, [], [other], False),
+            ("mixed-duplicates", [other, old, other, old], {old: meta()}, anchor, [old], [other], False),
+            ("fresh-empty", [old], {}, anchor, [], [old], False),
+            ("missing", [old], {}, None, [], [old], True),
+            ("incomplete-only", [old], {old: meta()}, None, [], [old], True),
+        ]
+        for seconds, name, unknown in [(0, "age-zero", False), (36*3600-1, "age-before", False),
+                (36*3600, "age-boundary", True), (36*3600+1, "age-after", True), (-1, "future", True)]:
+            a = dict(anchor, ts=(now-timedelta(seconds=seconds)).isoformat())
+            cases.append((name, [old], {old: meta(since=a["ts"])}, a,
+                          [] if unknown else [old], [old] if unknown else [], unknown))
+        cases.append(("malformed", [old], {old: meta()}, dict(anchor, ts="bad"), [], [old], True))
+        cases.append(("future-positive", [old], {old: meta(since=(now+timedelta(seconds=1)).isoformat())},
+                      anchor, [], [old], False))
+        cases.append(("before-anchor", [old], {old: meta(since=(now-timedelta(seconds=1)).isoformat())},
+                      anchor, [], [old], False))
+        rows = []
+        with patch.object(wa, "probe", side_effect=AssertionError("dispatch forbidden")) as probe, \
+             patch.object(br, "failing", side_effect=AssertionError("full refresh forbidden")):
+            for name, ids, known, a, positive, pending, unknown in cases:
+                with self.subTest(name=name), patch.object(br, "_known_state", return_value=(known, a)):
+                    result = br.classify_selected("demo", self.sha, ids, now=now)
+                    self.assertEqual(result, dict(known_red=positive, rerun_on_base=pending, undetermined=unknown))
+                    rows.append(dict(case=name, result=result))
+            with patch.object(br, "_project", side_effect=AssertionError("empty must be local")):
+                self.assertEqual(br.classify_selected("bad", "bad", []),
+                                 dict(known_red=[], rerun_on_base=[], undetermined=False))
+            probe.assert_not_called()
+        selective_response("AC1-boundaries", rows)
+
+    def test_real_graph_and_registry(self):
+        import window_attribution as wa
+        now = datetime.now(timezone.utc)
+        root = self.sha
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        def commit(parent=None):
+            args = ["-c", "user.name=t", "-c", "user.email=t@localhost", "commit-tree", tree, "-m", "fixture"]
+            if parent:
+                args += ["-p", parent]
+            return self.git(*args)
+        base = commit(root)
+        descendant = commit(base)
+        unrelated = commit()
+        node = "api/tests/test_x.py::test_a"
+        anchor = dict(sha=root, ts=(now-timedelta(hours=1)).isoformat())
+        rows = []
+        with patch.object(wa, "probe", side_effect=AssertionError("no dispatch")):
+            for sha, qualifies, name in [(base, True, "equal"), (root, True, "ancestor"),
+                    (descendant, False, "descendant"), (unrelated, False, "unrelated"),
+                    ("f"*40, False, "missing-object"), ("", False, "missing-sha")]:
+                for kind in ("anchor", "positive"):
+                    a = dict(anchor, sha=sha) if kind == "anchor" else anchor
+                    known = {node: dict(sha=sha, since=anchor["ts"], source="rerun")}
+                    with patch.object(br, "_known_state", return_value=(known, a)):
+                        result = br.classify_selected("demo", base, [node], now=now)
+                    self.assertEqual(result, dict(known_red=[node] if qualifies else [],
+                        rerun_on_base=[] if qualifies else [node], undetermined=not qualifies if kind == "anchor" else False))
+                    rows.append(dict(case=kind+"-"+name, result=result))
+            with patch.object(br, "_known_state", return_value=({node: dict(sha=root, since=anchor["ts"])}, anchor)):
+                self.assertTrue(br.classify_selected("demo", "invalid", [node], now=now)["undetermined"])
+                original = br.window_gate.git
+                def fail_ancestry(repo, *args, **kwargs):
+                    if args[0] == "merge-base":
+                        raise RuntimeError("graph unavailable")
+                    return original(repo, *args, **kwargs)
+                with patch.object(br.window_gate, "git", side_effect=fail_ancestry):
+                    self.assertEqual(br.classify_selected("demo", base, [node], now=now),
+                                     dict(known_red=[], rerun_on_base=[node], undetermined=True))
+            br._append("base-red-nightly", "demo", root, complete=True, ids=[node])
+            br.record("demo", base, ["api/tests/test_x.py::test_b"], "rerun")
+            result = br.classify_selected("demo", base, [node, "api/tests/test_x.py::test_b"])
+            self.assertEqual(result, dict(known_red=[node, "api/tests/test_x.py::test_b"], rerun_on_base=[], undetermined=False))
+            # New unrelated complete evidence blocks fallback to an older ancestor.
+            br._append("base-red-nightly", "demo", unrelated, complete=True, ids=[node])
+            self.assertTrue(br.classify_selected("demo", base, [node])["undetermined"])
+            # Project filtering and malformed/incomplete history use the real reader.
+            event_file = self.root / "events/L-base-red-local.jsonl"
+            for rows_in in ([dict(type="base-red-nightly", project="foreign", sha=base, ts=now.isoformat(), complete=True, ids=[node])],
+                    [dict(type="base-red-nightly", project="demo", sha=base, ts="bad", complete=True, ids=[node])],
+                    [dict(type="base-red-nightly", project="demo", sha=base, ts=now.isoformat(), complete=False, ids=[node])]):
+                event_file.write_text("\n".join(map(json.dumps, rows_in))+"\n")
+                self.assertEqual(br.classify_selected("demo", base, [node]),
+                                 dict(known_red=[], rerun_on_base=[node], undetermined=True))
+        self.assertEqual(self.calls, [])
+        selective_response("AC1-graph", rows)
+
+
+class SelectiveRerunTests(SelectiveFixture):
+    def test_probe_matrix_and_support(self):
+        import window_attribution as wa
+        self.workflow()
+        red, green, absent = ["api/tests/test_x.py::test_"+x for x in ("red", "green", "absent")]
+        for state in ("red", "green", "absent", "undetermined", "nonsense", None, ["red", "green"]):
+            answer = dict(states={} if state is None else {red: state}, sha=self.sha)
+            with patch.object(wa, "probe", return_value=answer) as probe, patch.object(br, "record") as record:
+                result = br.rerun_on_base("demo", self.sha[:10], [red, red])
+                self.assertEqual(result, dict(pre_existing=[red] if state == "red" else [],
+                    new=[red] if state in ("green", "absent") else [], undetermined=state not in ("red", "green", "absent")))
+                probe.assert_called_once_with(self.repo, self.sha, [red])
+                if state == "red":
+                    record.assert_called_once_with("demo", self.sha, [red], source="rerun")
+                else:
+                    record.assert_not_called()
+                selective_response("AC2-state", dict(state=state, result=result))
+        unsupported = ["pg-parity::x", "dashboard/src/broken.test.ts"]
+        for state in ("red", "green"):
+            with patch.object(wa, "probe", return_value=dict(states={red: state})) as probe, patch.object(br, "record"):
+                result = br.rerun_on_base("demo", self.sha, [red, *unsupported])
+                probe.assert_called_once_with(self.repo, self.sha, [red])
+                self.assertEqual(result, dict(pre_existing=[red] if state == "red" else [],
+                    new=[red] if state == "green" else [], undetermined=True))
+                selective_response("AC2-mixed", dict(state=state, requested=[red, *unsupported], dispatched=[red], result=result))
+        with patch.object(wa, "probe") as probe, patch.object(br, "record") as record:
+            for ids in ([], unsupported, ["../a.py::x", "/a.py::x", "-a.py::x", "a.py::bad\n"]):
+                self.assertEqual(br.rerun_on_base("demo", self.sha, ids),
+                                 dict(pre_existing=[], new=[], undetermined=bool(ids)))
+            for project, sha in (("../bad", self.sha), ("demo", "bad-sha"), ("missing", self.sha)):
+                self.assertTrue(br.rerun_on_base(project, sha, [red])["undetermined"])
+            probe.assert_not_called()
+            record.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_fail_closed_transport_and_append(self):
+        import window_attribution as wa
+        self.workflow()
+        node = "api/tests/test_x.py::test_a"
+        for answer in (dict(states={node: "red"}, sha="f"*40), dict(states={node: "red", "extra": "green"}),
+                       None, dict(states=None)):
+            with patch.object(wa, "probe", return_value=answer), patch.object(br, "record") as record:
+                self.assertEqual(br.rerun_on_base("demo", self.sha, [node]),
+                                 dict(pre_existing=[], new=[], undetermined=True))
+                record.assert_not_called()
+        for exc in (TimeoutError(), ValueError("quota"), RuntimeError("dispatch"), OSError("artifact")):
+            with patch.object(wa, "probe", side_effect=exc):
+                self.assertTrue(br.rerun_on_base("demo", self.sha, [node])["undetermined"])
+        with patch.object(wa, "probe", return_value=dict(states={node: "red"})), \
+             patch.object(br, "record", side_effect=ValueError("append failed")):
+            self.assertEqual(br.rerun_on_base("demo", self.sha, [node]),
+                             dict(pre_existing=[node], new=[], undetermined=True))
+        # Old workflow and the transport's own aggregate payload limit never fall back.
+        old = self.git("rev-parse", "HEAD^")
+        with patch.object(wa, "probe") as probe:
+            self.assertTrue(br.rerun_on_base("demo", old, [node])["undetermined"])
+            probe.assert_not_called()
+        many = ["api/tests/test_x.py::test_" + str(i) + "x"*200 for i in range(300)]
+        self.assertTrue(wa.supported(self.repo, self.sha, [many[0]]))
+        with patch.object(wa, "_gh", side_effect=AssertionError("no dispatch")), \
+             patch.object(br, "record") as record:
+            self.assertEqual(br.rerun_on_base("demo", self.sha, many),
+                             dict(pre_existing=[], new=[], undetermined=True))
+            record.assert_not_called()
+        selective_response("AC2-refusals", dict(identity=True, unavailable=True, append_failure=True,
+                                                old_workflow=True, aggregate_limit=True))
+
+
+class SelectiveRecordRoundTripTests(SelectiveFixture):
+    def test_production_append_independent_reader(self):
+        import window_attribution as wa
+        self.workflow()
+        red, green, unknown = ["api/tests/test_x.py::test_"+x for x in ("red", "green", "unknown")]
+        br._append("base-red-nightly", "demo", self.sha, complete=True, ids=[])
+        with patch.object(wa, "probe", return_value=dict(sha=self.sha,
+                states={red: "red", green: "green", unknown: "undetermined"})) as probe:
+            result = br.rerun_on_base("demo", self.sha, [red, green, unknown])
+            self.assertEqual(result, dict(pre_existing=[red], new=[green], undetermined=True))
+            probe.assert_called_once_with(self.repo, self.sha, [red, green, unknown])
+        code = ("import sys,json; sys.path.insert(0,sys.argv[1]); import base_red; "
+                "print(json.dumps(dict(rows=base_red._rows('demo'), known=base_red.known_red('demo'), "
+                "root=str(base_red.fold.ROOT))))")
+        proc = self.real_run([sys.executable, "-I", "-c", code, str(HERE)],
+                             capture_output=True, text=True, env=dict(os.environ), timeout=15)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        read = json.loads(proc.stdout)
+        self.assertEqual(read["root"], str(self.root))
+        self.assertEqual(set(read["known"]), {red})
+        row = read["rows"][-1]
+        self.assertEqual({k: row[k] for k in ("project", "sha", "ids", "source", "complete")},
+                         dict(project="demo", sha=self.sha, ids=[red], source="rerun", complete=False))
+        self.assertEqual(list((self.root / "events").glob("*")),
+                         [self.root / "events/L-base-red-local.jsonl"])
+        selective_response("AC3", dict(writer=result, reader=read, fixture_only=True))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

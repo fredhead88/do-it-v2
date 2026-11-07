@@ -1567,6 +1567,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     pre_existing_all = set()
     flakes_all = set()
     quarantined_all, rechecked_all = set(), {}
+    selective_base_memo, selective_unsettled = {}, set()
     guard_seed = tree_guards(os.environ)
     actions_minutes = 0
     verdicts, verification_scopes, candidate_scopes = [], [], {}
@@ -1775,6 +1776,9 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         pg_covered = (PG_CHECK in candidate_required and baseline is not None
                       and baseline["state"] == "green" and not base_undetermined)
         pg_complete = pg_covered and uncovered and all(n.startswith("pg-parity::") for n in uncovered)
+        if (selective := base_undetermined or not (classification.get("complete") or pg_complete)):
+            classification, base_undetermined, pg_complete = __import__("base_red")._classify_selected_attempt(
+                project, root_base, nodes, selective_base_memo, selective_unsettled, classification, selective, pg_complete)
         if base_undetermined or not (classification.get("complete") or pg_complete):
             outcome = "half remains pending" if half else "master unmoved"
             reason = "base incomplete"
@@ -1783,7 +1787,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             elif "needed" in classification and "covered" in classification:
                 reason += f" (needs {classification['needed']}, base has {sorted(covered)})"
             named = window_members.refusal(sys.modules[__name__], repo, base, [e for e in entries if e[0] in kept], window,
-                                           f"NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", scope_of=scope_of)
+                f"NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", scope_of=scope_of)
             escalate(window, named or f"{reason}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
             if not half:
                 record(res, tree, candidate_required)
@@ -1808,7 +1812,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             quarantined_all.update(n for n in pre_existing if n in current)
         new_ids = [n for n in classification.get("new", nodes) if n not in pre_existing]
         rechecked = {}
-        if new_ids:
+        if new_ids and not selective:
             import base_red
             unseen = [n for n in new_ids if n not in rechecked_all]
             try:
