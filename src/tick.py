@@ -374,10 +374,13 @@ def launch(step, *, dispatcher):
         import merge_queue
         try:
             head = merge_queue.next_candidate(events)
+            refill = merge_queue.refill_candidate(events)
         except (ValueError, OSError) as exc:
             print(f'hold undetermined: {exc}')
             return None
-        if head is None or step.item_kind == 'spec' and step.item != head:
+        # A rehearsal refill may start while a preceding batch is still in flight.
+        head = head if head is not None else refill
+        if head is None or step.item_kind == 'spec' and step.item not in (head, refill):
             print('hold undetermined: merge Step item differs from queue head'
                   if head is not None else 'hold undetermined: no merge candidate')
             return None
@@ -631,10 +634,12 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     import merge_queue
                     try:
                         head = merge_queue.next_candidate(events)
+                        refill = merge_queue.refill_candidate(events)
                     except (ValueError, OSError) as exc:
                         out.append(f'hold undetermined: {exc}')
                         continue
-                    if head is None or step.item_kind == 'spec' and step.item != head:
+                    head = head if head is not None else refill
+                    if head is None or step.item_kind == 'spec' and step.item not in (head, refill):
                         out.append('hold undetermined: merge Step item differs from queue head'
                                    if head is not None else 'hold undetermined: no merge candidate')
                         continue

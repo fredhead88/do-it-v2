@@ -1949,6 +1949,7 @@ def render(events, specs, charters, ignored, by_subject):
     except Exception as exc:
         next_rows = ['undetermined: next_steps failed: ' + type(exc).__name__]
     block('NEXT', next_rows)
+    L += __import__('merge_lane_board').section(events)
 
     # TRIAGE — L-charter-0033/board-owners, Target 2: a requirement-less brief
     # (the Thinker's inbox, not a charter's — the mirror of open_briefs' in-scope

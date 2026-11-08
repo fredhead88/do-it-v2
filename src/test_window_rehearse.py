@@ -4,11 +4,12 @@ import hashlib
 import io
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 _import_root = tempfile.TemporaryDirectory(prefix='rehearse-import-')
 os.environ['DOIT_ROOT'] = _import_root.name
@@ -23,6 +24,42 @@ UNKNOWN = 'api/tests/test_total.py::test_unknown'
 
 
 class Rehearsal(unittest.TestCase):
+    def test_local_red_cancels_only_the_matching_ci_process(self):
+        import merge_queue
+        child_pid, run_id = 987654, '731'
+        cancelled = []
+        process = Mock(pid=child_pid, returncode=143, args=['fake-ci', run_id])
+        git = wg.git
+        popen = subprocess.Popen
+        def launch(args, **kwargs):
+            return process if args[:2] == ['bash', str(self.repo / wg.PREDEPLOY)] else popen(args, **kwargs)
+        def local_git(repo, *args, **kwargs):
+            if args[0] == 'push':
+                return subprocess.CompletedProcess(args, 0, '', '')
+            return git(repo, *args, **kwargs)
+        def kill_group(pid, sig):
+            self.assertEqual(sig, signal.SIGTERM)
+            if pid == os.getpid():
+                signal.raise_signal(sig)
+            else:
+                self.assertEqual(pid, child_pid)
+                cancelled.append(run_id)
+        def communicate(**kwargs):
+            if not cancelled:
+                merge_queue._cancel_rehearsal(dict(batch='rh-local', project='albert-scott',
+                                                  pid=os.getpid()))
+            return ('', None)
+        process.communicate.side_effect = communicate
+        previous = signal.getsignal(signal.SIGTERM)
+        with patch.object(wg, 'git', side_effect=local_git), \
+             patch.object(wg.subprocess, 'Popen', side_effect=launch), \
+             patch.object(wg.os, 'killpg', side_effect=kill_group):
+            code = wg.main_(self.args(ident='rh-local'))
+        self.assertEqual(code, 2)
+        self.assertEqual(cancelled, [run_id])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), previous)
+        self.assertEqual(fold.read_events()[-1]['state'], 'undetermined')
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='window-rehearse-')
         self.addCleanup(self.tmp.cleanup)
@@ -275,7 +312,7 @@ class Rehearsal(unittest.TestCase):
         self.assertIn('UNRESOLVED ' + UNKNOWN, output)
         rows = fold.read_events()
         self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed', 'window-flake'})
-        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        event = next(e for e in reversed(rows) if e['type'] == 'window-rehearsed')
         self.assertEqual(event['state'], 'red')
         self.assertEqual(event['flakes'], [FLAKE])
         self.assertEqual(event['attribution']['proven'], {'B': [NODE]})
@@ -299,13 +336,78 @@ class Rehearsal(unittest.TestCase):
 
     def test_two_slots_per_project_and_refusal_before_dispatch(self):
         import window_rehearse as wr
-        with wr.slot(self.root, 'albert-scott') as first, wr.slot(self.root, 'albert-scott') as second:
+        with patch.dict(os.environ, DOIT_REHEARSAL_BATCHES='2'), \
+             wr.slot(self.root, 'albert-scott') as first, wr.slot(self.root, 'albert-scott') as second:
             self.assertNotEqual(first, second)
             code, calls, _, _, _ = self.rehearse()
             self.assertEqual((code, calls), (3, []))
             with wr.slot(self.root, 'other-project') as other:
                 self.assertIsNotNone(other)
         self.assertEqual(self.rehearse()[0], 0)
+
+    def test_default_three_slots_and_configured_capacity_fail_closed(self):
+        import window_rehearse as wr
+        with patch.dict(os.environ):
+            os.environ.pop('DOIT_REHEARSAL_BATCHES', None)
+            self.assertEqual(wr.capacity(), 3)
+            with contextlib.ExitStack() as stack:
+                slots = [stack.enter_context(wr.slot(self.root, 'albert-scott')) for _ in range(3)]
+                self.assertEqual(len(set(slots)), 3)
+                self.assertNotIn(None, slots)
+                self.assertEqual(self.rehearse()[:2], (3, []))
+            self.assertEqual(self.rehearse()[0], 0)
+        for value in ('0', '-1', 'unknown', '1.5'):
+            with self.subTest(value=value), patch.dict(os.environ, DOIT_REHEARSAL_BATCHES=value):
+                code, calls, _, _, _ = self.rehearse()
+                self.assertEqual((code, calls), (2, []))
+                receipt = [e for e in fold.read_events() if e['type'] == 'window-rehearsed'][-1]
+                self.assertEqual(receipt['state'], 'undetermined')
+
+    def test_candidate_is_persisted_before_session_wait_and_ci_dispatch(self):
+        import test_slots
+        timeline = []
+        real_acquire = test_slots.acquire
+
+        def read_fresh():
+            env = dict(os.environ, DOIT_READ_CACHE='0')
+            result = subprocess.run([
+                os.sys.executable, '-c',
+                'import json,sys;sys.path.insert(0,sys.argv[1]);import fold;'
+                'print(json.dumps(fold.read_events()))', str(Path(__file__).parent)],
+                env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return [e for e in json.loads(result.stdout) if e['type'] == 'window-rehearsed'][-1]
+
+        @contextlib.contextmanager
+        def acquire(*args, **kwargs):
+            receipt = read_fresh()
+            self.assertEqual(receipt['state'], 'prepared')
+            self.assertEqual(receipt['base_sha'], self.future)
+            self.assertEqual(receipt['specs'], ['A', 'B'])
+            self.assertEqual(self.git('rev-parse', receipt['sha'] + '^{tree}'), receipt['tree'])
+            timeline.append(dict(stage='session-wait', receipt=receipt))
+            with real_acquire(*args, **kwargs) as held:
+                yield held
+
+        def verify(repo, candidate, required, ident, *, rehearsal=False):
+            self.assertTrue(rehearsal)
+            receipt = read_fresh()
+            self.assertEqual(receipt['state'], 'running')
+            self.assertEqual((receipt['sha'], receipt['required']), (candidate, required))
+            self.assertEqual(receipt['sha'], timeline[0]['receipt']['sha'])
+            timeline.append(dict(stage='ci-dispatch', receipt=receipt))
+            return dict(state='green', nodes=[], url='', doc={})
+
+        with patch.object(test_slots, 'acquire', side_effect=acquire), \
+             patch.object(wg, 'verify', side_effect=verify):
+            self.assertEqual(wg.main_(self.args()), 0)
+        terminal = read_fresh()
+        self.assertEqual(terminal['state'], 'green')
+        self.assertEqual(terminal['sha'], timeline[0]['receipt']['sha'])
+        self.assertEqual([row['stage'] for row in timeline], ['session-wait', 'ci-dispatch'])
+        body = json.dumps(dict(timeline=timeline, terminal=terminal), sort_keys=True)
+        print(json.dumps(dict(url='scratch://rehearsal/early-candidate', status=200,
+                             body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
     def test_unavailable_capacity_state_fails_closed_before_dispatch(self):
         with patch('window_rehearse.slot', side_effect=OSError('fixture capacity state unavailable')):
@@ -405,7 +507,7 @@ class Rehearsal(unittest.TestCase):
                                                       probe={'states': {FLAKE: 'green'}})
         self.assertEqual((code, len(retries), attrs), (0, 1, []))
         self.assertIn('FLAKE ' + FLAKE, output)
-        event = next(e for e in fold.read_events() if e['type'] == 'window-rehearsed')
+        event = next(e for e in reversed(fold.read_events()) if e['type'] == 'window-rehearsed')
         self.assertEqual((event['state'], event['flake_only'], event['flakes']), ('green', True, [FLAKE]))
         receipt = next(e for e in fold.read_events() if e['type'] == 'window-tree-verified')
         self.assertTrue(receipt['green'])
@@ -419,7 +521,7 @@ class Rehearsal(unittest.TestCase):
             env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent)),
             capture_output=True, text=True, check=True)
         rows = json.loads(reader.stdout)
-        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        event = next(e for e in reversed(rows) if e['type'] == 'window-rehearsed')
         records = [e for e in rows if e['type'] == 'window-flake']
         self.assertEqual(sorted(e['node'] for e in records), event['flakes'])
         for record in records:
@@ -446,7 +548,7 @@ class Rehearsal(unittest.TestCase):
         self.assertEqual(retries[0].args[1:], (calls[0].args[1], ids))
         self.assertIn('green (flakes: 2)', output)
         rows = self.flake_receipts('AC1', code, output)
-        event = next(e for e in rows if e['type'] == 'window-rehearsed')
+        event = next(e for e in reversed(rows) if e['type'] == 'window-rehearsed')
         self.assertEqual((event['state'], event['flake_only'], event['flakes']), ('green', True, ids))
         receipt = next(e for e in rows if e['type'] == 'window-tree-verified')
         self.assertEqual(receipt['sha'], calls[0].args[1])
@@ -471,7 +573,7 @@ class Rehearsal(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(bool(attrs), state == 'red')
                 reader_rows = self.flake_receipts('AC2/' + str(state), code, output, ident)
-                event = next(e for e in reader_rows if e['type'] == 'window-rehearsed')
+                event = next(e for e in reversed(reader_rows) if e['type'] == 'window-rehearsed')
                 self.assertEqual((event['state'], event['flakes']), ('red', [FLAKE]))
                 self.assertFalse(event.get('flake_only', False))
                 records = [e for e in reader_rows if e['type'] == 'window-flake']
@@ -494,7 +596,7 @@ class Rehearsal(unittest.TestCase):
         import window_rehearse as wr
         code = ('import sys,time;sys.path.insert(0,sys.argv[1]);import window_rehearse as w;'
                 '\nwith w.slot(sys.argv[2],"albert-scott") as held:\n print(held,flush=True);time.sleep(30)')
-        with wr.slot(self.root, 'albert-scott'):
+        with patch.dict(os.environ, DOIT_REHEARSAL_BATCHES='2'), wr.slot(self.root, 'albert-scott'):
             child = subprocess.Popen([sys.executable, '-c', code, str(Path(__file__).parent), str(self.root)],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:

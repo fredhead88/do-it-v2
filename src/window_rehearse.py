@@ -18,16 +18,24 @@ import window_prewindow
 import test_slots
 
 
+def capacity(env=None):
+    """Batch capacity is separate from the test-session scheduler's capacity."""
+    value = (os.environ if env is None else env).get('DOIT_REHEARSAL_BATCHES', '3')
+    if not re.fullmatch(r'[1-9][0-9]*', str(value)):
+        raise ValueError('DOIT_REHEARSAL_BATCHES must be a positive integer')
+    return int(value)
+
+
 @contextmanager
 def slot(root, project):
-    """Two independent kernel-held slots; process death releases ownership."""
+    """Configured independent kernel-held slots; process death releases ownership."""
     if not re.fullmatch(r'[A-Za-z0-9._-]+', project) or project in ('.', '..'):
         raise ValueError('invalid rehearsal project')
     directory = Path(root) / 'state'
     directory.mkdir(parents=True, exist_ok=True)
     fd, selected = None, None
     try:
-        for index in range(2):
+        for index in range(capacity()):
             handle = os.open(directory / f'rehearsal.{project}.{index}.lock',
                              os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
             try:
@@ -147,10 +155,44 @@ def diagnose(repo, candidate, base, entries, result, main):
     return dict(ids=ids, flakes=flakes, unresolved=unresolved, retry=retry, attribution=plan)
 
 
+def prepared_candidate(repo, ident, project, base, entries, events):
+    """Consume only a matching admitted launcher preparation, never a verdict.
+
+    Branch identities bind the handoff to the queue version the launcher saw.
+    The worker still computes scope, checks reuse and acquires a test session.
+    """
+    receipts = [event for event in events if event.get('type') == 'window-rehearsed'
+                and event.get('subject') == ident and event.get('project') == project
+                and event.get('launcher_prepared') is True
+                and ('actor' not in event or fold.admits(event, event['actor']) is None)]
+    if not receipts:
+        return None
+    receipt = receipts[-1]
+    expected = [list(entry) for entry in entries]
+    if (receipt.get('base_sha') != base or receipt.get('entries') != expected
+            or receipt.get('specs') != [entry[0] for entry in entries]
+            or receipt.get('state') != 'prepared'):
+        raise ValueError('launcher preparation no longer matches rehearsal')
+    candidate = receipt.get('sha', '')
+    if not re.fullmatch(r'[0-9a-f]{40}', candidate):
+        raise ValueError('launcher candidate unavailable')
+    if gate.tree_of(repo, candidate) != receipt.get('tree'):
+        raise ValueError('launcher candidate tree differs')
+    if gate.git(repo, 'merge-base', '--is-ancestor', base, candidate, check=False).returncode:
+        raise ValueError('launcher candidate does not descend from intended base')
+    return candidate
+
+
+def _cancel_verification(signum, frame):
+    # gate.verify catches this exception and stops its separately sessioned
+    # predeploy process, whose trap cancels only its bound hosted run IDs.
+    raise gate.TrainCancelled('rehearsal worker cancelled')
+
+
 def run(ident, project, specs, on, main):
     try:
         return _run(ident, project, specs, on, main)
-    except OSError:
+    except (OSError, ValueError):
         print('gate-window: rehearsal capacity state unavailable')
         gate.ev('window-rehearsed', ident, base_sha='unresolved', specs=[s.partition(':')[0] for s in specs],
                 state='undetermined', rehearsal=True, project=project, why='rehearsal capacity state unavailable')
@@ -160,12 +202,13 @@ def run(ident, project, specs, on, main):
 def _run(ident, project, specs, on, main):
     repo = fold.ROOT / 'repos' / project
     base, members = 'unresolved', [s.partition(':')[0] for s in specs]
+    entries = []
     def emit(state, **fields):
         gate.ev('window-rehearsed', ident, base_sha=base, specs=members, state=state,
-                rehearsal=True, project=project, **fields)
+                rehearsal=True, project=project, entries=[list(entry) for entry in entries], **fields)
     with slot(fold.ROOT, project) as held:
         if held is None:
-            print('gate-window: two rehearsals already in flight for ' + project)
+            print('gate-window: rehearsal capacity reached for ' + project)
             emit('refused', reason='rehearsal-cap')
             return 3
         try:
@@ -178,16 +221,26 @@ def _run(ident, project, specs, on, main):
                 raise ValueError('rehearsal exceeds the current window cap')
             events = fold.read_events()
             entries = gate.resolve_entries(repo, specs, events)
-            candidate = prepare(repo, ident, base, entries, project, main, events)
+            candidate = prepared_candidate(repo, ident, project, base, entries, events)
+            if candidate is None:
+                candidate = prepare(repo, ident, base, entries, project, main, events)
             required = gate.scope(repo, base, candidate, gate.required_checks(repo, base))['checks']
             tree = gate.tree_of(repo, candidate)
             prior = gate.prior_result(events, tree)
+            # Publish the immutable identity before waiting for a test session.
+            # Successors can form against it without waiting for CI to finish.
+            emit('prepared', sha=candidate, tree=tree, required=required)
             if gate.covers(prior, required):
                 result = dict(state='green', nodes=[], url='', doc={})
                 reused = True
             else:
                 with test_slots.acquire('rehearsal', None, root=fold.ROOT, spec=ident):
-                    result = gate.verify(repo, candidate, required, ident, rehearsal=True)
+                    emit('running', sha=candidate, tree=tree, required=required)
+                    previous = signal.signal(signal.SIGTERM, _cancel_verification)
+                    try:
+                        result = gate.verify(repo, candidate, required, ident, rehearsal=True)
+                    finally:
+                        signal.signal(signal.SIGTERM, previous)
                 reused = False
             state = result['state']
             if state not in ('green', 'red', 'undetermined'):
@@ -216,7 +269,7 @@ def _run(ident, project, specs, on, main):
             verdict = state + (f" (flakes: {len(diagnosis['flakes'])})" if diagnosis.get('flake_only') else '')
             print(f'REHEARSED {ident} {verdict} base={base} candidate={candidate} tree={tree}')
             return {'green': 0, 'red': 1, 'undetermined': 2}[state]
-        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        except (ValueError, OSError, RuntimeError, subprocess.SubprocessError, gate.TrainCancelled) as exc:
             # Keep diagnostics bounded and credential-free even for external tools.
             import prod_runner
             why = prod_runner.redact(str(exc))[:500]
