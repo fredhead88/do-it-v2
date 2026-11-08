@@ -13,6 +13,7 @@ Q=/var/tmp/push/rq; mkdir -p $Q; touch $Q/attention.txt
 READY=/var/tmp/push/ready-pass.txt; R=/opt/albert-scott; D=/home/albert/do-it-v2
 UNTIL=$(date -u -d '2026-11-12 23:30' +%s)   # extended 2026-11-04 16:55Z by the Thinker (operator: keep pushing); was 11-04 23:30   # extended 2026-11-03 19:30Z: the push continues overnight
 log(){ echo "$(date -u +%H:%M:%S) $*" | tee -a $Q/rloop.log; }
+. "$L/redalone.sh"   # L-spec-2285: specs red alone are not re-picked until their tip changes
 tg(){ k=$(printf %s "$*" | md5sum | cut -c1-12); if grep -qx $k $Q/tg-seen 2>/dev/null; then log "TG(dup, not sent): $*"; return; fi; echo $k >> $Q/tg-seen; /home/albert/.do-it/telegram/tg-send.sh "Merge push: $*" >/dev/null 2>&1; log "TG: $*"; }  # operator 11:57Z: same message three times
 names(){ printf "%s, " "$@" | sed "s/, $//"; }
 tip(){ git -C /home/albert/.do-it/repos/albert-scott rev-parse refs/heads/master; }
@@ -46,6 +47,10 @@ done_or_queued(){  # shipped/dropped, already queued, or held for attention
   grep -qhE "\"subject\": \"$s\".*\"type\": \"(shipped|dropped)\"|\"type\": \"(shipped|dropped)\".*\"subject\": \"$s\"" ~/.do-it/events/*.jsonl && return 0
   cat $Q/*.batch 2>/dev/null | cut -d" " -f2- | grep -qw "$1" && return 0   # Thinker 21:12Z: batch files hold bare numbers (2033/2041 rehearsed twice)
   grep -qw "^$1" $Q/attention.txt && return 0
+  sha=$(git -C $R rev-parse refs/integ/l-spec-$1 2>/dev/null)
+  if [ -n "$sha" ] && redalone_blocked $1 "$sha"; then
+    grep -qxF "$1 $sha" $Q/red-alone.logged 2>/dev/null || { echo "$1 $sha" >> $Q/red-alone.logged; log "skip $s: red alone at ${sha:0:12}; waits for a new build" >&2; }
+    return 0; fi
   pgrep -af "window_gate.py" | grep -qw "$s" && return 0; return 1; }
 is_mig(){ git -C $R diff --name-only $1...refs/integ/l-spec-$2 | grep -q '^api/alembic_supabase/versions/'; }
 pick(){  sync  # next 4 from ready list: no shared files, at most one migration
@@ -95,6 +100,7 @@ rehearse(){  # rehearse(base, specs...) -> writes queue file or moves culprits t
   kill $cipid 2>/dev/null; rm -f $bf $bf.ci $bf.cand; log "cancelled the parallel CI rehearsal $cid (pre-flight red)"
   if echo "$new" | grep -q RUN-BROKEN; then [ -n "$(find $Q/broken -mmin -60 2>/dev/null)" ] && { log "run broken again; quiet 10 min"; sleep 600; return 1; }; touch $Q/broken; tg "rehearsal of $(names "${specs[@]}") could not run its tests ($(echo "$new" | cut -c1-150)). Not blaming any spec; Thinker is checking."; sleep 600; return 1; fi
   if [ "$base" != "$(tip)" ]; then touch $Q/nostack-${base:0:12}; log "stacked rehearsal on ${base:0:12} not clean; no attribution, no more stacking on it; retry on master"; return 1; fi
+  [ ${#specs[@]} -eq 1 ] && redalone_note 1 ${specs[0]} "$(git -C $R rev-parse refs/integ/l-spec-${specs[0]} 2>/dev/null)" "$base" "$(tip)" "$new"   # L-spec-2285
   # attribute fast: run the failing ids on master and on master+each member in PARALLEL worktrees
   # (no PG lane needed); members that add failures are set aside, the rest ride on. Only when this
   # names nobody (e.g. PG-only failures) fall back to the serial alone-rehearsals below.
