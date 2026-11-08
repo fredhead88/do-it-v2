@@ -5,6 +5,7 @@ HERE="$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.ar
 SRC="$HERE/src"
 case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
+  handin-check) shift; exec python3 "$SRC/handin_check.py" "$@" ;;
   queue|window-run) exec python3 "$SRC/merge_queue.py" "$@" ;;
   precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
@@ -230,6 +231,7 @@ doit — a ledger that derives state, and the guards that read it
   doit ci-runner status [--json] | doit ci-runner set <CI_SELF_HOSTED|CI_PG_SELF_HOSTED> <true|false> --why TEXT
   doit ci-shadow [--dry-run] [--json]   compare hosted CI with self-hosted shadows
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
+  doit handin-check <subject> --cwd <worktree>   early secret-scan of committed HEAD (exit 0/1/2)
   doit guards-live --project <p>         measure 24 hours of green master safety guards (read-only)
   doit gate-window <id> --project albert-scott [--specs A,B,C]
                                            verify a merge window's candidate tip before master moves (exit 0/1/2/3/4)
