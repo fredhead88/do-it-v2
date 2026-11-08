@@ -1209,8 +1209,8 @@ class R7DispatchTests(unittest.TestCase):
                 datetime.now(timezone.utc), lane_rules.load())
         held = next(s for s in steps() if s.item == self.sid)
         self.assertIn('base-refresh', held.reason)
-        self.assertEqual(held.owner, 'executor')
-        self.assertIsNone(held.action)
+        self.assertEqual((held.owner, held.state, held.action), ('tick', 'action', 'build'))
+        self.assertIsNone(held.clears)
         self.assertFalse(any(e['type'] in {'build-started', 'spawn-started', 'seat-queued'} for e in rows))
         self.assertTrue(any(e.get('pinned_base_sha') and e.get('effective_base_sha') for e in rows if e['type'] == 'spawn-failed'))
         trigger = next(e for e in rows if e['type'] == ('decision' if mode == 'grader-rework' else

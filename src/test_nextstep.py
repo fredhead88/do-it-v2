@@ -1196,11 +1196,10 @@ class R7BaseRefreshTests(unittest.TestCase):
             events = [event('spec-written', -60, actor='operator'),
                       event(kind, -20, actor='builder', spawn='L-builder-9774', reason='problem:' + name + ' — refresh')]
             step = self.one(events)
-            self.assertEqual((step.owner, step.state, step.action), ('executor', 'hold', None))
+            self.assertEqual((step.owner, step.state, step.action), ('tick', 'action', 'build'))
             for word in ('base-refresh', 'regenerate', 'redispatch', 'safe auto-rebase'):
                 self.assertIn(word, step.reason)
-            self.assertIn('effective base', step.clears)
-            self.assertIn('packet', step.clears)
+            self.assertIsNone(step.clears)
             self.assertEqual(self.one(events), step)
             self.signed('R7-' + name, asdict(step))
             started = events + [event('build-started', -10, spawn='L-builder-9775')]
