@@ -1688,11 +1688,18 @@ def _main(a):
         off_manifest = len(out.get("results", [])) - len(kept)
         events = events_for(a.role, {**out, "results": kept}, a, base)
     else:
-        events = spawns.or_fail(fail, events_for, a.role, out, a, base)
+        try:
+            events = spawns.or_fail(fail, events_for, a.role, out, a, base)
+        except ValueError as exc:   # build_readiness.NotReady: an unfinished hand-in with no reason; the card is already saved, no placeholder is written (L-spec-2279)
+            if not (builder and str(exc).endswith("requires a nonempty reason")):
+                raise
+            fail(f"build-done refused: {exc}", reason="build-done-refused:no-reason")
     for t, kv in events:
         # A kv carrying its own `subject` lands there instead of the batch subject `base["subject"]` names: the owed-sweeper's per-row events, and (L-spec-0482/R12.b) a grader's `capability-hold`/ `escalation-blocking` pair, whose subject is the hold, never the graded spec. No other role's `kv` carries `subject`.
         row_base = {**base, "subject": kv.pop("subject")} if "subject" in kv else base
-        emit(ledger, row_base, t, **kv)
+        refused = emit(ledger, row_base, t, **kv)
+        if t == "build-done" and refused and refused.startswith("build-done status=") and refused.endswith("requires a non-empty reason"):
+            fail(refused, reason="build-done-refused:no-reason")    # the card stays; no placeholder, no spawn-done
     scalars = {k: v for k, v in out.items() if isinstance(v, (str, int, float, bool))}
     done = {**scalars, **meta, "role": a.role}
     # Emitted whenever the snapshots differ, never gated on lines/paths being non-empty: the observation is that the repository moved, and an empty derived list must not silently erase it.

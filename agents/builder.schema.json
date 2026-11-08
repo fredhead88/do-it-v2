@@ -16,11 +16,11 @@
     "escalations",
     "declarations"
   ],
-  "if": {"properties": {"status": {"const": "NEEDS_CONTEXT"}}},
+  "if": {"properties": {"status": {"enum": ["BLOCKED", "NEEDS_CONTEXT"]}}, "required": ["status"]},
   "then": {"required": ["reason"]},
   "properties": {
-    "reason": {"type": "string", "minLength": 1, "maxLength": 1000,
-               "description": "Required for NEEDS_CONTEXT: the missing context and what would unblock this build."},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1000, "pattern": "\\S",
+               "description": "Required for BLOCKED and NEEDS_CONTEXT: what blocked the build or the missing context, and what would unblock it."},
     "coupled": {
       "type": "array",
       "maxItems": 40,
