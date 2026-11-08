@@ -110,9 +110,9 @@ def main():
             plays = [(a, k) for a, k in fake.calls if 'test' in a]
             assert len(clones) == len(plays) == 1
             clone = pathlib.Path(clones[0][-1])
-            assert clones[0][2] == '--shared' and str(repo) in clones[0]
+            assert clones[0][2] == '--shared' and str(repo.resolve()) in [str(pathlib.Path(a).resolve()) for a in clones[0][3:-1]]
             assert plays[0][1]['cwd'] == clone / 'dashboard'
-            assert not clone.exists() and clone.parent.parent == sub('prod-browser')
+            assert not clone.exists() and clone.parent.parent.resolve() == sub('prod-browser').resolve()
             for argv, kw in fake.calls:
                 assert kw.get('cwd') != repo
                 assert not any('/opt/albert-scott' in str(v) or 'portal-e2e-runner' in str(v) for v in [*argv, *kw.get('env', {}).values()])
@@ -137,7 +137,7 @@ def main():
             (reused / 'package-lock.json').write_text('{}')
             browser._node(reused, fake, {})
             assert (reused / 'node_modules' / '.bin' / 'probe').is_symlink()
-            assert (reused / 'node_modules' / '.bin' / 'probe').resolve().is_relative_to(reused)
+            assert (reused / 'node_modules' / '.bin' / 'probe').resolve().is_relative_to(reused.resolve())
             # A cache link must be rejected before a private tree is created.
             shutil.rmtree(reused / 'node_modules')
             (cached / 'escape').symlink_to(top / 'outside')
@@ -241,6 +241,102 @@ def test_ac4_events_passed_down_browser():
     print("L-spec-1531 AC4 prod_browser ok")
 
 
+def test_need_paths():
+    import builtins
+    with tempfile.TemporaryDirectory(prefix='need-paths-') as tmp:
+        top=pathlib.Path(tmp)
+        repo=top/'repo'
+        (repo/'dashboard/e2e').mkdir(parents=True)
+        (repo/'dashboard/e2e/one.spec.ts').write_text('// fixture')
+        (repo/'dashboard/package-lock.json').write_text('{}')
+        sha1,sha2='a'*40,'b'*40
+        observations=[
+            ('demo','dashboard/e2e/one.spec.ts; Playwright anonymous local fixture','committed-e2e'),
+            ('demo','Read repository test output','repo'),
+            ('demo','Read saved Playwright output','repo'),
+            ('demo','Playwright anonymous local fixture','repo'),
+            ('demo','Log in as staff at https://fixture.invalid','review-account'),
+            ('absent','Log in as staff at https://fixture.invalid','no-review-account'),
+            ('demo','dashboard/e2e/missing.spec.ts; log in as staff','review-account'),
+            ('demo','dashboard/e2e/../one.spec.ts; log in as staff','review-account'),
+            ('other','dashboard/e2e/one.spec.ts; log in as staff','committed-e2e'),
+            ('bad','dashboard/e2e/one.spec.ts; log in as staff','no-review-account'),
+            ('fault','Log in as staff at https://fixture.invalid','no-review-account'),
+        ]
+        spec=top/'spec.md'
+        spec.write_text('\n'.join(f'AC{i} [ui]: {text}' for i,(_,text,_) in enumerate(observations,1)))
+        rows=[dict(spec='L-spec-9940',criterion=f'AC{i}',project=project,spec_path=str(spec))
+              for i,(project,_,_) in enumerate(observations,1)]
+        class Recorded(Runner):
+            def run(self,argv,**kw):
+                if 'cat-file' in argv and argv[-1]=='0'*40+'^{commit}':
+                    self.calls.append((argv,kw))
+                    return subprocess.CompletedProcess(argv,1,'','')
+                return super().run(argv,**kw)
+        fake=Recorded(repo)
+        events=[dict(type='deploy-landed',target=project,sha=sha,ts=NOW.isoformat())
+                for project,sha in [('demo',sha1),('other',sha2),('bad','0'*40)]]
+        config={'prod':[dict(project=project,repo=str(repo)) for project in ('demo','other','absent','bad','fault')]}
+        seen=[]
+        def accounts(project):
+            seen.append(project)
+            if project=='fault':
+                raise OSError('fixture')
+            return project in ('demo','other')
+        with patch.object(browser.grading_env,'_look_toml',return_value=config), \
+                patch.object(browser.fold,'read_events',side_effect=AssertionError('hidden acquisition')):
+            with patch.object(browser,'split',wraps=browser.split) as split:
+                counts=browser.path_counts(rows+[rows[0]],events,runner=fake,accounts=accounts)
+                assert split.call_args.kwargs==dict(runner=fake,events=events)
+                assert len(split.call_args.args[0])==len(rows)
+            assert counts=={'committed-e2e':2,'review-account':3,'no-review-account':3,'repo':3},counts
+            assert sum(counts.values())==len(rows)
+            assert len(seen)==len(set(seen))==5,seen
+            for row,(_,_,expected) in zip(rows,observations):
+                single=browser.path_counts([row],events,runner=fake,accounts=accounts)
+                assert single[expected]==1 and sum(single.values())==1,(row,single)
+                print('browser-membership',row['criterion'],expected)
+            calls=[a[-1] for a,_ in fake.calls if 'cat-file' in a]
+            for sha in (sha1,sha2):
+                assert sha+'^{commit}' in calls
+                assert sha+':dashboard/e2e/one.spec.ts' in calls
+            assert sha1+':dashboard/e2e/missing.spec.ts' in calls
+            assert not any('/../' in call for call in calls)
+            assert browser.path_counts([],[],runner=fake,accounts=accounts)==dict.fromkeys(counts,0)
+            assert browser.path_counts(rows,[],runner=fake,accounts=accounts)['committed-e2e']==0
+            # Positive anonymous evidence bypasses only the credential reader.
+            def sub(name):
+                path=top/'scratch'/name
+                path.mkdir(parents=True,exist_ok=True)
+                return path
+            with patch.object(browser,'_credentials',side_effect=AssertionError('anonymous read')) as creds, \
+                    patch.object(browser,'_node'),patch.object(browser.scratch,'sub',side_effect=sub):
+                answer=browser.run_batch(rows[:1],NOW,runner=fake,events=events)
+                assert len(answer)==1 and answer[0]['outcome']=='met',answer
+                creds.assert_not_called()
+            # The same committed path with an authenticated observation refuses.
+            spec.write_text('AC1 [ui]: dashboard/e2e/one.spec.ts; log in as staff at https://fixture.invalid')
+            with patch.object(browser,'_credentials',side_effect=browser.Unobservable('missing')):
+                answer=browser.run_batch(rows[:1],NOW,runner=fake,events=events)
+                assert answer[0]['outcome']=='unobservable' and answer[0]['why']=='no review account',answer
+        home=top/'home'
+        directory=home/'.do-it'
+        directory.mkdir(parents=True)
+        (directory/'review-creds-demo.env').touch()
+        (directory/'review-creds-directory.env').mkdir()
+        with patch.dict(os.environ,HOME=str(home)), \
+                patch.object(pathlib.Path,'open',side_effect=AssertionError('file opened')), \
+                patch.object(builtins,'open',side_effect=AssertionError('file opened')):
+            assert browser.account_present('demo')
+            for project in ('absent','directory','../demo','/absolute','',None):
+                assert not browser.account_present(project),project
+            with patch.object(pathlib.Path,'stat',side_effect=OSError('fixture')):
+                assert not browser.account_present('demo')
+        signed('need-paths',dict(counts=counts,validated_shas=2,anonymous_preparation=True,
+                                  authenticated_refusal='no review account',presence_stat_only=True))
+
+
 if __name__ == '__main__':
+    test_need_paths()
     test_ac4_events_passed_down_browser()
     main()

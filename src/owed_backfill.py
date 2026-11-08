@@ -31,13 +31,7 @@ CORRECTIVES = {
 
 
 def target_capability(row):
-    note = row.get('why') if 'why' in row else row.get('ask')
-    if 'pg_read_all_stats' in str(note or '').lower():
-        return 'operator-action'
-    target = owed_routes.classify_ask(note, row.get('capability'))['capability']
-    if target == 'repo' and not re.search(r'\brepository|\brepo\b|checkout|pytest|\btests?\b', str(note or ''), re.I):
-        return row.get('capability')
-    return target
+    return owed_routes.relabel_fields(row, owed_routes.spec_text(row))['capability']
 
 
 def _rows(evs_by_spec, now):
@@ -107,9 +101,16 @@ def plan(evs_by_spec, audit_rows, now):
     for row in rows:
         if row['status'] not in OPEN:
             continue
-        target, current = target_capability(row), row.get('capability')
+        fields = owed_routes.relabel_fields(row, owed_routes.spec_text(row))
+        target, current = fields['capability'], row.get('capability')
+        history = evs_by_spec.get(row['spec'], [])
+        authoritative = [e for e in history if e.get('type') == 'owed-routed'
+                         and e.get('route') == 'relabel' and e.get('criterion') == row['criterion']
+                         and e.get('need')]
         event = None
-        if not str((row.get('why') if 'why' in row else row.get('ask')) or '').strip():
+        if authoritative:
+            reason = 'skipped-already-present: authoritative need relabel'
+        elif not str((row.get('why') if 'why' in row else row.get('ask')) or '').strip():
             reason = 'no ask, not relabelled'
         elif target == current:
             reason = ('target has no route' if owed_routes.route_for(current) is None else
@@ -122,7 +123,7 @@ def plan(evs_by_spec, audit_rows, now):
             reason = 'target has no route'
         else:
             reason = 'legacy capability with ask; target differs'
-            event = dict(type='owed-routed', subject=row['spec'], criterion=row['criterion'], route='relabel', capability=target)
+            event = dict(type='owed-routed', subject=row['spec'], criterion=row['criterion'], route='relabel', **fields)
         add('relabel', row['spec'], row['criterion'], reason, event, event_type='owed-routed', status=row['status'], capability=current, target=target)
     return actions
 

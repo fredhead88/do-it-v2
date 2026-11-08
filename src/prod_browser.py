@@ -8,12 +8,14 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 
 import fold
 import grading_env
 import node_modules
+import owed_routes
 import scratch
 
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
@@ -101,6 +103,46 @@ def _partition(rows, runner, events=None):
 def split(rows, *, runner=None, events=None):
     e2e, seats = _partition(rows, runner or Runner(), events=events)
     return [entry[0] for entry in e2e], seats
+
+
+def account_present(project):
+    """Existence metadata only; this is not proof of a successful login."""
+    if not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project):
+        return False
+    try:
+        path = pathlib.Path.home() / '.do-it' / ('review-creds-' + project + '.env')
+        return stat.S_ISREG(path.stat().st_mode)
+    except (OSError, ValueError):
+        return False
+
+
+def account_inventory(projects, accounts=None):
+    """One metadata check per project; undetermined is never a login grant."""
+    accounts = account_present if accounts is None else accounts
+    out = {}
+    for project in sorted(set(projects), key=str):
+        try:
+            out[project] = accounts(project) is True
+        except Exception:
+            out[project] = False
+    return out
+
+
+def path_counts(rows, evs, *, runner=None, accounts=None):
+    """Disjoint accounting: validated e2e, local evidence, then account presence."""
+    unique = list({(r['spec'], r['criterion']): r for r in rows}.values())
+    counts = dict.fromkeys(('committed-e2e', 'review-account', 'no-review-account', 'repo'), 0)
+    present = account_inventory((r.get('project') for r in unique), accounts)
+    e2e, seats = split(unique, runner=runner, events=evs)
+    counts['committed-e2e'] = len(e2e)
+    for row in seats:
+        text = owed_routes.spec_text(row)
+        block = owed_routes.criterion_text(row, text)
+        if owed_routes.need(row, text) == 'repo' or (owed_routes.anonymous(block) and not owed_routes.authenticated(block)):
+            counts['repo'] += 1
+        else:
+            counts['review-account' if present.get(row.get('project')) else 'no-review-account'] += 1
+    return counts
 
 
 def _safe(path):
@@ -214,12 +256,18 @@ def run_batch(rows, now, *, runner=None, events=None):
     entries, _ = _partition(rows, runner, events=events)
     groups = {}
     for row, repo, sha, paths in entries:
-        groups.setdefault((row['project'], repo, sha), []).append((row, paths))
+        block = owed_routes.criterion_text(row, owed_routes.spec_text(row))
+        needs_account = not (owed_routes.anonymous(block) and not owed_routes.authenticated(block))
+        groups.setdefault((row['project'], repo, sha, needs_account), []).append((row, paths))
     observations = []
-    for (project, repo, sha), group in groups.items():
+    for (project, repo, sha, needs_account), group in groups.items():
         clone, credentials, report, fault = None, {}, None, None
         try:
-            credentials = _credentials(project)
+            if needs_account:
+                try:
+                    credentials = _credentials(project)
+                except Unobservable:
+                    raise Unobservable('no review account') from None
             root = _safe(scratch.sub('prod-browser'))
             with tempfile.TemporaryDirectory(dir=root, prefix=project + '-') as tmp:
                 clone = _safe(pathlib.Path(tmp) / 'clone')

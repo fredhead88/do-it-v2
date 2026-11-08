@@ -54,6 +54,37 @@ def writes(actions):
 
 
 class BackfillTests(unittest.TestCase):
+    def test_need_apply_operator_round_trip(self):
+        sid = 'L-spec-9901'
+        self.target = self.root/'events/L-operator-local.jsonl'
+        self.env['DOIT_LEDGER_FILE'] = self.target.name
+        self.install(row(sid, capability='other', ask='repository tests'), [])
+        (self.root/'content'/f'{sid}.md').write_text('AC1 [backend]: Read repository test output\n')
+        labels = self.root/'labels.json'
+        labels.write_text('{}')
+        before = self.snapshot()
+        dry = self.cli('--labels',str(labels))
+        self.assertEqual(dry.returncode,0,dry.stderr)
+        self.assertEqual(before,self.snapshot())
+        applied = self.cli('--apply','--labels',str(labels))
+        self.assertEqual(applied.returncode,0,applied.stderr)
+        code = '''import fold,owed,owed_routes
+evs=fold.read_events()
+specs,_,ignored,_=fold.fold(evs)
+assert not ignored,ignored
+rel=[e for e in evs if e['type']=='owed-routed' and e.get('need')]
+assert len(rel)==1 and (rel[0]['subject'],rel[0]['criterion'],rel[0]['need'],rel[0]['capability'])==('L-spec-9901','AC1','repo','repo'),rel
+assert owed.checks(specs['L-spec-9901']['evs'],fold.NOW)[0]['capability']=='repo'
+assert owed_routes.relabel(evs,fold.NOW)==[]
+print('backfill admitted relabels=1 target=repo need=repo')
+'''
+        fresh=subprocess.run(['/usr/bin/python3','-c',code],cwd=REPO/'src',env=self.env,capture_output=True,text=True)
+        self.assertEqual(fresh.returncode,0,fresh.stderr)
+        print(fresh.stdout.strip())
+        saved=self.target.read_bytes()
+        self.assertEqual(self.cli('--apply','--labels',str(labels)).returncode,0)
+        self.assertEqual(saved,self.target.read_bytes())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='owed-backfill-')
         self.addCleanup(self.tmp.cleanup)

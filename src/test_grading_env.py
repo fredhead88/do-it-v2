@@ -986,6 +986,24 @@ check("git" not in (caps8034.get("AC3") or []), "AC1(8034): AC3 must not carry g
 check(set(caps8034.get("AC4") or []) >= {"browser", "review-account"}, caps8034.get("AC4"))
 check("deploy" in (caps8034.get("AC5") or []), caps8034.get("AC5"))
 check(set(caps8034.get("AC6") or []) == {"db", "db-schema"}, caps8034.get("AC6"))
+
+cap_fixture = '''AC1 [backend]: Repository test output.
+review_path: log in as local checkout reader; read test output
+AC2 [ui]: Run Playwright against an anonymous local fixture at http://localhost:9000
+AC3 [ui]: Log in as staff at https://fixture.invalid; go to /dashboard
+AC4 [backend]: Read saved Playwright output
+'''
+caps_need = grading_env.criterion_caps(cap_fixture, '# AC5\nPlaywright anonymous local fixture && # AC6\nlog in as staff at https://fixture.invalid', 'testproj')
+for cid, actual in sorted(caps_need.items()):
+    print('need-capability',cid,actual)
+check(not {'browser','review-account'} & set(caps_need.get('AC1',[])),caps_need)
+check(set(caps_need['AC2']) >= {'browser'} and 'review-account' not in caps_need['AC2'],caps_need)
+check(set(caps_need['AC3']) >= {'browser','review-account'},caps_need)
+check(not {'browser','review-account'} & set(caps_need.get('AC4',[])),caps_need)
+check('browser' in caps_need['AC5'] and 'review-account' not in caps_need['AC5'],caps_need)
+check(set(caps_need['AC6']) >= {'browser','review-account'},caps_need)
+need_required=grading_env.required('grader',cap_fixture,'','testproj',owed={'AC3'})
+check('browser' in need_required and 'review-account' not in need_required,need_required)
 check("AC-CONSTRAINTS-PROSE" not in json.dumps(caps8034), "sanity: no stray key")
 for cid, cs in caps8034.items():
     idx = [grading_env.CAPABILITIES.index(c) for c in cs]

@@ -130,11 +130,19 @@ def _caps_plain(text):
     if any(tok in text for tok in _DB_TOKENS):
         found.update(("db", "db-schema"))
     # Repository-review boilerplate names runner output, not a browser target.
-    browser_text = re.sub(
-        r"log in as (?:a )?(?:repository reviewer|local checkout reader)\b(?!\s+at\s+https?://)",
-        "", text, flags=re.I)
-    if any(tok in browser_text.lower() for tok in _BROWSER_TOKENS):
-        found.update(("browser", "review-account"))
+    import owed_routes
+    browser_text = owed_routes.observation_text(text)
+    auth = owed_routes.authenticated(browser_text)
+    local = owed_routes.anonymous(browser_text)
+    saved = bool(re.search(r'saved playwright|saved.*(?:trace|screenshot)', browser_text))
+    if auth or local or (not saved and (
+            any(tok in browser_text for tok in _BROWSER_TOKENS)
+            or re.search(r'\bplaywright\b|dashboard/e2e/\S+\.spec\.ts', browser_text))):
+        found.add('browser')
+        # Unknown interactive paths remain conservative; an explicit anonymous
+        # local fixture is the positive evidence for account-free execution.
+        if auth or not local:
+            found.add('review-account')
     return found
 
 
