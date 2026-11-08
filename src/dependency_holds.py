@@ -40,34 +40,41 @@ def from_spec_text(text):
     return value
 
 
-def text_hold_reason(spec_events, all_events, *, shipped=None):
-    """Project a text declaration at automatic build admission without forging events."""
+def _text_declaration(spec_events):
+    """Return a synthetic declaration and any fail-closed text diagnostic."""
     import autodispatch
     import dispatch
     own = list(spec_events)
-    written = [e for e in own if e.get('type') in ('spec-written', 'spec-amended')]
-    if not written:
+    latest = max((e for e in own if e.get('type') in ('spec-written', 'spec-amended')),
+                 key=autodispatch._hold_order, default=None)
+    if latest is None or not valid_dependency(latest.get('subject')):
         return None
-    latest = max(written, key=autodispatch._hold_order)
-    sid = latest.get('subject')
-    if not valid_dependency(sid):
-        return None
-    # A subsequently recorded hold is authoritative, including its release.
-    if any(e.get('type') == 'dependency-hold' and
-           autodispatch.fold.ts(e.get('ts')) >= autodispatch.fold.ts(latest.get('ts')) for e in own):
-        return None
+    sid = latest['subject']
+    declaration = dict(latest, type='dependency-hold',
+                       why='Dependency-hold declared in spec text', _src='spec-text:' + sid)
     try:
         dependency = from_spec_text(dispatch.spec_path(sid).read_text())
     except FileNotFoundError:
-        return None  # The ordinary packet/worktree path owns a missing spec.
-    except OSError:
-        return 'held: spec dependency metadata unreadable'
+        return None  # Ordinary packet validation owns a missing spec.
+    except (OSError, UnicodeError):
+        declaration['_dependency_error'] = 'held: spec dependency metadata unreadable'
     except ValueError:
-        return 'held: invalid Dependency-hold waits_for in spec text; declare one spec id'
-    if dependency is None:
+        declaration['_dependency_error'] = ('held: invalid Dependency-hold waits_for in spec text; '
+                                             'declare one spec id')
+    else:
+        if dependency is None:
+            return None
+        declaration['waits_for'] = dependency
+    return declaration
+
+
+def text_hold_reason(spec_events, all_events, *, shipped=None):
+    """Compatibility projection of text alone, with the shared release semantics."""
+    import autodispatch
+    own = list(spec_events)
+    declaration = _text_declaration(own)
+    if declaration is None:
         return None
-    declaration = dict(latest, type='dependency-hold', waits_for=dependency,
-                       why='Dependency-hold declared in spec text', _src='spec-text:' + sid)
-    if autodispatch._hold_released(declaration, own):
-        return None
-    return autodispatch.held_by_dependency([declaration], all_events, shipped=shipped)
+    # Project the already-read declaration; do not re-enter the combined reader.
+    rows = autodispatch._unresolved_holds([declaration], own, all_events, shipped=shipped)
+    return autodispatch._dependency_reason(rows, all_events)
