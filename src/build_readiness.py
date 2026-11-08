@@ -36,16 +36,51 @@ def _text(root, event):
 def inputs(text):
     """Existing inputs, never Produces/Writes or future acceptance assertions."""
     active = False
+    section = None
     lines = []
     for line in text.splitlines():
         heading = re.match(r'^\s*(?:#+\s*(?:\d+[.)]?\s*)?)?(Reads|Consumes|Produces|Writes|Interfaces|Boundaries)\b', line, re.I)
         if heading:
             active = heading[1].lower() in ('reads', 'consumes')
+            section = heading[1].lower()
         elif re.match(r'^\s*#+\s|^\s*[A-Z][\w ]*:\s*$', line):
             active = False
-        if active or re.search(r'\balready exists?\b|\bexisting (?:function|symbol|file)\b', line, re.I):
+            section = None
+        # The "existing ..." phrases add a line only under an input-bearing heading.
+        phrase = section in ('reads', 'consumes', 'interfaces') and re.search(
+            r'\balready exists?\b|\bexisting (?:function|symbol|file)\b', line, re.I)
+        if active or phrase:
             lines.append(line)
     return lines
+
+
+JS_BUILTINS = frozenset((
+    'Number', 'String', 'Boolean', 'Array', 'Object', 'Math', 'JSON', 'Date', 'Promise', 'Map', 'Set',
+    'parseInt', 'parseFloat', 'isNaN', 'now', 'len'))
+
+
+def _created(text, grant):
+    """Names the spec itself creates: Produces identifiers and every granted path."""
+    production = re.search(r'(?ims)^\s*Produces:\s*(.*?)(?=^\s*(?:Writes|Consumes|Reads):|^#+\s|\Z)', text)
+    names = set(grant)
+    for quoted in re.findall(r'`([^`\n]*)`', production[1] if production else ''):
+        head = re.match(r'[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*', quoted.strip())
+        if head:
+            names.update((head[0], head[0].rsplit('.', 1)[-1]))
+    return names
+
+
+def _defined_anywhere(repo, base, name):
+    """True when a def/class/function/const/let/var/type/interface/enum of `name` exists in the base tree."""
+    pattern = ('(^|[^[:alnum:]_$])(def|class|function|const|let|var|type|interface|enum)[[:space:]]+[*]?'
+               + name.replace('$', '[$]') + '([^[:alnum:]_$]|$)')
+    found = subprocess.run(['git', '-C', str(repo), 'grep', '-q', '-E', '-e', pattern, base, '--',
+                            '*.py', '*.ts', '*.tsx', '*.js', '*.jsx', ':(exclude,glob)**/node_modules/**'],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+                           env=dict(os.environ, GIT_OPTIONAL_LOCKS='0'))
+    if found.returncode not in (0, 1):
+        raise NotReady('symbol lookup undetermined')
+    return found.returncode == 0
 
 
 def _sources(text):
@@ -93,6 +128,7 @@ def missing_inputs(text, repo, base, tree):
         if 'states no writes:' not in str(exc):
             raise
         grant = []
+    created = _created(text, grant)
     packages = set()
     for path in tree:
         if path.endswith('package.json') and 'node_modules/' not in path:
@@ -116,7 +152,11 @@ def missing_inputs(text, repo, base, tree):
         for match in re.finditer(
                 r'(?<![\w:/$])(?:[\w@.-]+/)+[\w.*?@-]+(?:::{0,1}[\w.]+(?:\[[^]\s]+\])?)?', bare):
             value = match[0].rstrip('.,:')
-            if Path(value.split(':')[0]).suffix or value.removeprefix('./').split('/', 1)[0] in top_directories:
+            plain = value.split(':')[0]
+            if (not Path(plain).suffix and len(plain.split('/')) == 2
+                    and re.sub(r'^\s*(?:[-*]|\d+[.)])?\s*', '', bare).strip().rstrip('.,:') != value):
+                continue  # prose such as data/props inside a sentence, not a path
+            if Path(plain).suffix or value.removeprefix('./').split('/', 1)[0] in top_directories:
                 tokens.append((match.start(), match.start() + len(value), value))
         tokens.sort()
         references = []
@@ -171,13 +211,14 @@ def missing_inputs(text, repo, base, tree):
             if not found:
                 found = [p for p in tree if any(p.endswith('/' + v) for v in variants)]
             if not found and not any(merge_gate.granted(p, [path]) for p in tree):
-                if not merge_gate.granted(path, grant):
+                if not merge_gate.granted(path, grant) and path not in created:
                     missing.append(('path', path))
                 # An absent self-written file has no existing symbol obligation.
                 continue
             resolved += found
             if symbol:
-                citation_symbols.append((symbol, found))
+                # An explicit existing path stays strict; a basename may fall back tree-wide.
+                citation_symbols.append((symbol, found, bool(tree_set.intersection(variants))))
         symbols = re.findall(r'\b(?:function|def|class|const)\s+([A-Za-z_$][\w$]*)', line)
         symbols += re.findall(r'(?<![\w.-])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\(', line)
         if not re.search(r'\bevents?\b', line):
@@ -185,10 +226,13 @@ def missing_inputs(text, repo, base, tree):
         events = set(re.findall(r'\bevents?\s+`([\w-]+)\(', line))
         if re.search(r'\bcensus:', line):
             events.update(re.findall(r'`([\w-]+)\(', line))
-        checks = citation_symbols + [(s, None) for s in dict.fromkeys(symbols)]
-        for symbol, specific in checks:
+        checks = citation_symbols + [(s, None, False) for s in dict.fromkeys(symbols)]
+        for symbol, specific, strict in checks:
             name = symbol.rsplit('.', 1)[-1]
             if re.fullmatch(r'[0-9a-f]{7,40}', name) or (specific is None and hasattr(builtins, symbol)):
+                continue
+            if symbol in created or name in created or (
+                    specific is None and symbol.split('.')[0] in JS_BUILTINS):
                 continue
             if specific is None and (symbol.split('.')[0] in foreign_modules or (
                     foreign_interface and not resolved and '.' not in symbol
@@ -205,6 +249,8 @@ def missing_inputs(text, repo, base, tree):
                                    env=dict(os.environ, GIT_OPTIONAL_LOCKS='0'))
             if found.returncode not in (0, 1):
                 raise NotReady('symbol lookup undetermined')
+            if found.returncode and not strict and _defined_anywhere(repo, base, name):
+                continue
             if found.returncode:
                 missing.append(('symbol', symbol))
     return list(dict.fromkeys(missing))
