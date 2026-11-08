@@ -29,13 +29,17 @@ class DossierNextStepTests(unittest.TestCase):
                 '# Fixture\n\n## 1. Intent\nA fixture.\n')
         self.events = [self.event('goal-filed', GID, goal=None),
                        self.event('charter-filed', CID, goal=GID, covers='none'),
+                       self.event('plan-written', CID, actor='planner'),
                        self.event('spec-written', SID, charter=CID, project='fixture'),
                        dict(self.event('spawn-done', SID, spawn='L-spec-auditor-9901'),
                             actor='spec-auditor', bad_cut=False, _src='L-spec-auditor-9901.jsonl:1')]
+        admitted = fold.fold(self.events)[1][CID]['evs']
+        self.assertTrue(any(e['type'] == 'plan-written' and e['actor'] == 'planner'
+                            and e['_src'].startswith('L-planner-') for e in admitted))
         
 
-    def event(self, kind, subject=SID, **fields):
-        actor = 'spec-writer' if kind == 'spec-written' else 'thinker'
+    def event(self, kind, subject=SID, *, actor=None, **fields):
+        actor = actor or ('spec-writer' if kind == 'spec-written' else 'thinker')
         return dict(type=kind, subject=subject, ts=(NOW - timedelta(hours=1)).isoformat(),
                     actor=actor, _src=f'L-{actor}-fixture.jsonl:{len(getattr(self, "events", []))+1}',
                     **fields)

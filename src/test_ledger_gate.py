@@ -229,6 +229,10 @@ class TestIsolation(Scratch):
             gate.evaluate(REPO, snap, ids, FIXED, workspace)
 
     def test_private_workspace_under_aliased_tmpdir(self):
+        # Compare post-planning advice across revisions, preserving isolation checks.
+        (self.root / 'events/L-planner-0001.jsonl').write_text(''.join(
+            json.dumps({'type': 'plan-written', 'subject': sid, 'ts': FIXED}) + '\n'
+            for sid in self.ids if sid.startswith('L-charter-')))
         alias = self.path / 'tmp-alias'
         alias.symlink_to(self.path, target_is_directory=True)
         with patch.object(tempfile, 'tempdir', str(alias)):
@@ -267,6 +271,10 @@ class TestIsolation(Scratch):
         self.assertEqual(packed['sources'][member.name], data.decode().splitlines())
 
     def test_real_clocks_descendant_and_hostile_environment(self):
+        # Keep the proving/clock fixture planned in both evaluated revisions.
+        (self.root / 'events/L-planner-0001.jsonl').write_text(''.join(
+            json.dumps({'type': 'plan-written', 'subject': sid, 'ts': FIXED}) + '\n'
+            for sid in self.ids if sid.startswith('L-charter-')))
         manifest = gate.manifest(self.root)
         live_home = self.path / 'live-home'
         for relative in ('.config/do-it/backup.toml', '.claude/sessions/99999.json'):
@@ -448,6 +456,10 @@ class TestMeterFailure(MeterScratch):
 
 class TestRevisionIntegration(Scratch):
     def test_actual_base_and_current_twenty_subjects_api_and_cli(self):
+        # Exercise unchanged post-planning answers with the full strict comparison.
+        (self.root / 'events/L-planner-0001.jsonl').write_text(''.join(
+            json.dumps({'type': 'plan-written', 'subject': sid, 'ts': FIXED}) + '\n'
+            for sid in self.ids if sid.startswith('L-charter-')))
         r = self.compare()
         self.assertTrue(r['success'], r['uncomparable'])
         self.assertEqual(r['completed_count'], 20)

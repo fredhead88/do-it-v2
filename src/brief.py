@@ -265,9 +265,9 @@ def _spec_next(spec, steps):
 
 # ── R3 item 4 · next, charter kind ──────────────────────────────────────────
 
-def _charter_next(cid, state, mine, now, briefs, steps=None):
-    """SD3's four ordered steps (charter kind), after the retracted/L2-complete
-    short-circuit. Step 2 (an open in-scope brief) is this unit's own declared
+def _charter_next(cid, state, mine, now, briefs, steps=None, admitted=()):
+    """Planning precedes SD3's four ordered steps on filed nonterminal charters.
+    Step 2 (an open in-scope brief) is this unit's own declared
     default — SD3's own text for it is not part of this spec's extract; no
     acceptance criterion exercises its wording, only step 1's, 3's and 4's
     (AC6). Mirrors `fold._closable`'s `no_open_briefs` conjunct and
@@ -277,6 +277,10 @@ def _charter_next(cid, state, mine, now, briefs, steps=None):
         return "nothing — withdrawn", "nobody"
     if state == "L2-complete":
         return _DONE
+    types = {e.get("type") for e in admitted}
+    if state != "unknown" and "charter-filed" in types and not types.intersection(
+            ("plan-written", "cut-written")):
+        return "plan this charter", "planner"
     if state in ("proving", "reopened"):
         entry, err = _expected_done_why(cid, now)
         if entry is not None:
@@ -308,7 +312,9 @@ def _charter_core(cid, events, root, now, specs, charters, steps=None):
     pl = plain.line(cid, root)
     ph = plain.phrase("charter", state)
     mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
-    next_text, next_owner = _charter_next(cid, state, mine, now, c.get("briefs", 0), steps)
+    admitted = charters.get(cid, {}).get("evs", ())
+    next_text, next_owner = _charter_next(cid, state, mine, now, c.get("briefs", 0), steps,
+                                         admitted=admitted)
 
     filed = _earliest(evs, "charter-filed", "goal-filed", "spec-written")
     planned = _earliest(evs, "plan-written", "cut-written")
