@@ -799,7 +799,11 @@ def events_for(role, out, a, base):
                                             footprint=out["footprint"])))
             # L-spec-0195/R3: a spec the tools cannot read is bounced HERE, at write time — never discovered only when a builder is dispatched against it (fold.py's `void`, which erased it from its charter). `spec-written` above is unconditional; this is a SECOND event on the same subject, never a substitute for it, and never `spawn-failed` (that would read as `void`, the very bug this closes).
             import validate
-            findings = validate.spec_shape(pathlib.Path(a.path).read_text())
+            spec_text = pathlib.Path(a.path).read_text(encoding="utf-8")
+            findings = validate.spec_shape(spec_text)
+            size_finding = validate.spec_size(spec_text)
+            if size_finding:
+                findings.append(size_finding)
             if findings:
                 ev.append(("spec-shape-failed", dict(findings=findings)))
             # L-spec-0276/R5 (SD25): a packet-lint `warn` finding becomes one visible, deduplicated `spec-lint-warning` event — best-effort by construction (`emit()` never raises; a refusal just returns a reason string and the sibling `spec-written` above still lands). `getattr`, not a bare call: `packet-lint` (wave 1) had not merged at this spec's own base_sha, so real `validate.py` carries no `spec_shape_warnings` yet — every OTHER spec-writer dispatch here (not monkeypatching it, per AC15) must keep working unchanged rather than crash on an AttributeError from a sibling's not-yet- landed function (Wave 2 runs after Wave 1 merges — Constraints).

@@ -71,6 +71,11 @@ the downstream specs consume. Ask for it in the sweep (③).
 
 ### ① The Plan — one document: the unit blocks, then the shared decisions
 
+Each unit's complete spec must fit `validate.SPEC_SIZE_CEILING` UTF-8 bytes,
+including headings, criteria and Verification text. Split an oversized unit
+before commissioning its spec-writer; preserve the complete goal across the
+named split units. Use the authoritative constant, not a token estimate.
+
 There is **one** planning artifact and it keeps its name: `plan-<charter>.md`,
 written to `$R/content/plan-<charter>.md`. The unit boundaries and the decisions
 that bind them are settled in the same pass, in the same file, because splitting

@@ -177,6 +177,19 @@ criterion, or as a split — never by narrowing the Goal.
 
 ## Budget
 
+Check the complete draft against `validate.SPEC_SIZE_CEILING` UTF-8 bytes
+before final write, counting headings, criteria and Verification text. If the
+complete goal will not fit, declare `spec-unbuildable` naming concrete split
+units and return `split-proposed` with those units in `split` to the Planner
+for re-carving, without writing an oversized spec and without dropping scope.
+Use the authoritative constant rather than an independent threshold.
+
+A carried writer that nevertheless writes oversized text ends in `CarryFailed`,
+naming the spec, the recorded size finding and the need for Planner re-carving.
+Size-only failures do not trigger automatic repair or a new Planner dispatch.
+Existing bounded shape-only mechanical repair and writer rework obligations
+remain in force; `shape.check` does not repair size failures.
+
 Six interview rounds, hard cap, with the overflow path above. Past roughly
 35–40% of your context, write the spec with what you have, name the weak
 dimensions, and return.
