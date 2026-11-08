@@ -822,6 +822,11 @@ def required_reason(e):
         return escalation_required_reason(e, escalation_ok)
     if t == 'window-verification-result' and (reason := window_result_reason(e)):
         return reason
+    if t == "build-done" and e.get("status") in ("BLOCKED", "NEEDS_CONTEXT"):
+        # An unfinished build says why (L-spec-2279/R6). Field-only; historical rows are never re-judged.
+        why = e.get("reason")
+        if not isinstance(why, str) or not why.strip():
+            return f"build-done status={e['status']} requires a non-empty reason"
     fields = REQUIRED.get(t)
     if fields:
         missing = []
