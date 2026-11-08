@@ -18,6 +18,7 @@ import re
 import sys
 import tempfile
 import time
+import ledger_write_guard
 
 try:
     import ledger_files
@@ -230,6 +231,9 @@ def next_segment(directory, date):
 
 
 def set_aside(candidate, directory, reasons):
+    ledger_write_guard.check(candidate.path)
+    ledger_write_guard.check(directory)
+    ledger_write_guard.check(directory / '.pending' / candidate.path.name)
     if not unchanged(candidate.path, candidate.stat):
         reasons['changed'] += 1
         return False
@@ -268,10 +272,15 @@ def set_aside(candidate, directory, reasons):
 
 
 def publish(batch, directory, date, reasons):
+    ledger_write_guard.check(directory)
+    for candidate in batch:
+        ledger_write_guard.check(candidate.path)
     stem = next_segment(directory, date)
     segment = directory / (stem + '.jsonl')
     index = directory / (stem + '.idx.json')
     segment_tmp, index_tmp = Path(str(segment) + '.tmp'), Path(str(index) + '.tmp')
+    for destination in (segment, index, segment_tmp, index_tmp):
+        ledger_write_guard.check(destination)
     rows, offset, whole_hash = [], 0, hashlib.sha256()
     # No concatenated second copy of a segment in memory.
     with segment_tmp.open('xb') as stream:
@@ -336,10 +345,14 @@ def leftovers(events_dir, now):
 
 
 def pending_cleanup(events_dir, members):
+    ledger_write_guard.check(events_dir)
     pending = Path(events_dir) / ledger_files.SEGMENT_DIR / '.pending'
+    ledger_write_guard.check(pending)
     for path in sorted(pending.glob('*.jsonl')):
         if path.name not in members:
             continue  # the health gate already refuses unindexed pending files
+        ledger_write_guard.check(path)
+        ledger_write_guard.check(Path(events_dir) / path.name)
         stat = path.stat()
         if blocked(stat, open_files()):
             raise OSError(f'pending writer unknown or open: {path.name}')
@@ -379,6 +392,8 @@ def summary(files=0, segments=0, size=0, live=0, reasons=None):
 
 def run(root, args):
     events_dir, state = root / 'events', root / 'state'
+    if not args.dry_run:
+        ledger_write_guard.check(events_dir)
     now = time.time()
     cleanup = leftovers(events_dir, now)
     if args.dry_run:
@@ -386,6 +401,7 @@ def run(root, args):
             print(f'ledger-rollup: would delete {path}')
     else:
         for path in cleanup:
+            ledger_write_guard.check(path)
             path.unlink()
         if cleanup:
             sync_directory(events_dir / ledger_files.SEGMENT_DIR)
@@ -415,6 +431,7 @@ def run(root, args):
         summary(live=count, reasons=reasons)
         return 0
     directory = events_dir / ledger_files.SEGMENT_DIR
+    ledger_write_guard.check(directory)
     directory.mkdir(exist_ok=True)
     sync_directory(events_dir)
     date = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d')
@@ -451,6 +468,8 @@ def main(argv=None):
             print('ledger-rollup: refused — readers not adopted')
             return 1
         root = Path(os.environ.get('DOIT_ROOT', Path.home() / '.do-it'))
+        if not args.dry_run:
+            ledger_write_guard.check(root / 'events')
         if not args.dry_run and not (root / 'state/ledger-rollup-approved').is_file():
             print('ledger-rollup: not approved (state/ledger-rollup-approved absent)')
             return 0

@@ -19,6 +19,9 @@ import os
 import pathlib
 import shutil
 import tempfile
+import ledger_write_guard
+
+ledger_write_guard.mark_test_process()
 
 _BASE = None
 

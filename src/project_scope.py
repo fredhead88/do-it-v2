@@ -1,5 +1,15 @@
 """Project inference for append callers; spec registration owns the label."""
 import re
+from pathlib import Path
+
+
+def registered(root, project):
+    if not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project):
+        return False
+    try:
+        return (Path(root) / 'repos' / project).is_dir()
+    except (OSError, ValueError):
+        return False
 
 
 def subject_project(events, subject):
@@ -15,5 +25,5 @@ def check_inferred(root, event, configured, arguments):
             arg.partition('=')[0].rstrip(':') == 'project' for arg in arguments):
         return
     project = event.get('project')
-    if not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project) or not (root / 'repos' / project).is_dir():
+    if not registered(root, project):
         raise SystemExit(f'refused: unregistered project {project!r}; name a registered project explicitly')

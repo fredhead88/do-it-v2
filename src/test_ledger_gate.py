@@ -27,6 +27,7 @@ def git(repo, *args):
 def seed(root, n=20):
     (root / 'events').mkdir(parents=True)
     (root / 'content').mkdir()
+    (root / 'repos' / 'fixture').mkdir(parents=True)
     rows = []
     for i in range(n):
         kind = 'spec' if i % 2 else 'charter'
@@ -200,6 +201,33 @@ class TestFailure(Scratch):
 
 
 class TestIsolation(Scratch):
+    def test_registered_project_names_are_captured_and_replayed_without_repo_contents(self):
+        repos = self.root / 'repos'
+        external = self.path / 'external-repo'
+        external.mkdir()
+        (external / 'private.txt').write_text('must not be copied')
+        (repos / 'alias').symlink_to(external, target_is_directory=True)
+        (repos / 'dangling').symlink_to(self.path / 'missing')
+        (repos / 'file').write_text('not a registration')
+        snap = gate.capture(self.root)
+        self.assertEqual(snap['registered_projects'], ['alias', 'fixture'])
+        self.assertFalse(any(name.startswith('repos/') for name in snap['files']))
+        (repos / 'alias').unlink()
+        changed = gate.capture(self.root)
+        self.assertNotEqual(snap['identity'], changed['identity'])
+        ids, _ = gate.select_subjects(snap, 20)
+        workspace = self.path / 'evaluation'
+
+        def inspect_replay(*args, **kwargs):
+            replay = workspace / 'root' / 'repos'
+            self.assertEqual(sorted(p.name for p in replay.iterdir()), ['alias', 'fixture'])
+            self.assertTrue(all(p.is_dir() and not p.is_symlink() and not list(p.iterdir())
+                                for p in replay.iterdir()))
+            return answer(ids)
+
+        with patch.object(gate, 'run_child', side_effect=inspect_replay):
+            gate.evaluate(REPO, snap, ids, FIXED, workspace)
+
     def test_private_workspace_under_aliased_tmpdir(self):
         alias = self.path / 'tmp-alias'
         alias.symlink_to(self.path, target_is_directory=True)

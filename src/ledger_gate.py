@@ -58,6 +58,7 @@ AUXILIARY = {
     'clock': 'fixed UTC datetime.now/utcnow/today and time.time in all Python children',
     'locale': 'C.UTF-8', 'encoding': 'utf-8',
     'optional_backend_version': 'claude --version pinned unavailable; no backend process',
+    'registrations': 'captured project names replayed as empty private directories',
 }
 
 
@@ -107,6 +108,7 @@ def capture(root):
     No .env, configuration, auxiliary state or credential file is copied.
     """
     import ledger_files
+    from relay import registered_projects
     root = Path(root)
     if root.is_symlink():
         raise ValueError('source root symlink is not supported')
@@ -114,6 +116,7 @@ def capture(root):
         if not (root / name).is_dir() or (root / name).is_symlink():
             raise ValueError('missing or aliased required ' + name)
     before = {name: manifest(root / name) for name in ('events', 'content')}
+    projects = sorted(registered_projects(root))
     files = {}
     for name, tree in before.items():
         for relative, meta in tree.items():
@@ -133,10 +136,12 @@ def capture(root):
     if not sources:
         raise ValueError('missing ledger events')
     after = {name: manifest(root / name) for name in ('events', 'content')}
-    if before != after:
+    if before != after or projects != sorted(registered_projects(root)):
         raise ValueError('unstable source capture')
     return {'files': files, 'sources': sources,
-            'identity': digest(encoded({k: digest(v) for k, v in sorted(files.items())})),
+            'registered_projects': projects,
+            'identity': digest(encoded({'files': {k: digest(v) for k, v in sorted(files.items())},
+                                       'registered_projects': projects})),
             'content_policy': 'regular non-symlink Markdown files; no config/env files'}
 
 
@@ -422,6 +427,8 @@ def evaluate(revision, snapshot, ids, now, workspace, *, timeout=90):
     root = workspace / 'root'
     for folder in ('events', 'content'):
         (root / folder).mkdir(parents=True)
+    for project in snapshot['registered_projects']:
+        (root / 'repos' / project).mkdir(parents=True)
     for relative, data in snapshot['files'].items():
         p = root / relative
         p.parent.mkdir(parents=True, exist_ok=True)

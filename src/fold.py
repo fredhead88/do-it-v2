@@ -21,7 +21,7 @@ import freeze
 import owed, routing
 import proving
 import ledger_compact
-import ledger_cache
+import ledger_cache, ledger_write_guard
 
 
 def _ledger_excepthook(exc_type, value, traceback, previous=sys.excepthook):
@@ -2344,14 +2344,12 @@ def ledger_path(inbox: bool = False) -> pathlib.Path:
 def append(argv: list[str], strict: bool = False) -> dict:
     """Content before event, always (§9.2 rule 3). Never trust the write — re-read (rule 4)."""
     argv = list(argv)
-    # L-spec-0279/R3: a literal --inbox token anywhere in argv is a filename-
-    # routing flag — general across event types, not lesson-specific — stripped
-    # before k=v parsing, forcing the write path to L-inbox-local.jsonl and
-    # overriding DOIT_LEDGER_FILE, so D90's filename-derived actor is `inbox`.
+    # --inbox overrides the ledger-file setting and derives the inbox actor.
     inbox = "--inbox" in argv
     if inbox:
         argv = [a for a in argv if a != "--inbox"]
     path = ledger_path(inbox=inbox)
+    ledger_write_guard.check(path)
     e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1]}
     for kv in argv[2:]:
         k, _, v = kv.partition("=")

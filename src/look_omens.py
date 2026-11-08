@@ -204,7 +204,7 @@ def fix_for(rule, root, events, classes):
     # Owed omens share the established "owed" class.
     if rule in ('owed-due', 'owed-parked'):
         tokens.add('owed')
-    for cid in relay.open_charters(events):
+    for cid in relay.open_charters(events, root=root):
         try:
             text = (pathlib.Path(root) / 'content' / f'{cid}.md').read_text()[:4000].split('<!--', 1)[0]
         except OSError:

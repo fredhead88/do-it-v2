@@ -88,6 +88,7 @@ case "${1:-board}" in
            # Fixture git init/config must not follow the caller's integrator.
            for doit_test_git_var in "${!GIT_@}"; do unset "$doit_test_git_var"; done
            DOIT_TEST_MACHINE_ROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${DOIT_ROOT:-$HOME/.do-it}")
+           export DOIT_TEST_MACHINE_ROOT DOIT_TEST_PROCESS=1
            if [ "$#" -eq 1 ]; then
              if [ "$1" != --live ]; then
                echo 'usage: doit test [--live]' >&2
