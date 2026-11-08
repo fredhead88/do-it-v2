@@ -1417,6 +1417,16 @@ SWEEP11 = "L-owed-sweeper-ac11"
 ROWS11 = [_row_387("L-spec-9811", "AC1"), _row_387("L-spec-9812", "AC1"), _row_387("L-spec-9813", "AC1")]
 _sweep_manifest_387(SWEEP11, ROWS11)
 m11 = packet.parse_sweep_manifest(TMP / "content" / f"{SWEEP11}.md")
+for boundary, accepted in ((32, True), (33, False)):
+    boundary_id = f"L-sweep-2238-{boundary}"
+    _sweep_manifest_387(boundary_id, [dict(ROWS11[0], criterion=f"AC{i}") for i in range(boundary)])
+    try:
+        boundary_manifest = packet.parse_sweep_manifest(TMP / "content" / f"{boundary_id}.md")
+    except SystemExit:
+        assert not accepted, "32-row owed manifest must be accepted"
+    else:
+        assert accepted and len(boundary_manifest['rows']) == 32, "33-row owed manifest must be refused"
+print("2238 shared manifest boundary: 32 accepted, 33 refused")
 assert set(m11) == {"project", "cwd", "rows", "kind"} and len(m11["rows"]) == 3, m11
 assert m11["rows"] == ROWS11, "AC11: rows returned verbatim, as written"
 N += 1

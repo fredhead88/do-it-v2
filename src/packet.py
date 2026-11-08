@@ -1216,8 +1216,8 @@ def parse_sweep_manifest(path):
         rows = json.loads(m.group(1))
     except ValueError as e:
         die(f"{path}: malformed JSON in the Rows block ({e})")
-    if not isinstance(rows, list) or not (1 <= len(rows) <= 8):
-        die(f"{path}: the Rows block must be a JSON array of 1-8 objects")
+    if not isinstance(rows, list) or not (1 <= len(rows) <= 32):
+        die(f"{path}: the Rows block must be a JSON array of 1-32 objects")
     import dispatch
     for row in rows:
         if kind == "repo" and any(not row.get(key) for key in ("shipped_sha", "base_sha", "clone")):

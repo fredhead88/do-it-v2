@@ -33,19 +33,12 @@ record both readings and judgment outcomes in lesson lines (axis=K); a measured 
 ## Lane rules
 
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
-- build | dispatch-builder | tick | 30
-- grade | dispatch-grader | tick | 15
-- review | dispatch-reviewer | tick | 15
-- gate | doit-gate | tick | 30
-- enqueue | queue-add | tick | 60
-- merge | window-run | executor | 120
-- idle | none | none | 60
-- rebuild | dispatch-builder | tick | 15
-- regrade | dispatch-grader | tick | 15
-- close | spec-killed | tick | 60
-- wave-held | none | none | 10
-- dependency-held | none | none | 10
-- sweep-check | sweep-check | tick | 120
+- build | dispatch-builder | tick | 30; - grade | dispatch-grader | tick | 15
+- review | dispatch-reviewer | tick | 15; - gate | doit-gate | tick | 30
+- enqueue | queue-add | tick | 60; - merge | window-run | executor | 120; - idle | none | none | 60
+- rebuild | dispatch-builder | tick | 15; - regrade | dispatch-grader | tick | 15
+- close | spec-killed | tick | 60; - wave-held | none | none | 10
+- dependency-held | none | none | 10; - sweep-check | sweep-check | tick | 120
 
 ## Cron manifest
 Source: `crons.toml`. Name | schedule | where | path, then command.
@@ -61,6 +54,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   ledger-snapshot | 2 * * * * | user | {repo}/scripts/snapshot.sh  {doit} cron-run ledger-snapshot
   -- {repo}/scripts/snapshot.sh >/dev/null 2>&1; sweep-owed | 11 0,6,12,18 * * * | user | {doit}
   {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1
+  verify-owed | 8,23,38,53 * * * * | user | {doit}  {doit} cron-run verify-owed -- {doit}
+  verify-owed >> {root}/logs/verify-owed.log 2>&1
   auto-deploy | */5 * * * * | cron.d | /opt/albert-scott/venv/bin/python  albert {doit} cron-run
   auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py
   --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1; owed-digest | 0 6 * * * | user | {doit}

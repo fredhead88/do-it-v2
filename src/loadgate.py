@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import time
 import tomllib
+import fcntl
 
 
 def test_waiters(root=None, *, now=None):
@@ -26,6 +27,29 @@ def test_waiters(root=None, *, now=None):
     import test_slots
     return test_slots.waiters(fold.ROOT if root is None else root,
                              now=None if now is None else now.timestamp())
+
+
+def owed_priority(root=None, *, now=None):
+    """Read rehearsal priority from queue and kernel-locked holder metadata."""
+    import fold
+    root = Path(fold.ROOT if root is None else root)
+    holder = False
+    occupied = 0
+    for path in (root / 'state/test-slots').glob('slot-*.lock'):
+        try:
+            with path.open('r') as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    occupied += 1
+                    try:
+                        holder |= json.load(handle).get('role') == 'rehearsal'
+                    except (ValueError, OSError):
+                        pass
+        except OSError:
+            pass
+    waiting = any(row.get('role') == 'rehearsal' for row in test_waiters(root, now=now))
+    return dict(rehearsal_holder=holder, rehearsal_waiting=waiting, occupied=occupied)
 
 DEFAULTS = dict(mode='observe', mem_floor_gb=6, mem_hard_stop_gb=8,
                 mem_swap_hard_stop_gb=12, mem_pressure_some_avg10_max=5,
@@ -257,7 +281,7 @@ def readings(proc_root='/proc', *, cgroup_root='/sys/fs/cgroup', prev=None, cloc
     return r
 
 
-def admit(role, readings, running=None, *, admitted_gb=0., admitted_jobs=0, state=None, settings=None):
+def admit(role, readings, running=None, *, admitted_gb=0., admitted_jobs=0, state=None, settings=None, priority=None):
     s, r = DEFAULTS if settings is None else settings, readings or {}
     peaks = s['peak_gb']
     unknown = set()
@@ -269,9 +293,28 @@ def admit(role, readings, running=None, *, admitted_gb=0., admitted_jobs=0, stat
         return peaks.get(name, 0)
     need = s['running_peak_factor'] * sum(n * peak(name) for name, n in (running or {}).items()) + admitted_gb + peak(role) + s['mem_floor_gb']
     detail = dict(failed=[], skipped=[], need_gb=need, unknown_roles=sorted(unknown))
-    if role != PROBE_ROLE and role in s['bypass_roles']:
+    if role in ('owed-sweeper', 'owed-verifier'):
+        priority = priority or {}
+        if ((running or {}).get('builder', 0) or priority.get('rehearsal_holder')
+                or (priority.get('rehearsal_waiting') and priority.get('occupied', 0))):
+            detail['failed'].append('owed-yield')
+            detail['priority'] = priority
+            return False, 'owed-yield', detail
+        # Owed drivers enforce their own policy even in global observe mode.
+        # Explicit bypass cannot bypass physical resource protection for owed work.
+        r = {k: v for k, v in r.items() if _number(v)}
+        state = dict(state or {})
+        state['psi_tripped'] = (state.get('psi_tripped', False)
+            or r.get('mem_some10', 0) > s['mem_pressure_some_avg10_max']
+            or r.get('mem_full10', 0) > s['mem_pressure_full_avg10_max'])
+        state['cpu_tripped'] = (state.get('cpu_tripped', False)
+            or r.get('cpu_some10', 0) > s['cpu_pressure_some_avg10_max'])
+    if role not in (PROBE_ROLE, 'owed-sweeper', 'owed-verifier') and role in s['bypass_roles']:
         return True, 'bypass', detail
-    if all(r.get(k) is None for k in ('mem_avail_gb', 'swap_free_gb', 'load1_per_core', 'mem_some10', 'mem_full10')):
+    readable_keys = ('mem_avail_gb', 'swap_free_gb', 'load1_per_core', 'mem_some10', 'mem_full10')
+    if role in ('owed-sweeper', 'owed-verifier'):
+        readable_keys += ('cpu_some10',)
+    if all(r.get(k) is None for k in readable_keys):
         return True, 'unreadable', detail
     mem, swap, load = (r.get(k) for k in ('mem_avail_gb', 'swap_free_gb', 'load1_per_core'))
     tests = ((mem is not None, lambda: mem < s['mem_hard_stop_gb']),

@@ -42,7 +42,7 @@ BASE_MANIFEST.write_bytes(subprocess.check_output(
     ["git", "show", f"{base}:crons.toml"], cwd=REAL_MANIFEST.parent))
 BASE_ROWS = crons.rows(str(BASE_MANIFEST))
 NAMES = {"claude-autoswitch", "thinker-inbox", "merge-news", "worktree-reaper", "scratch-db-reaper", "doit-base-red-nightly", "tick", "look", "tmp-reaper", "lessons-digest", "backup-watch", "ledger-repack",
-         "ledger-snapshot", "sweep-owed", "auto-deploy", "owed-digest", "owed-digest-json",
+         "ledger-snapshot", "sweep-owed", "verify-owed", "auto-deploy", "owed-digest", "owed-digest-json",
          "portal-latency-daily", "suite-daily", "health-alarms", "ci-shadow", "balance", "stuck-digest", "gh-bill"} | {"seat-usage", "base-red-nightly", "base-red-nightly-collect", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily", "master-full"}
 
 
@@ -86,8 +86,33 @@ def _exec_manifest(tmpdir, rows_=None, mode=0o755):
 d1 = TMP / "ac1"
 d1.mkdir()
 r1 = crons.rows(str(REAL_MANIFEST))
-check(len(r1) == len(BASE_ROWS) + 18, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack - verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly + claude-autoswitch + master-full + merge-news + thinker-inbox: {len(r1)} vs {len(BASE_ROWS)}")
+check(len(r1) == len(BASE_ROWS) + 19, f"AC1: base + seat-usage + owed-digest-json + base-red-nightly + ledger-repack + verify-owed + pace-sample + stall-sample + pane-watchdog + executor-wake + spec-preflight + ledger-rollup + flow-health-daily + doit-base-red-nightly + claude-autoswitch + master-full + merge-news + thinker-inbox: {len(r1)} vs {len(BASE_ROWS)}")
 check({row["name"] for row in r1} == NAMES, f"AC1: name set: {[row['name'] for row in r1]}")
+# 2238 AC4: raw expiry is intentionally outside crons.rows' supported fields.
+from datetime import datetime, timedelta, timezone
+import hashlib, json
+raw2238 = next(r for r in tomllib.loads(REAL_MANIFEST.read_text())['row'] if r['name'] == 'verify-owed')
+assert raw2238['owner'] == 'thinker' and raw2238['project'] == 'do-it-v2'
+assert datetime.fromisoformat(raw2238['expiry'].replace('Z', '+00:00')) >= datetime(2026, 11, 8, tzinfo=timezone.utc) + timedelta(days=14)
+assert raw2238['schedule'] == '8,23,38,53 * * * *' and raw2238['max_runtime_s'] == 3600
+assert next(r for r in r1 if r['name'] == 'sweep-owed')['schedule'] == '11 0,6,12,18 * * *'
+assert re.search(raw2238['sig'], next(r for r in r1 if r['name'] == 'verify-owed')['command'])
+installed2238 = TMP / 'installed-2238.crontab'
+paused2238 = '#PAUSED 4 * * * * /home/albert/verify-owed-push.sh\n'
+unrelated2238 = 'MAILTO=reader\n17 * * * * /bin/true # unrelated\n'
+installed2238.write_text(unrelated2238 + paused2238)
+crons.install('verify-owed', crontab_path=str(installed2238))
+first2238 = installed2238.read_bytes()
+assert first2238.startswith((unrelated2238 + paused2238).encode())
+assert sum(not l.startswith('#') and '# doit-cron:verify-owed' in l for l in first2238.decode().splitlines()) == 1
+crons.install('verify-owed', crontab_path=str(installed2238))
+assert installed2238.read_bytes() == first2238
+with installed2238.open() as reopened2238:
+    assert not any(r['name'] == 'verify-owed' for r in crons.check(crontab_text=reopened2238.read(), crond_dir=str(TMP)))
+body2238 = json.dumps(dict(raw_metadata=raw2238, installed=first2238.decode(), idempotent=True,
+                          quiet_verifier_opportunities=32, quiet_capacity=32*32), sort_keys=True)
+print(json.dumps(dict(url='cli://crons/2238-AC4', status=0,
+                     body_sha256=hashlib.sha256(body2238.encode()).hexdigest(), body_excerpt=body2238)))
 repack = next(row for row in r1 if row["name"] == "ledger-repack")
 check(repack == {
     "name": "ledger-repack", "where": "user", "schedule": "47 4 * * *",
@@ -311,10 +336,10 @@ base_dir.mkdir()
 base_manifest, _ = _exec_manifest(base_dir, BASE_ROWS)
 base_missing = crons.check(manifest=str(base_manifest), crontab_text=FIXTURE_5,
                            crond_dir=str(crond5_empty))
-check({r["name"] for r in res5} == ({r["name"] for r in base_missing} - {"verify-owed"}) | {"claude-autoswitch", "master-full", "merge-news", "thinker-inbox", "scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
+check({r["name"] for r in res5} == {r["name"] for r in base_missing} | {"claude-autoswitch", "master-full", "merge-news", "thinker-inbox", "scratch-db-reaper", "worktree-reaper", "doit-base-red-nightly", "seat-usage", "owed-digest-json", "base-red-nightly", "base-red-nightly-collect", "ledger-repack", "ledger-snapshot", "pace-sample", "stall-sample", "pane-watchdog", "executor-wake", "spec-preflight", "ledger-rollup", "flow-health-daily"},
       f"AC5: inherited absent rows plus seat-usage, owed-digest-json, base-red-nightly, ledger-repack and ledger-snapshot, pace-sample, stall-sample, pane-watchdog, executor-wake, spec-preflight, ledger-rollup, flow-health-daily, claude-autoswitch, master-full, merge-news and thinker-inbox: {res5}")
 check(all(r["reason"] == "absent" for r in res5), f"AC5: every entry is absent: {res5}")
-check(len(res5) == len(base_missing) + 19, f"AC5: additions including claude-autoswitch, master-full, merge-news, thinker-inbox and verify-owed retired: {res5}")
+check(len(res5) == len(base_missing) + 20, f"AC5: additions including claude-autoswitch, master-full, merge-news, thinker-inbox and verify-owed restored: {res5}")
 seat = next(row for row in r1 if row["name"] == "seat-usage")
 check(seat == {
     "name": "seat-usage", "where": "user", "schedule": "12,27,42,57 * * * *",
@@ -622,7 +647,7 @@ check(bw6["max_runtime_s"] == 90, f"R14-AC6: backup-watch max_runtime_s == 90: {
 for r in rows6:
     if r["name"] not in {"backup-watch", "ledger-repack", "suite-daily", "base-red-nightly", "base-red-nightly-collect", "ledger-snapshot", "pace-sample", "stall-sample"}:
         check(r["max_runtime_s"] == ({"spec-preflight": 3300, "flow-health-daily": 600, "doit-base-red-nightly": 7500, "master-full": 270,
-                                                "tmp-reaper": 3600, "sweep-owed": 3600}.get(r["name"])),
+                                                "tmp-reaper": 3600, "sweep-owed": 3600, "verify-owed": 3600}.get(r["name"])),
               f"R14-AC6: {r['name']} exact runtime: {r['max_runtime_s']}")
 buf6 = io.StringIO()
 with contextlib.redirect_stdout(buf6):

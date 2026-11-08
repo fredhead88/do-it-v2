@@ -109,6 +109,19 @@ owner = "thinker"
 project = "do-it-v2"
 
 [[row]]
+name = "verify-owed"
+where = "user"
+max_runtime_s = 3600
+schedule = "8,23,38,53 * * * *"
+command = "{doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1"
+path = "{doit}"
+sig = '\bdoit verify-owed\b'
+owner = "thinker"
+project = "do-it-v2"
+# Thinker owns renewal or removal; expiry is review metadata, not a shell cutoff.
+expiry = "2026-12-08T00:00:00Z"
+
+[[row]]
 name = "auto-deploy"
 where = "cron.d"
 schedule = "*/5 * * * *"
