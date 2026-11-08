@@ -820,7 +820,8 @@ print("AC14 ok")
 root_ac7 = newroot()
 (root_ac7 / "content").mkdir()
 (root_ac7 / "content" / "L-charter-0099.md").write_text("corrects: ops, other\n\nSome charter body.\n")
-append_raw(root_ac7, "L-thinker-0001.jsonl", iso(NOW - timedelta(days=1)), type="charter-filed", subject="L-charter-0099")
+(root_ac7 / "repos" / "p").mkdir(parents=True)
+append_raw(root_ac7, "L-thinker-0001.jsonl", iso(NOW - timedelta(days=1)), type="charter-filed", subject="L-charter-0099", project="p")
 ev_ac7 = read_ledger(root_ac7)
 
 

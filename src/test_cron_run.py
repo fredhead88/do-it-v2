@@ -372,13 +372,7 @@ def _r14ac14():
     os.environ["DOIT_ROOT"] = str(fake_root)
     os.environ["PATH"] = f"{fake_bin}:{saved_env.get('PATH', '')}"
 
-    # test_look.py's own AC15c is a pre-existing failure, confirmed identical
-    # in a detached scratch worktree at this spec's base_sha (unrelated to
-    # cron-run/hermeticity, and outside this spec's Writes grant to fix) —
-    # tolerated here so this proof isn't blocked by an unrelated, older bug.
-    tolerated = {
-        HERE / "test_look.py": "AC15: crons unimportable -> the same reading lands",
-    }
+    tolerated = {}
     files_ok = True
     try:
         for f in (HERE / "test_cron_run.py", HERE / "test_crons.py", HERE / "test_look.py"):
@@ -390,8 +384,7 @@ def _r14ac14():
         os.environ.clear()
         os.environ.update(saved_env)
 
-    check(files_ok, "R14-AC14: every one of the three files passes (a known pre-existing "
-                    "test_look.py failure tolerated by name)")
+    check(files_ok, "R14-AC14: every one of the three files passes")
     check(not recorder_calls, f"R14-AC14: no recorder saw a call reaching a real seam: {recorder_calls}")
     check(not marker.exists(), "R14-AC14: the crontab stub was never invoked (marker file absent)")
     print("R14-AC14 ok")
