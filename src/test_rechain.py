@@ -190,6 +190,301 @@ class RechainTests(unittest.TestCase):
         cur, _ = window_gate.merge_into(self.fx.repo, self.fx.base, a[2], "a")
         return cur, b
 
+    ISOLATION = '''def test_route():
+    assert routed == "h0"
+    assert is_ancestor(graph, "h0", ROUTED_HEAD)
+
+def test_cli():
+    for current in (
+        "h0 (head)\\n",
+    ):
+        assert target == "h0"
+'''
+    HANDWRITTEN = '''def test_route():
+    assert routed == 'b'
+    assert is_ancestor(graph, "h0", ROUTED_HEAD)
+    assert is_ancestor( graph, 'b', ROUTED_HEAD )
+
+def test_cli():
+    for current in (
+        'h0 (head)\\n',
+        'b (head)\\n',
+    ):
+        assert target == 'b'
+'''
+    ASSERTION_ONLY = '''def test_graph():
+    assert is_ancestor(graph, "h0", ROUTED_HEAD)
+'''
+    WITH_ASSERTION = '''def test_graph():
+    assert is_ancestor(graph, "h0", ROUTED_HEAD)
+    assert is_ancestor(graph, "b", ROUTED_HEAD)
+'''
+    ARENA = "tests/pipelines/amazon/test_arena.py"
+    HISTORY = 'VALUE = 0\nHISTORY = "h0"\nANCESTOR = "listing_arena_001"\n'
+
+    def coverage_case(self, shape, *, already=False, combined=False):
+        f = self.fx
+        f.write(rechain.TEST, self.ISOLATION if shape == "handwritten" else self.ASSERTION_ONLY)
+        f.write(rechain.VERSIONS + "h0.py", "revision='h0'\ndown_revision='listing_arena_001'\n")
+        f.write(rechain.VERSIONS + "history.py", "revision='listing_arena_001'\ndown_revision=None\n")
+        f.write(self.ARENA, self.HISTORY)
+        f.write("executable", "#!/bin/sh\nexit 0\n")
+        (f.repo / "executable").chmod(0o755)
+        f.base = f.commit("coverage base")
+        def current(f):
+            source = (f.repo / rechain.TEST).read_text()
+            if already:
+                source = source.replace('    assert is_ancestor(graph, "h0", ROUTED_HEAD)',
+                                        '    assert is_ancestor(graph, "h0", ROUTED_HEAD)\n'
+                                        '    assert is_ancestor(graph, "b", ROUTED_HEAD)')
+            f.write(rechain.TEST, source + '\ndef test_current_history():\n    assert retained == "a"\n')
+            f.write(self.ARENA, self.HISTORY.replace('VALUE = 0', 'VALUE = 7'))
+        a = f.branch("a", mutation=current)
+        def branch(f):
+            f.write(rechain.TEST, self.HANDWRITTEN if shape == "handwritten" else self.WITH_ASSERTION)
+            if shape == "arena" or combined:
+                f.write(self.ARENA, self.HISTORY + 'PARENT = "h0"\nREVISION = "b"\n')
+            f.write(rechain.VERSIONS + "b.py", "revision='b'\ndown_revision='h0'\n"
+                    "def upgrade():\n    op.execute('upgrade body')\n"
+                    "def downgrade():\n    op.execute('downgrade body')\n")
+        b = f.branch("b", mutation=branch)
+        if shape != "handwritten":
+            self.assertEqual(rechain.test_edit(self.ASSERTION_ONLY, "h0", "b"), self.ASSERTION_ONLY)
+        return a[2], b
+
+    def test_2253_isolation_entries(self):
+        rows = []
+        for shape, already, combined in (("handwritten", False, False), ("2189", False, False),
+                                         ("2189", True, False), ("2189", False, True)):
+            with self.subTest(shape=shape, already=already, combined=combined), tempfile.TemporaryDirectory() as root:
+                self.fx = Fixture(root)
+                cur, b = self.coverage_case(shape, already=already, combined=combined)
+                changes, _, _, _, allowed = rechain.mechanical(self.fx.repo, cur, b[2])
+                candidate = changes[rechain.TEST]
+                tree = ast.parse(candidate)
+                name = "test_route" if shape == "handwritten" else "test_graph"
+                fn, = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+                self.assertEqual(sum(rechain.ancestry(n, "b") for n in fn.body), 1)
+                self.assertEqual(sum(rechain.ancestry(n, "h0") for n in fn.body), 1)
+                self.assertIn('assert retained == "a"', candidate)
+                if shape == "handwritten":
+                    self.assertIn('assert routed == "b"', candidate)
+                    self.assertIn('"a\\n",', candidate)
+                    self.assertIn('"b (head)\\n",', candidate)
+                if combined:
+                    self.assertIn('PARENT = "a"', changes[self.ARENA])
+                    self.assertIn(self.ARENA, allowed)
+                rows.append(dict(shape=shape, already_present=already, combined=combined, candidate=candidate))
+        # The same entry point also proves arbitrary extra expressions decline.
+        for expression in ('assert is_ancestor(graph, "b", OTHER)',
+                           'assert is_ancestor(graph, "b", ROUTED_HEAD), "message"',
+                           'assert is_ancestor(graph, "b", ROUTED_HEAD, extra)',
+                           'helper()'):
+            with self.assertRaisesRegex(ValueError, '^unrecognised isolation-test branch change$'):
+                rechain.isolation_edit(self.ASSERTION_ONLY, self.ASSERTION_ONLY + '    ' + expression + '\n',
+                                       self.ASSERTION_ONLY, 'h0', 'b', 'a')
+            rows.append(dict(rejected=expression))
+        response("2253-AC1", rows)
+
+    def test_2253_committed_roundtrip(self):
+        rows = []
+        for shape, combined in (("handwritten", False), ("2189", False), ("arena", False), ("2189", True)):
+            with self.subTest(shape=shape, combined=combined), tempfile.TemporaryDirectory() as root:
+                self.fx = Fixture(root)
+                cur, b = self.coverage_case(shape, combined=combined)
+                repo = self.fx.repo
+                def snapshot():
+                    return (git(repo, "show-ref"), git(repo, "status", "--porcelain=v1"),
+                            git(repo, "diff"), git(repo, "ls-files", "-s"))
+                before = snapshot()
+                sha, why = rechain.resolve(repo, cur, b, "w", ev=self.fx.ev)
+                self.assertIsNone(why)
+                self.assertIsNotNone(sha)
+                # Each read is a fresh subprocess against the committed object.
+                def read(path):
+                    return git(repo, "show", sha + ":" + path) + "\n"
+                diff = git(repo, "diff", "--name-only", cur, sha).splitlines()
+                print("2253 committed diff", shape, combined, diff)
+                expected = {rechain.VERSIONS + "b.py", rechain.MANIFEST, rechain.TEST, rechain.AUTHORITY}
+                if shape == "arena" or combined:
+                    expected.add(self.ARENA)
+                self.assertEqual(set(diff), expected)
+                self.assertEqual(git(repo, "show", "-s", "--format=%P", sha).split(), [cur, b[2]])
+                self.assertEqual(rechain.routed_head(repo, sha), "b")
+                migration = read(rechain.VERSIONS + "b.py")
+                self.assertEqual(rechain.revision(migration), ("b", "a"))
+                original = rechain.text(repo, b[2], rechain.VERSIONS + "b.py")
+                self.assertEqual(migration, original.replace("down_revision='h0'", "down_revision='a'"))
+                doc, head = rechain.policy(read(rechain.MANIFEST))
+                self.assertEqual(head['allowedCurrentRevisions'], ['h0', 'a', 'b'])
+                self.assertIn('b advances from a.', head['reason'])
+                self.assertIn('"a",\n        "b",', read(rechain.AUTHORITY))
+                self.assertEqual(read(rechain.FINGERPRINT), rechain.text(repo, cur, rechain.FINGERPRINT))
+                test = read(rechain.TEST)
+                fn_name = "test_route" if shape == "handwritten" else "test_graph"
+                fn, = [n for n in ast.parse(test).body if isinstance(n, ast.FunctionDef) and n.name == fn_name]
+                self.assertEqual(sum(rechain.ancestry(n, 'b') for n in fn.body), 1)
+                self.assertEqual(sum(rechain.ancestry(n, 'h0') for n in fn.body), 1)
+                self.assertIn('assert retained == "a"', test)
+                arena = read(self.ARENA)
+                expected_arena = self.HISTORY.replace('VALUE = 0', 'VALUE = 7')
+                if shape == "arena" or combined:
+                    expected_arena += 'PARENT = "a"\nREVISION = "b"\n'
+                self.assertEqual(arena, expected_arena)
+                for path in git(repo, "ls-tree", "-r", "--name-only", cur).splitlines():
+                    if path not in expected:
+                        self.assertEqual(git(repo, "ls-tree", cur, path), git(repo, "ls-tree", sha, path))
+                self.assertEqual(snapshot(), before)
+                event, = self.fx.events
+                self.assertEqual(event['type'], 'rechained')
+                self.assertEqual((event['old_parent'], event['new_parent'], event['revision'], event['mechanical']),
+                                 ('h0', 'a', 'b', True))
+                self.assertEqual(event['files'], sorted(expected | {rechain.FINGERPRINT}))
+                rows.append(dict(shape=shape, combined=combined, diff=diff, head='b', parent='a',
+                                 ancestry_count=1, arena=arena, refs_and_worktree_unchanged=True,
+                                 inherited_files_and_modes_preserved=True, migration_bodies_preserved=True))
+        response("2253-AC4", rows)
+
+    def test_2253_decline_matrix(self):
+        iso_rule = "unrecognised isolation-test branch change"
+        pin_rule = "old parent literal in another changed file"
+        conflict_rule = "conflict outside re-chain allowlist"
+        cases = [
+            ("isolation operator", iso_rule), ("isolation helper", iso_rule),
+            ("isolation unrelated revision", iso_rule), ("ancestry argument", iso_rule),
+            ("ancestry message", iso_rule), ("ancestry extra argument", iso_rule),
+            ("ancestry deletion", iso_rule), ("ambiguous function", iso_rule),
+            ("new unrelated revision", pin_rule), ("changed historical revision", pin_rule),
+            ("body conflict", conflict_rule), ("comment", pin_rule), ("retyped comment", pin_rule), ("substring", pin_rule),
+            ("computed", pin_rule), ("concatenated", pin_rule), ("ambiguous provenance", pin_rule),
+            ("conftest", pin_rule), ("helpers", pin_rule), ("tools", pin_rule), ("non-test", pin_rule),
+            ("two migrations", "branch must add exactly one active migration"),
+            ("metadata", "allowed revisions must be unique with head last"), ("outside conflict", conflict_rule),
+        ]
+        rows = []
+        for case, rule in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as root:
+                self.fx = f = Fixture(root)
+                f.write(rechain.TEST, self.ISOLATION)
+                original = 'VALUE = "ordinary"\nHISTORY = "h0"\n'
+                if case == "ambiguous provenance":
+                    original = 'PIN = "h0"\n'
+                if case == "retyped comment":
+                    original = '\'return h0\'\n'
+                if case == "changed historical revision":
+                    original += 'ANCESTOR = "h0"\n'
+                f.write('tests/test_parent.py', original)
+                f.base = f.commit("negative base")
+                def current(f):
+                    if case == "body conflict":
+                        f.write('tests/test_parent.py', original.replace('"ordinary"', '2'))
+                    if case == "outside conflict":
+                        f.write('outside.txt', 'current body\n')
+                    if case == "ambiguous function":
+                        f.write(rechain.TEST, self.ISOLATION + self.ISOLATION)
+                a = f.branch("a", mutation=current)
+                def branch(f):
+                    source = (f.repo / rechain.TEST).read_text()
+                    added = '    assert is_ancestor(graph, "b", ROUTED_HEAD)\n'
+                    if case == "isolation operator":
+                        source = source.replace('routed ==', 'routed !=')
+                    elif case == "isolation helper":
+                        source += '\ndef helper():\n    return True\n'
+                    elif case == "isolation unrelated revision":
+                        source = source.replace('routed == "b"', 'routed == "a"')
+                    elif case == "ancestry argument":
+                        source = source.replace('\ndef test_cli', added.replace('ROUTED_HEAD', 'OTHER') + '\ndef test_cli')
+                    elif case == "ancestry message":
+                        source = source.replace('\ndef test_cli', added.rstrip() + ', "message"\n\ndef test_cli')
+                    elif case == "ancestry extra argument":
+                        source = source.replace('\ndef test_cli', added.replace('ROUTED_HEAD)', 'ROUTED_HEAD, extra)') + '\ndef test_cli')
+                    elif case == "ancestry deletion":
+                        source = source.replace('    assert is_ancestor(graph, "h0", ROUTED_HEAD)\n', '')
+                    elif case == "ambiguous function":
+                        source = source.replace('\ndef test_cli', added + '\ndef test_cli')
+                    f.write(rechain.TEST, source)
+                    pin = 'PARENT = "h0"\n'
+                    path = 'tests/test_parent.py'
+                    if case == "new unrelated revision":
+                        f.write(path, original + 'UNRELATED = "a"\n')
+                    elif case == "changed historical revision":
+                        f.write(path, original.replace('ANCESTOR = "h0"', 'ANCESTOR = "a"'))
+                    elif case == "body conflict":
+                        f.write(path, original.replace('"ordinary"', '1') + pin)
+                    elif case in ("comment", "substring", "computed", "concatenated"):
+                        values = dict(comment='# parent h0\n', substring='PIN = "prefix-h0"\n',
+                                      computed='PIN = "h0" + suffix\n', concatenated='PIN = "h0" ""\n')
+                        f.write(path, original + values[case])
+                    elif case == "retyped comment":
+                        f.write(path, '#return h0\n')
+                    elif case == "ambiguous provenance":
+                        f.write(path, original + original)
+                    elif case in ("conftest", "helpers", "tools", "non-test"):
+                        paths = dict(conftest='api/tests/conftest.py', helpers='api/tests/helpers.py',
+                                     tools='tools/test_parent.py', **{'non-test': 'outside.txt'})
+                        f.write(paths[case], pin)
+                    elif case == "two migrations":
+                        f.write(rechain.VERSIONS + 'extra.py', "revision='extra'\ndown_revision='h0'\n")
+                    elif case == "metadata":
+                        doc = (f.repo / rechain.MANIFEST).read_text().replace('"revision": "b"', '"revision": "wrong"')
+                        f.write(rechain.MANIFEST, doc)
+                    elif case == "outside conflict":
+                        f.write('outside.txt', 'branch body\n')
+                b = f.branch("b", mutation=branch)
+                refs_before = git(f.repo, 'show-ref')
+                status_before = git(f.repo, 'status', '--porcelain=v1')
+                self.assert_rules_decline(a[2], b, rule)
+                self.assertEqual(git(f.repo, 'show-ref'), refs_before)
+                self.assertEqual(git(f.repo, 'status', '--porcelain=v1'), status_before)
+                rows.append(dict(case=case, rule=rule, result='declined', events=1, refs_unchanged=True))
+        response("2253-AC3", rows)
+
+    def test_2253_parent_pins(self):
+        rows = []
+        for path in ("tests/test_parent.py", "api/tests/test_parent.py",
+                     "tests/pipelines/amazon/test_arena.py", "api/tests/nested/test_parent.py"):
+            for existing in (False, True):
+                with self.subTest(path=path, existing=existing), tempfile.TemporaryDirectory() as root:
+                    self.fx = Fixture(root)
+                    historical = 'INDEPENDENT = 0\nHISTORY = "h0"\nANCESTOR = "listing_arena_001"\n'
+                    if existing:
+                        self.fx.write(rechain.VERSIONS + "h0.py",
+                                      "revision='h0'\ndown_revision='listing_arena_001'\n")
+                        self.fx.write(rechain.VERSIONS + "history.py",
+                                      "revision='listing_arena_001'\ndown_revision=None\n")
+                        self.fx.write(path, historical)
+                        self.fx.base = self.fx.commit("historical pins")
+                    before = historical if existing else ""
+                    branch = before + 'PARENT = "h0"\nOTHER = \'h0\'\nREVISION = "b"\n'
+                    current = {path: before.replace('INDEPENDENT = 0', 'INDEPENDENT = 17')} if existing else {}
+                    cur, b = self.parent_case(files={path: branch}, current_files=current)
+                    sha, why = rechain.resolve(self.fx.repo, cur, b, "w", ev=self.fx.ev)
+                    self.assertIsNone(why)
+                    candidate = rechain.text(self.fx.repo, sha, path)
+                    self.assertIn(before.replace('INDEPENDENT = 0', 'INDEPENDENT = 17') + 'PARENT = "a"\nOTHER = \'a\'\nREVISION = "b"\n', candidate)
+                    if existing:
+                        self.assertIn('INDEPENDENT = 17', candidate)
+                    self.assertIn(path, self.fx.events[-1]["files"])
+                    rows.append(dict(path=path, base=before, branch=branch, candidate=candidate))
+        for scenario in ("historical only", "changed pin", "quote conflict"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as root:
+                self.fx = Fixture(root)
+                path = "tests/test_existing.py"
+                base = 'VALUE = 0\nHISTORY = "h0"\nPIN = "ordinary"\n'
+                self.fx.write(path, base)
+                self.fx.base = self.fx.commit("existing parent fixture")
+                branch = base.replace('VALUE = 0', 'VALUE = 1') if scenario == "historical only" else base.replace('PIN = "ordinary"', "PIN = 'h0'")
+                current = {path: base.replace('PIN = "ordinary"', 'PIN = "a"')} if scenario == "quote conflict" else {}
+                cur, b = self.parent_case(files={path: branch}, current_files=current)
+                sha, why = rechain.resolve(self.fx.repo, cur, b, "w", ev=self.fx.ev)
+                self.assertIsNone(why)
+                candidate = rechain.text(self.fx.repo, sha, path)
+                expected = branch if scenario == "historical only" else branch.replace("PIN = 'h0'", "PIN = 'a'")
+                self.assertEqual(candidate, expected)
+                self.assertEqual(path in self.fx.events[-1]['files'], scenario != "historical only")
+                rows.append(dict(case=scenario, path=path, base=base, branch=branch, candidate=candidate))
+        response("2253-AC2", rows)
+
     def test_2111_ac1(self):
         base = 'AUTHORITY_REVISIONS = frozenset(\n    {\n        "h0",\n    }\n)\n'
         current = base.replace('        "h0",', '        "m1",\n        "h0",')
@@ -288,7 +583,7 @@ class RechainTests(unittest.TestCase):
                 if i == 2:
                     self.fx.write("api/tests/test_old.py", "before\n")
                     self.fx.base = self.fx.commit("pre-existing test")
-                    files = {"api/tests/test_old.py": '"h0"\n'}
+                    files = {"api/tests/test_old.py": '"a"\n'}
                 cur, b = self.parent_case(files=files, current_files=current)
                 self.assert_rules_decline(cur, b, rule)
         for value, expected in [('PARENT = "h0"\nOTHER = "zz"\n', 'PARENT = "a"\nOTHER = "zz"\n'),
