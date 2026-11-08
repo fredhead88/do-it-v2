@@ -160,6 +160,25 @@ def lock_name(subject):
     return "dispatch-" + re.sub(r"[^A-Za-z0-9._-]", "_", str(subject)) + ".lock"
 
 
+def lock_held(subject, root=None):
+    """Observe the subject flock without acquiring it or creating its path.
+
+    Hold a read-only descriptor while the shared kernel reader checks its inode.
+    An unknown observation is held; only proven absence is clean. Dispatch's
+    atomic acquisition remains authoritative after this advisory observation.
+    """
+    import health_alarms
+    from pathlib import Path
+    root = Path(root) if root is not None else Path(os.environ.get('DOIT_ROOT', Path.home() / '.do-it'))
+    try:
+        with open(root / 'state' / lock_name(subject), 'rb') as fd:
+            return health_alarms.lock_held(f'/proc/self/fd/{fd.fileno()}') is not False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 class ClearedNotMet(Exception):
     """L-spec-0755/R3(c): a grader `cleared` entry whose verdict is not `met`."""
 

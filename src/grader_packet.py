@@ -1,5 +1,6 @@
 """Read runner evidence for a blind grader; never execute bundle commands."""
 from collections import Counter
+from dataclasses import dataclass
 import hashlib
 import evidence_revision
 import json
@@ -176,8 +177,22 @@ def packet_items(context, items):
     return [redact(line, build) for line in items]
 
 
-def gate(events, subject, packet, emit, fail):
-    """Called after budget/commit/disk gates and before routing, on every backend."""
+@dataclass(frozen=True)
+class EvidenceState:
+    state: str
+    ready_sha: str | None
+    bundle_event: dict | None
+    key: str
+    _failed: dict | None = None
+    _failure_index: int | None = None
+
+
+def evidence_state(events, subject, *, main_sha=None):
+    """Ledger selection plus one contained main-identity read, never validation.
+
+    A pending identity does not discard a selected event: dispatch still proves
+    the full bundle with bundle_for, independently of this advisory result.
+    """
     build = _latest(events, subject, "build-done") or {}
     ready = build.get("ready_sha")
     evidence = [e for e in events if e.get('subject') == subject
@@ -194,7 +209,39 @@ def gate(events, subject, packet, emit, fail):
     bundle_event = _latest(evidence, subject, "evidence-bundle", ready)
     failed = _latest(evidence, subject, "evidence-bundle-failed", ready)
     # Ledger order breaks timestamp ties, matching the fold's latest-event rule.
-    failure_newer = failed and (not bundle_event or events.index(failed) > events.index(bundle_event))
+    failure_index = next((i for i in range(len(events) - 1, -1, -1) if events[i] is failed), None)
+    bundle_index = next((i for i in range(len(events) - 1, -1, -1) if events[i] is bundle_event), None)
+    failure_newer = failed and (not bundle_event or failure_index > bundle_index)
+    build_occurrence = next(((i, e) for i, e in reversed(list(enumerate(events)))
+                             if e.get('subject') == subject and e.get('type') == 'build-done'), None)
+    amendments = [(i, e) for i, e in enumerate(events)
+                  if e.get('subject') == subject and e.get('type') == 'spec-amended']
+    latest_amendment = max(amendments, key=lambda row: (evidence_revision._time(row[1]['ts']), row[0]),
+                           default=None)
+    key = hashlib.sha256(json.dumps([subject, ready, build_occurrence, latest_amendment,
+                                    main_sha, (bundle_index, bundle_event), (failure_index, failed)], sort_keys=True).encode()).hexdigest()
+    state = 'failed' if failure_newer else 'pending'
+    if not failure_newer and bundle_event and main_sha:
+        try:
+            evidence_directory = root() / 'content' / 'evidence'
+            directory = _contained(evidence_directory / subject, evidence_directory)
+            path = _contained(bundle_event['path'], directory)
+            data = json.loads(path.read_bytes())
+            master, local = data.get('master_sha'), data.get('local_master_sha')
+            if (isinstance(master, str) and master == main_sha
+                    and (local is None or local == main_sha)):
+                state = 'ready'
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, UnicodeError):
+            pass
+    return EvidenceState(state, ready, bundle_event, key, failed if failure_newer else None,
+                         failure_index if failure_newer else None)
+
+
+def gate(events, subject, packet, emit, fail):
+    """Called after budget/commit/disk gates and before routing, on every backend."""
+    selection = evidence_state(events, subject)
+    ready, bundle_event, failed = selection.ready_sha, selection.bundle_event, selection._failed
+    failure_newer = failed is not None
     bundle = bundle_for(events, subject, ready) if bundle_event else None
     legacy_unreadable = bundle_event and bundle is None and not bundle_event.get('bundle_key')
     if failure_newer or legacy_unreadable:
@@ -202,7 +249,7 @@ def gate(events, subject, packet, emit, fail):
         if ready and failure_newer and (failed.get("reason_code") == "wall-cap" or reason == "wall cap exceeded"):
             # Dispatch's infra gate has already enforced retry_at. A retry is
             # claimed visibly before launch so repeated dispatches cannot fan out.
-            later = events[events.index(failed) + 1:]
+            later = events[selection._failure_index + 1:]
             retried = any(e.get("subject") == subject and e.get("type") == "infra-failure"
                           and e.get("role") == "grader" for e in later)
             if retried:
