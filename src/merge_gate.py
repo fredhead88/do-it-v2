@@ -136,6 +136,7 @@ _COMMON = ""
 
 def run(args, stdin=None):
     remaining = min(DEADLINE, 60.0) - (time.monotonic() - _START)
+    if _SCAN_WALL_END.get() is not None: remaining = min(remaining, _SCAN_WALL_END.get() - time.monotonic())
     if remaining <= 0:
         raise Undetermined(f"deadline of {DEADLINE:.0f}s exceeded — a partial scan is not a clean one", reason="deadline")
     base = ("git",) + (("-C", _TOP) if _TOP else ()) + PINNED
@@ -548,6 +549,7 @@ def _remove_worktree(path):
 # The gate caller supplies its subject without changing secret_scan's seam.
 from contextvars import ContextVar
 _SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
+_SCAN_WALL_END = ContextVar("secret_scan_wall_end", default=None)  # independent of configuration
 
 
 def _scan_diagnostic(repo, attempt, text, *, clock=None, timeout=False, reason=None):
@@ -578,7 +580,7 @@ def scan_deadline(changed_files: int) -> float:
     return min(600.0, max(60.0, 30.0 + 3.0 * min(changed_files, 190)))
 
 
-def secret_scan(repo, main_sha, branch_sha):
+def secret_scan(repo, main_sha, branch_sha, *, wrap=None, wall_cap=None):
     """One acquired SD4a attempt: trusted main bytes, at most two passes.
 
     Rendezvous inodes persist in the canonical Git common directory. Only the
@@ -591,10 +593,18 @@ def secret_scan(repo, main_sha, branch_sha):
     result = ("undetermined", ["tool"])
     phase = "tool"
     budget, scan_start = None, None
+    wall_token = None
+    if wall_cap is not None:
+        if not isinstance(wall_cap, (int, float)) or not math.isfinite(wall_cap) or wall_cap <= 0:
+            return "undetermined", ["deadline"]
+        wall_token = _SCAN_WALL_END.set(min(time.monotonic() + wall_cap, _SCAN_WALL_END.get() or math.inf))
 
     def remaining(*, setup=False):
         limit = min(DEADLINE, 60.0) if setup else DEADLINE
-        return limit - (time.monotonic() - _START)
+        left = limit - (time.monotonic() - _START)
+        if _SCAN_WALL_END.get() is not None:
+            left = min(left, _SCAN_WALL_END.get() - time.monotonic())
+        return left
 
     def timed_details(reason, details=()):
         exhausted = (budget is not None and scan_start is not None and
@@ -666,8 +676,9 @@ def secret_scan(repo, main_sha, branch_sha):
                 if DETECT_SECRETS_TIMEOUT <= 0:
                     return diagnostic("deadline" if remaining() <= 0 else "timeout",
                                       "secret scanner budget exhausted", timeout=True)
+                argv = ["bash", str(script_path), "scan", main_sha, branch_sha]
                 proc = subprocess.Popen(
-                    ["bash", str(script_path), "scan", main_sha, branch_sha],
+                    wrap(argv) if wrap is not None else argv,
                     cwd=str(wt_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env=sub_env, start_new_session=True)
                 try:
@@ -677,7 +688,7 @@ def secret_scan(repo, main_sha, branch_sha):
                         os.killpg(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    proc.communicate()  # Reap the whole group before retry/cleanup.
+                    proc.communicate()  # Reap the scanner; orphan grandchildren may not be accounted.
                     if remaining() <= 0:
                         return diagnostic("deadline", "secret scanner deadline expired", timeout=True)
                     if attempt == 0 and time.monotonic() - scan_start < budget:
@@ -718,6 +729,7 @@ def secret_scan(repo, main_sha, branch_sha):
             DEADLINE, DETECT_SECRETS_TIMEOUT = prior[2:]
             if implicit:
                 _TOP, _START = prior[:2]
+            if wall_token is not None: _SCAN_WALL_END.reset(wall_token)
     return result
 
 
