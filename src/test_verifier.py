@@ -103,16 +103,20 @@ def test_failed_files_one_rework_brief_deduped():
     sid = "L-spec-6301"
     spec(sid, "AC7")
     failing = lambda r: {"verdict": "failed", "evidence": "cache-hit measured 212 ms against the 100 ms bound"}
-    verifier.run(observe=failing, now=NOW)
-    briefs = lambda: [e for e in fold.read_events() if e.get("type") == "brief" and e.get("subject") == sid]
-    check(len(briefs()) == 1, f"one brief after the first pass: {briefs()}")
-    b = briefs()[0]
-    check(b["criterion"] == "AC7" and "212 ms" in b["evidence"] and "AC7" in b["why"], f"it names the criterion and the evidence: {b}")
-    verifier.run(observe=failing, now=NOW)
-    verifier.run(observe=failing, now=NOW, only=[f"{sid}/AC7"])
-    check(len(briefs()) == 1, f"a second pass over the same failure files no second brief: {len(briefs())}")
-    check(len([e for e in fold.read_events() if e.get("type") == "owed-failed" and e.get("subject") == sid]) in (1, 2),
-          "(the forced --check re-observation may add a verdict, never a brief)")
+    # These are the same failure epoch, independent of a wall-clock second boundary.
+    import dispatch
+    from unittest.mock import patch
+    with patch.object(dispatch, 'now', return_value=NOW.isoformat()):
+        verifier.run(observe=failing, now=NOW)
+        briefs = lambda: [e for e in fold.read_events() if e.get("type") == "brief" and e.get("subject") == sid]
+        check(len(briefs()) == 1, f"one brief after the first pass: {briefs()}")
+        b = briefs()[0]
+        check(b["criterion"] == "AC7" and "212 ms" in b["evidence"] and "AC7" in b["why"], f"it names the criterion and the evidence: {b}")
+        verifier.run(observe=failing, now=NOW)
+        verifier.run(observe=failing, now=NOW, only=[f"{sid}/AC7"])
+        check(len(briefs()) == 1, f"a second pass over the same failure files no second brief: {len(briefs())}")
+        check(len([e for e in fold.read_events() if e.get("type") == "owed-failed" and e.get("subject") == sid]) in (1, 2),
+              "(the forced --check re-observation may add a verdict, never a brief)")
     # a rework re-dates the check; the SAME failure observed again afterwards is a new failure, briefed once more
     time.sleep(2)                                  # the ledger stamps whole seconds; "after" is a strict >
     redate = datetime.now(timezone.utc).replace(microsecond=0).isoformat(timespec="seconds")
@@ -308,6 +312,312 @@ def test_dispatch_path_builds_a_real_verifier_packet():
     check("VALID" in r.stdout and "INVALID" not in r.stdout, f"the verdict shape validates against the contract's schema: {r.stdout}{r.stderr}")
 
 
+
+def test_2238_shared_admission_reservations_and_concurrency():
+    import hashlib, threading
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import patch
+    import dispatch, sweep_owed
+    quiet = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=.5,
+                 cpu_some10=0, mem_some10=0, mem_full10=0)
+    hard = quiet | dict(mem_avail_gb=4, swap_free_gb=0, load1_per_core=3.5,
+                        cpu_some10=90, mem_some10=6, mem_full10=2)
+    summaries = []
+    for order in ('verifier-first', 'sweep-first', 'concurrent', 'drain'):
+        with tempfile.TemporaryDirectory(prefix='owed-reservations-', dir=BASE) as tmp, contextlib.ExitStack() as stack:
+            root = pathlib.Path(tmp)
+            for name in ('events','content','home'):
+                (root/name).mkdir()
+            stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(root), HOME=str(root/'home')))
+            for module in (dispatch, fold, sweep_owed.packet):
+                for attr in ('ROOT','CONTENT','EVENTS','PACKETS'):
+                    if hasattr(module, attr):
+                        stack.enter_context(patch.object(module, attr, root if attr=='ROOT' else root/attr.lower()))
+            stack.enter_context(patch.object(fold, 'PROJECT', None))
+            clock = stack.enter_context(patch.object(dispatch, 'now', return_value=iso(hours=-2)))
+            telemetry = stack.enter_context(patch.object(sweep_owed.loadgate, 'readings', return_value=quiet))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            seeds = root/'events/L-spec-writer-seed.jsonl'
+            for i in range(25):
+                sid=f'L-spec-{7200+i:04d}'
+                dispatch.spec_path(sid).write_text('## Acceptance criteria\nAC1 [backend]: scratch observation\n')
+                for kind, fields in (('spec-written', dict(project='demo')),
+                    ('owed-ac', dict(criterion='AC1',wake_at=iso(hours=-1),line='scratch')),
+                    ('shipped', {})):
+                    target = root/'events/L-executor-seed.jsonl' if kind == 'shipped' else seeds
+                    assert dispatch.emit(target, dict(subject=sid), kind, **fields) is None
+            clock.return_value = NOW.isoformat()
+            batches, calls = [], []
+            class Worker:
+                def run(self, argv):
+                    calls.append(argv)
+                    role, subject=argv[2:4]
+                    manifest=sweep_owed.packet.parse_sweep_manifest(root/'content'/(subject+'.md'))
+                    if argv[1]=='dispatch':
+                        # Enlarge the race window before spawn-started is committed.
+                        time.sleep(.03)
+                        reserved=sweep_owed.reserved_rows(fold.read_events(),NOW)
+                        keys={(r['spec'],r['criterion']) for r in manifest['rows']}
+                        assert not reserved & keys
+                        spawn=f'L-{role}-{len(batches)+1:04d}'
+                        event_path=root/'events'/(spawn+'.jsonl')
+                        assert dispatch.emit(event_path, dict(subject=subject), 'spawn-started',
+                            role=role,spawn=spawn,project='demo') is None
+                        batches.append(dict(role=role,subject=subject,spawn=spawn,rows=manifest['rows'],path=event_path))
+                    return subprocess.CompletedProcess(argv,0,stdout='scratch-packet.md\n',stderr='')
+            worker=Worker()
+            def finish(batch, observe=False):
+                if observe:
+                    for row in batch['rows']:
+                        assert verifier.record(row,dict(verdict='met',evidence='scratch worker read')) == 'owed-met'
+                assert dispatch.emit(batch['path'],dict(subject=batch['subject']), 'spawn-done',spawn=batch['spawn']) is None
+            def verify():
+                return verifier.run(now=NOW,runner=worker)
+            def sweep():
+                return sweep_owed.run(now=NOW,runner=worker)
+            if order=='drain':
+                telemetry.return_value=hard
+                verify()
+                assert not calls and len(verifier.candidates(fold.fold(fold.read_events())[3],NOW))==25
+                telemetry.return_value=quiet | dict(load1_per_core=1)
+                verify()
+                assert len(batches)==1 and len(batches[0]['rows'])==8
+                verify()
+                assert len(batches)==1, 'open verifier batch must block another dispatch'
+                finish(batches[0],observe=True)
+                telemetry.return_value=quiet
+                verify()
+                assert len(batches)==2 and len(batches[1]['rows'])==17
+                finish(batches[1],observe=True)
+                verify()
+                assert not verifier.candidates(fold.fold(fold.read_events())[3],NOW)
+                # Observer seam remains governed by the same policy, including --check selection.
+                before_calls=len(calls)
+                verifier.run(observe=lambda row: dict(verdict='met',evidence='forced scratch read'), now=NOW,
+                             only=['L-spec-7200/AC1'])
+                assert before_calls==len(calls)
+            else:
+                if order=='verifier-first':
+                    verify(); sweep()
+                elif order=='sweep-first':
+                    sweep(); verify()
+                else:
+                    # Standalone verifier overlaps a sweep and its nested verifier.
+                    barrier=threading.Barrier(2)
+                    def entered(fn):
+                        barrier.wait(timeout=5)
+                        return fn()
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        futures=[pool.submit(entered,fn) for fn in (sweep,verify)]
+                        for future in futures:
+                            future.result(timeout=20)
+                assert len(batches)==1 and len(batches[0]['rows'])==25, (order,batches)
+                finish(batches[0])  # No verdict: released reservations remain eligible.
+                assert len(verifier.candidates(fold.fold(fold.read_events())[3],NOW))==25
+                verify()
+                assert len(batches)==2 and len(batches[1]['rows'])==25
+                finish(batches[1],observe=True)
+                assert not verifier.candidates(fold.fold(fold.read_events())[3],NOW)
+            summaries.append(dict(order=order,batches=[dict(role=b['role'],subject=b['subject'],
+                keys=[(r['spec'],r['criterion']) for r in b['rows']]) for b in batches], remaining=0))
+    body=json.dumps(summaries,sort_keys=True)
+    print(json.dumps(dict(url='cli://verify-owed/2238-AC2',status=0,
+        body_sha256=hashlib.sha256(body.encode()).hexdigest(),body_excerpt=body)))
+
+
+def test_2238_schedule_and_store():
+    """Full schedule/store scenario, also invoked by the sweep AC1 script."""
+    import hashlib, crons, dispatch, sweep_owed, math
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix='schedule-', dir=BASE) as tmp, contextlib.ExitStack() as stack:
+        root = pathlib.Path(tmp) / 'root'
+        EV, CONTENT = root / 'events', root / 'content'
+        EV.mkdir(parents=True); CONTENT.mkdir()
+        REPO_ROOT = HERE.parent
+        NORMAL2238 = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=1,
+                          cpu_some10=0, mem_some10=0, mem_full10=0)
+        REAL_VERIFIER2238 = verifier.run
+        stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(root), HOME=str(pathlib.Path(tmp)/'home'),
+                                       DOIT_SCRATCH=str(pathlib.Path(tmp)/'scratch')))
+        stack.enter_context(patch.object(fold, 'PROJECT', None))
+        for module in (dispatch, fold, sweep_owed.packet):
+            for attr in ('ROOT', 'CONTENT', 'EVENTS', 'PACKETS'):
+                if hasattr(module, attr):
+                    stack.enter_context(patch.object(module, attr, root if attr == 'ROOT' else root/attr.lower()))
+        def write(name, *events):
+            for event in events:
+                if event.get('type') == 'spec-written':
+                    dispatch.spec_path(event['subject']).write_text('## Acceptance criteria\nAC1 [backend]: scratch plain\n')
+            (EV/name).write_text(''.join(json.dumps(dict(v=1, **e))+'\n' for e in events))
+        start = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        current = [start]
+        inventory, pending, manifests, passes = {}, [], [], []
+        quiet = NORMAL2238 | dict(load1_per_core=.5)
+        hard = dict(mem_avail_gb=4, swap_free_gb=0, load1_per_core=3.5,
+                    cpu_some10=90, mem_some10=6, mem_full10=2)
+
+        def seed(first, count, at):
+            for i in range(first, first + count):
+                sid = f'L-spec-{3200 + i:04d}'
+                project = 'proj-a' if i % 2 == 0 else 'proj-b'
+                inventory[(sid, 'AC1')] = at
+                write('L-spec-writer-' + str(i) + '.jsonl',
+                    dict(type='spec-written', subject=sid, project=project, ts=(start - timedelta(days=3)).isoformat()),
+                    dict(type='owed-ac', subject=sid, criterion='AC1', line='scratch plain',
+                         wake_at=at.isoformat(), ts=(start - timedelta(days=1)).isoformat()))
+                write('L-executor-' + str(i) + '.jsonl',
+                    dict(type='shipped', subject=sid, ts=(start - timedelta(days=2)).isoformat()))
+
+        class Workers:
+            def __init__(self):
+                self.calls = []
+            def run(self, argv):
+                self.calls.append(argv)
+                role, subject = argv[2:4]
+                path = CONTENT / (subject + '.md')
+                manifest = sweep_owed.packet.parse_sweep_manifest(path)
+                rows = manifest['rows']
+                assert 0 < len(rows) <= 32
+                if argv[1] == 'dispatch':
+                    keys = {(r['spec'], r['criterion']) for r in rows}
+                    reserved = sweep_owed.reserved_rows(fold.read_events(), current[0])
+                    assert not keys & reserved, (role, keys & reserved)
+                    spawn = f'L-{role}-{len(manifests) + 1:04d}'
+                    event_path = EV / (spawn + '.jsonl')
+                    assert dispatch.emit(event_path, dict(subject=subject), 'spawn-started',
+                        role=role, project=manifest['project'], spawn=spawn) is None
+                    pending.append((current[0] + timedelta(minutes=6), rows, spawn, event_path, subject))
+                    manifests.append(dict(role=role, subject=subject, keys=sorted(keys), at=current[0].isoformat()))
+                return subprocess.CompletedProcess(argv, 0, stdout='scratch-packet.md\n', stderr='')
+
+        def complete(at):
+            current[0] = at
+            for due, rows, spawn, event_path, subject in list(pending):
+                if due > at:
+                    continue
+                current[0] = due
+                for row in rows:
+                    assert sweep_owed.verifier.record(row, dict(verdict='met', evidence='scratch external worker observation')) == 'owed-met'
+                assert dispatch.emit(event_path, dict(subject=subject), 'spawn-done', spawn=spawn) is None
+                pending.remove((due, rows, spawn, event_path, subject))
+            current[0] = at
+
+        rows = {r['name']: r for r in crons.rows() if r['name'] in ('sweep-owed', 'verify-owed')}
+        starts = []
+        # Expand the parsed minute/hour fields; these manifest schedules have no day restriction.
+        for name, row in rows.items():
+            minute, hour, day, month, weekday = row['schedule'].split()
+            assert (day, month, weekday) == ('*', '*', '*')
+            hours = range(24) if hour == '*' else [int(h) for h in hour.split(',')]
+            for h in hours:
+                for m in map(int, minute.split(',')):
+                    starts.append((start + timedelta(hours=h, minutes=m), name))
+        starts.sort()
+        assert len([x for x in starts if x[1] == 'verify-owed' and x[0].hour < 16]) == 64
+        assert len([x for x in starts if x[1] == 'verify-owed' and x[0].hour >= 16]) == 32
+        workers = Workers()
+        seed(0, 180, start)
+        assert dispatch.emit(EV / 'L-operator-route.jsonl', dict(subject='L-spec-3200'),
+                             'owed-routed', criterion='AC1', route='recheck') is None
+        hold_path = EV / 'L-builder-pressure.jsonl'
+        with patch.object(sweep_owed.verifier, 'run', REAL_VERIFIER2238), \
+             patch.object(dispatch, 'now', side_effect=lambda: current[0].isoformat()), \
+             patch.object(sweep_owed.loadgate, 'readings', side_effect=lambda: hard if current[0].hour < 16 else quiet), \
+             contextlib.redirect_stdout(io.StringIO()):
+            assert dispatch.emit(hold_path, dict(subject='L-spec-pressure'), 'spawn-started',
+                                 role='builder', spawn='L-builder-pressure') is None
+            noon_seeded = False
+            released = False
+            for at, name in starts:
+                if at.hour >= 12 and not noon_seeded:
+                    seed(180, 65, start + timedelta(hours=12))
+                    noon_seeded = True
+                complete(at)  # Completion wins a same-instant race with dispatch.
+                if at.hour >= 16 and not released:
+                    assert dispatch.emit(hold_path, dict(subject='L-spec-pressure'), 'spawn-done', spawn='L-builder-pressure') is None
+                    released = True
+                before = len(workers.calls)
+                lines = (sweep_owed.run if name == 'sweep-owed' else REAL_VERIFIER2238)(now=at, runner=workers)
+                expected = 0 if at.hour < 16 else 32
+                reports = [json.loads(l.split(': pass ', 1)[1]) for l in lines if ': pass ' in l]
+                assert len(reports) == (2 if name == 'sweep-owed' else 1), reports
+                assert all(r['budget'] == expected for r in reports), (at, reports)
+                if not expected:
+                    assert len(workers.calls) == before
+                for r in reports:
+                    for key in ('elapsed_s', 'self_cpu_s', 'synchronous_child_cpu_s'):
+                        assert math.isfinite(r[key]) and r[key] >= 0
+                    assert 'seconds' in r['cpu_source'] and r['detached_worker_cpu_s'] == 'unknown'
+                passes.append(dict(at=at.isoformat(), name=name, expected=expected,
+                                   actual=[r['budget'] for r in reports]))
+            complete(end)
+        assert not pending
+        events = fold.read_events()
+        verdicts = [e for e in events if e.get('type') == 'owed-met']
+        assert len(verdicts) == len(inventory) == 245
+        firsts = {(e['subject'], e['criterion']): fold.ts(e['ts']) for e in verdicts}
+        assert set(firsts) == set(inventory)
+        assert all(max(start, arrival) <= firsts[key] < end for key, arrival in inventory.items())
+        assert min(firsts.values()) >= start + timedelta(hours=16, minutes=14)
+        assert any(len(m['keys']) > 8 for m in manifests)
+        records = [e for e in events if e.get('type') == 'sweep-run']
+        assert len(records) == 4 and [e['outcome'] for e in records[:3]] == ['yielded']*3
+        assert all(e['reason'] == 'owed-yield' for e in records[:3])
+        # Independently reopen/fold twice; reads cannot create observations.
+        code = """import sys,json; sys.path.insert(0,sys.argv[1]); import fold,owed
+from datetime import datetime,timezone
+now=datetime(2026,11,10,tzinfo=timezone.utc)
+events=fold.read_events(); by=fold.fold(events)[3]
+print(json.dumps(dict(verdicts=sum(e.get('type')=='owed-met' for e in events),
+met=sum(r['status']=='met' for evs in by.values() for r in owed.checks(evs,now)))))"""
+        reopened = []
+        for _ in range(2):
+            result = subprocess.run([sys.executable, '-c', code, str(REPO_ROOT / 'src')], capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            reopened.append(json.loads(result.stdout))
+        assert reopened == [dict(verdicts=245, met=245)]*2, reopened
+        # Dry runs leave the ledger, manifests and local crontab byte-identical.
+        files = [*EV.glob('*.jsonl'), *CONTENT.glob('*')]
+        before = {str(p): p.read_bytes() for p in files if p.is_file()}
+        calls = len(workers.calls)
+        with patch.object(sweep_owed.verifier, 'run', REAL_VERIFIER2238), \
+             patch.object(sweep_owed.loadgate, 'readings', return_value=quiet), contextlib.redirect_stdout(io.StringIO()):
+            sweep_owed.run(dry_run=True, now=end, runner=workers)
+            REAL_VERIFIER2238(dry_run=True, now=end, runner=workers)
+        after = {str(p): p.read_bytes() for p in [*EV.glob('*.jsonl'), *CONTENT.glob('*')] if p.is_file()}
+        assert before == after and calls == len(workers.calls)
+        body = dict(window=[start.isoformat(),end.isoformat()], parsed_starts=[(t.isoformat(), n) for t,n in starts],
+            passes=passes, manifests=manifests, first_observations=[dict(spec=k[0], criterion=k[1], at=firsts[k].isoformat()) for k in sorted(firsts)],
+            independent_readback=reopened, sweep_records=records, dry_run_unchanged=True)
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://sweep-owed/2238-AC1-AC5', status=0,
+            body_sha256=hashlib.sha256(payload.encode()).hexdigest(), body_excerpt=payload)))
+
+        # Exercise the script entry in a fresh interpreter: importing sweep_owed from
+        # its nested verifier must reuse the CLI's lock and cannot deadlock.
+        with tempfile.TemporaryDirectory(prefix='owed-cli-2238-') as cli_tmp:
+            cli_root = pathlib.Path(cli_tmp) / 'root'
+            (cli_root / 'events').mkdir(parents=True)
+            (cli_root / 'content').mkdir()
+            cli_env = dict(os.environ, DOIT_ROOT=str(cli_root), HOME=str(pathlib.Path(cli_tmp) / 'home'),
+                           DOIT_SCRATCH=str(pathlib.Path(cli_tmp) / 'scratch'))
+            cli_result = subprocess.run([sys.executable, str(REPO_ROOT / 'src/sweep_owed.py')],
+                                        env=cli_env, capture_output=True, text=True, timeout=10)
+            assert cli_result.returncode == 0, cli_result.stderr
+            assert 'sweep-owed: pass ' in cli_result.stdout and 'verify-owed: pass ' in cli_result.stdout
+            print('2238 fresh-process sweep CLI and nested verifier complete without deadlock')
+
+
+if sys.argv[1:] == ['--schedule-scenario']:
+    try:
+        test_2238_schedule_and_store()
+    finally:
+        shutil.rmtree(str(BASE), ignore_errors=True)
+    raise SystemExit(0)
+
+
+test_2238_shared_admission_reservations_and_concurrency()
 test_pass_records_one_verdict_per_check_round_trip()
 test_failed_files_one_rework_brief_deduped()
 test_preflight_lines_and_no_secret_leak()

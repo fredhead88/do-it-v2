@@ -35,6 +35,10 @@ import crons, dispatch, fold, owed, scratch, sweep_owed  # noqa: E402
 
 # Collection may have already imported these modules for another fixture root.
 ROOT_PATCHES = ExitStack()
+NORMAL2238 = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=1,
+                  cpu_some10=0, mem_some10=0, mem_full10=0)
+ROOT_PATCHES.enter_context(patch.object(sweep_owed.loadgate, "readings", return_value=NORMAL2238))
+REAL_VERIFIER2238 = sweep_owed.verifier.run
 ROOT_PATCHES.enter_context(patch.object(sweep_owed.verifier, "run", return_value=[]))
 ROOT_PATCHES.enter_context(patch.object(fold, "PROJECT", None))
 for module in (dispatch, fold, sweep_owed.packet):
@@ -620,7 +624,6 @@ _co.mkdir(parents=True, exist_ok=True)
 _co.joinpath(".env").write_text("SUPABASE_DB_URL_RO=postgresql://ro_fixture@127.0.0.1:1/x\n")
 _seen = {}
 
-
 class _OrderRunner:
     def run(self, argv):
         if argv[1] == "packet":
@@ -630,12 +633,10 @@ class _OrderRunner:
             return subprocess.CompletedProcess(argv, 0, stdout=str(d / "packet.md"), stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
-
 sweep_owed.dispatch_batch("proj-dsn", [{"spec": "L-spec-432k", "criterion": "AC1", "spec_path": "x",
                                         "declared_src": "x", "line": 1}], _OrderRunner())
 assert _seen.get("env_at_packet") is True, f"read-only .env not provisioned before packet build: {_seen}"
 print("dsn-before-packet ok")
-
 
 # L-spec-1004: regression for one unresolved row blocking an entire batch.
 def fixture_1004(criteria=("AC1", "AC2", "AC3")):
@@ -650,10 +651,8 @@ def fixture_1004(criteria=("AC1", "AC2", "AC3")):
     sp.write_text("## Acceptance criteria\nAC1 [backend]: present\nAC3 [backend]: present\n")
     return sp
 
-
 def records_1004(kind):
     return [e for e in fold.read_events() if e["type"] == kind]
-
 
 sp1004 = fixture_1004()
 row1004 = {"spec": sp1004.stem, "criterion": "AC1"}
@@ -863,13 +862,11 @@ def backlog_fixture(sid="L-spec-9913", days=15, capability="operator-action", st
     write(f"L-operator-{sid.rsplit('-', 1)[-1]}.jsonl", *({"subject": sid, "criterion": "AC1", "ts": iso(hours=-1), **e}
                                      for e in extras))
 
-
 def seed_closes(n, unverifiable=0):
     write("L-operator-month.jsonl", *[
         {"type": "owed-unverifiable" if i < unverifiable else ("owed-met" if i % 2 else "owed-waived"),
          "subject": "L-spec-9990", "criterion": f"AC{i}", "reason": "fixture", "evidence": "fixture"}
         for i in range(n)])
-
 
 clear()
 seed_closes(300)
@@ -984,12 +981,10 @@ records = {
     "AC9": ("judgment", ["repo"]), "AC10": ("prod", ["ro-prod-sql"]),
     "AC11": ("build", ["repo"]), "AC12": ("prod", ["ro-prod-sql"]), "AC13": ("build", ["repo"])}
 
-
 def fixture_record(row, events=None):
     kind, needs = records[row["criterion"]]
     return {"runner": kind, "needs": needs, "validity_h": 24,
             "commands": [] if row["criterion"] == "AC10" else ["fixture"]}
-
 
 returned = {"lines": ["prod-runner fixture"], "bundle_rows": {(sid, "AC1"): "/evidence/failure.json",
             (sid, "AC11"): "/evidence/held.json", (sid, "AC13"): "/evidence/stale-failure.json"},
@@ -998,11 +993,9 @@ returned = {"lines": ["prod-runner fixture"], "bundle_rows": {(sid, "AC1"): "/ev
 order = []
 real_expired = sweep_owed.sweep_expired
 
-
 def expired_first(*args, **kw):
     order.append("expiry")
     return real_expired(*args, **kw)
-
 
 def observe_pass(now, *, dry_run=False, events=None):
     assert order == ["expiry"]
@@ -1432,7 +1425,9 @@ def test_repo_batches():
             reset()
             seed("open-" + open_kind)
             open_path = CONTENT / "L-sweep-9777.md"
-            open_path.write_text(f"# L-sweep-9777\nkind: {open_kind}\n")
+            open_path.write_text(sweep_owed._manifest_text(open_path.stem, project, str(TMP),
+                [dict(spec="L-spec-reserved", criterion="AC1", declared_src="scratch", line="fixture",
+                      shipped_sha="fixture", base_sha="fixture^1")], kind=open_kind))
             write("L-owed-sweeper-open.jsonl", dict(type="spawn-started", subject=open_path.stem,
                   spawn="L-owed-sweeper-9777", role="owed-sweeper", project=project))
             ev = fold.read_events()
@@ -1489,6 +1484,11 @@ test_repo_batches()
 from test_dispatch import check_capability_readmission
 check_capability_readmission(fixture_root=TMP, now=NOW, epoch=EPOCH, iso=iso, clear=clear,
                             write=write, specs_now=specs_now, runner_type=FakeRunner)
+
+
+# AC1 runs the shared schedule scenario in its own isolated interpreter.
+subprocess.run([sys.executable, str(REPO_ROOT / 'src/test_verifier.py'),
+                '--schedule-scenario'], check=True)
 
 ROOT_PATCHES.close()
 

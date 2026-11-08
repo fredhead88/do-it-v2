@@ -718,6 +718,10 @@ EXPECTED_CRONS_ROWS = [
      "max_runtime_s": 3600,
      "command": "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit sweep-owed\b", "owner": "thinker", "project": "do-it-v2"},
+    {"name": "verify-owed", "where": "user", "schedule": "8,23,38,53 * * * *",
+     "max_runtime_s": 3600,
+     "command": "{doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1",
+     "path": "{doit}", "sig": r"\bdoit verify-owed\b", "owner": "thinker", "project": "do-it-v2", "expiry": "2026-12-08T00:00:00Z"},
     {"name": "auto-deploy", "where": "cron.d", "schedule": "*/5 * * * *",
      "command": "albert {doit} cron-run auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py "
                 "--once >> /var/log/albert-scott/auto-deploy-run.log 2>&1",

@@ -46,6 +46,51 @@ def signed(ac, body):
 
 
 class LoadgateTests(unittest.TestCase):
+    def test_2238_owed_priority_and_budget(self):
+        import sweep_owed
+        import test_slots
+        from datetime import datetime, timezone
+        quiet = dict(mem_avail_gb=20, swap_free_gb=8, load1_per_core=.5,
+                     cpu_some10=0, mem_some10=0, mem_full10=0)
+        now = datetime(2026, 11, 9, 18, tzinfo=timezone.utc)
+        self.assertEqual(sweep_owed.batch_budget(quiet, now), 32)
+        self.assertEqual(sweep_owed.batch_budget(quiet | dict(load1_per_core=1), now), 8)
+        hard = dict(mem_avail_gb=4, swap_free_gb=0, load1_per_core=3.5,
+                    cpu_some10=90, mem_some10=6, mem_full10=2)
+        self.assertEqual(sweep_owed.batch_budget(hard, now), 0)
+        self.assertEqual(sweep_owed.batch_budget({}, now), 8)
+        self.assertEqual(sweep_owed.batch_budget({'cpu_some10': 90}, now), 0)
+        for malformed in (None, float('nan'), float('inf'), 'quiet', -1):
+            self.assertEqual(sweep_owed.batch_budget(dict.fromkeys(quiet, malformed), now), 8)
+        with self.assertRaises(ValueError):
+            sweep_owed.batch_budget(quiet, now.replace(tzinfo=None))
+        for role in ('owed-sweeper', 'owed-verifier'):
+            for bypass in ([], [role]):
+                config = lg.DEFAULTS | dict(bypass_roles=bypass)
+                for readings in ({}, quiet, hard):
+                    self.assertEqual(lg.admit(role, readings, {'builder': 1}, settings=config)[1], 'owed-yield')
+                    with test_slots.acquire('rehearsal', 1, root=self.root):
+                        priority = lg.owed_priority(self.root, now=now)
+                        self.assertTrue(priority['rehearsal_holder'])
+                        self.assertEqual(lg.admit(role, readings, {}, priority=priority, settings=config)[1], 'owed-yield')
+                    self.assertFalse(lg.owed_priority(self.root, now=now)['rehearsal_holder'])
+                    with patch.dict(os.environ, DOIT_TEST_SLOTS='2'), test_slots.acquire('builder', 1, root=self.root), test_slots.acquire('builder', 1, root=self.root):
+                        waiter = test_slots._enqueue(self.root, 'rehearsal', 'scratch', __import__('time').time())
+                        try:
+                            self.assertIsNone(test_slots._poll(self.root, waiter, __import__('time').time()))
+                            priority = lg.owed_priority(self.root, now=now)
+                            self.assertTrue(priority['rehearsal_waiting'])
+                            self.assertEqual(lg.admit(role, readings, {}, priority=priority, settings=config)[1], 'owed-yield')
+                        finally:
+                            test_slots._cancel(self.root, waiter)
+                self.assertTrue(lg.admit(role, quiet, {}, priority=lg.owed_priority(self.root, now=now), settings=config)[0])
+                self.assertTrue(lg.admit(role, {}, {}, settings=config)[0])
+            self.assertTrue(lg.admit(role, quiet | dict(load1=64, ncpu=128), {})[0])
+            self.assertFalse(lg.admit(role, hard, {})[0])
+        signed('2238-AC3', dict(roles=['owed-sweeper', 'owed-verifier'], normal_budget=8,
+                              quiet_budget=32, hard_budget=0, real_holder_and_waiter=True,
+                              bypass_and_unreadable_priority=True))
+
     def test_1961_AC01(self):
         expected = dict(cpu_pressure_some_avg10_max=60, heavy_jobs_max=10,
                         load1_per_core_delay=2, load1_per_core_stop=3)

@@ -262,13 +262,13 @@ def _open_batch(events, now):
 
 
 def dispatch_batch(batch, runner, now):
-    """One detached `owed-verifier` dispatch over up to eight checks of ONE project
+    """One detached `owed-verifier` dispatch over the budgeted checks of ONE project
     (the manifest and packet shapes are the sweeper's own, `packet.parse_sweep_manifest`).
     A row whose criterion is not in its spec file is recorded `owed-unobservable`
     instead of sinking the batch. Returns the lines to print."""
     import sweep_owed
     lines, project = [], batch[0]["project"] or PROJECT
-    batch = [r for r in batch if (r["project"] or PROJECT) == project][:sweep_owed.MAX_BATCH]
+    batch = [r for r in batch if (r["project"] or PROJECT) == project]
     path = dispatch.alloc(dispatch.CONTENT, "L-sweep-", ".md")
     sid = path.stem
     cwd = scratch.sub("verifies") / sid
@@ -300,28 +300,42 @@ def dispatch_batch(batch, runner, now):
 
 
 def run(*, dry_run=False, observe=None, now=None, only=None, runner=None, reader=None):
+    import sweep_owed
+    with sweep_owed.owed_lock(dry_run=dry_run):
+        return _run(dry_run=dry_run, observe=observe, now=now, only=only, runner=runner, reader=reader)
+
+
+def _run(*, dry_run=False, observe=None, now=None, only=None, runner=None, reader=None):
     """One verifier pass. Returns the lines printed. `observe`, `runner` and
     `reader` are the test seams (an in-process observer, the `doit packet|dispatch`
     subprocess boundary, the first-reading source)."""
     now = now or datetime.now(timezone.utc)
+    import sweep_owed
+    started = sweep_owed.cpu_start()
     events = fold.read_events()
     by = fold.fold(events)[3]
+    budget, reason, _ = sweep_owed.admission('owed-verifier', events, now)
     lines = []
-    if not dry_run:
+    if not dry_run and budget:
         lines += [f"verify-owed: timed: {x}" for x in owed_timed.run_pass(by, now, reader, events=events)]
         events = fold.read_events()
         by = fold.fold(events)[3]
     cands = candidates(by, now, set(only) if only else None)
-    if observe is None:
+    cands = sweep_owed.without_reservations(cands, events, now, lines, 'verify-owed')
+    if observe is None and budget:
         cands, script_lines = provision.script_rows(cands, events, ledger_path(),
                                                    lane="verifier", dry_run=dry_run)
         lines.extend(script_lines)
-    if not cands:
+    if not budget:
+        lines.append(f'verify-owed: yielded budget=0 reason={reason}; {len(cands)} row(s) remain queued')
+    elif not cands:
         lines.append("verify-owed: nothing to observe")
     elif dry_run:
         lines += [f"verify-owed: DRY RUN would observe {r['spec']} {r['criterion']}" for r in cands]
     elif observe is not None:
-        for r in cands:
+        if len(cands) > budget:
+            lines.append(f'verify-owed: {len(cands) - budget} row(s) deferred: pass budget={budget}')
+        for r in cands[:budget]:
             try:
                 obs = observe(r)
             except Exception as x:  # noqa: BLE001
@@ -331,9 +345,13 @@ def run(*, dry_run=False, observe=None, now=None, only=None, runner=None, reader
         lines.append("verify-owed: an owed-verifier batch is already open; nothing dispatched this run")
     else:
         import sweep_owed
-        lines += dispatch_batch(cands, runner or sweep_owed.Runner(), now)
+        project = cands[0]['project'] or PROJECT
+        batch = [r for r in cands if (r['project'] or PROJECT) == project][:budget]
+        lines += dispatch_batch(batch, runner or sweep_owed.Runner(), now)
     events = fold.read_events()
     lines += file_rework_briefs(fold.fold(events)[3], now, events, dry_run=dry_run)
+    lines.append('verify-owed: pass ' + json.dumps(dict(budget=budget, yield_reason=reason,
+        **sweep_owed.cpu_report(started)), sort_keys=True))
     for line in lines:
         print(line)
     return lines

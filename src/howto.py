@@ -95,8 +95,16 @@ def render(repo: str) -> str:
                   'Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;',
                   'record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.'])
     lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
+    # Keep each lane tuple intact while leaving room for new cron rows within
+    # the page's existing line budget.
+    current = ''
     for row in rules:
-        lines.extend(_wrap(' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))))
+        item = '- ' + ' | '.join(str(row[key]) for key in ('name', 'action', 'actor', 'limit_min'))
+        if current and len(current) + 2 + len(item) > 100:
+            lines.append(current)
+            current = ''
+        current += ('; ' if current else '') + item
+    lines.extend(_wrap(current, initial='', subsequent='  '))
     lines.extend(['', '## Cron manifest',
                   'Source: `crons.toml`. Name | schedule | where | path, then command.'])
     # Pack rows together, keeping each metadata tuple intact where it fits.

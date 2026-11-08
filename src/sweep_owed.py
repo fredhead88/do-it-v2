@@ -39,14 +39,130 @@ caller's environment, including a bare cron invocation that never set
 `DOIT_LEDGER_FILE` at all.
 """
 import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, time
+import fcntl, resource, threading
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+# The nested verifier imports this module by name. Keep CLI and imported entry
+# on the same lock, including the reentrant state for this process/thread.
+if __name__ == '__main__':
+    sys.modules['sweep_owed'] = sys.modules[__name__]
 import provision, verifier
+import loadgate
 import build_runner, dispatch, fold, grading_env, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes, sweep_provision  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
+_PASS_LOCK = threading.RLock()
+_PASS_LOCAL = threading.local()
+
+
+@contextmanager
+def owed_lock(*, dry_run=False):
+    """Serialize both drivers through selection, manifest creation and dispatch.
+
+    Nested verification reuses the calling thread's lock; other processes and
+    threads must acquire it before taking their authoritative ledger snapshot.
+    A dry run never creates the lock file.
+    """
+    with _PASS_LOCK:
+        if dry_run or getattr(_PASS_LOCAL, 'held', False):
+            yield
+            return
+        directory = dispatch.ROOT / 'state'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'owed-selection.lock').open('a+') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            _PASS_LOCAL.held = True
+            try:
+                yield
+            finally:
+                _PASS_LOCAL.held = False
+
+
+def owed_pass(fn):
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        with owed_lock(dry_run=kwargs.get('dry_run', False)):
+            return fn(*args, **kwargs)
+    return locked
+
+
+def batch_budget(readings, now):
+    """Pure 0..32 row budget; now must be timezone-aware (normalized to UTC).
+
+    Consume mem_avail_gb, swap_free_gb, load1_per_core, cpu_some10,
+    mem_some10 and mem_full10. Unknown/nonfinite readings permit a conservative
+    eight, never quiet expansion. Hard pressure yields zero; quiet is normalized
+    load <1 with >=20 GiB memory, >=8 GiB swap and zero pressure averages.
+    """
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError('batch_budget requires UTC-aware now')
+    now = now.astimezone(timezone.utc)
+    keys = ('mem_avail_gb', 'swap_free_gb', 'load1_per_core', 'cpu_some10', 'mem_some10', 'mem_full10')
+    r = {k: v for k, v in (readings or {}).items() if loadgate._number(v)}
+    if not loadgate.admit('owed-sweeper', r, {})[0]:
+        return 0
+    if (all(k in r for k in keys) and r['mem_avail_gb'] >= 20 and r['swap_free_gb'] >= 8
+            and r['load1_per_core'] < 1 and not any(r[k] for k in keys[3:])):
+        return 32
+    return MAX_BATCH
+
+
+def admission(role, events, now):
+    readings = loadgate.readings()
+    ended = {e.get('spawn') for e in events if e.get('type') in ('spawn-done', 'spawn-failed', 'spawn-stale')}
+    running = {}
+    for event in events:
+        if event.get('type') == 'spawn-started' and event.get('spawn') not in ended:
+            role_name = event.get('role')
+            running[role_name] = running.get(role_name, 0) + 1
+    config, _ = loadgate.settings()
+    allowed, reason, detail = loadgate.admit(role, readings, running, settings=config,
+        priority=loadgate.owed_priority(dispatch.ROOT, now=now))
+    budget = batch_budget(readings, now) if allowed else 0
+    return budget, reason, detail
+
+
+def reserved_rows(events, now):
+    """Keys in either role's nonterminal manifest. Call under owed_lock."""
+    ended = {e.get('spawn') for e in events if e.get('type') in ('spawn-done', 'spawn-failed', 'spawn-stale')}
+    keys = set()
+    for event in events:
+        role = event.get('role')
+        if (event.get('type') != 'spawn-started' or role not in ('owed-sweeper', 'owed-verifier')
+                or event.get('spawn') in ended):
+            continue
+        path = dispatch.CONTENT / (str(event.get('subject')) + '.md')
+        if not path.is_file():
+            continue  # Legacy spawns can predate retained manifests.
+        manifest = packet.parse_sweep_manifest(path)
+        keys.update((r['spec'], r['criterion']) for r in manifest['rows'])
+    return keys
+
+
+def without_reservations(rows, events, now, lines, lane):
+    reserved = reserved_rows(events, now)
+    selected = [r for r in rows if (r['spec'], r['criterion']) not in reserved]
+    if len(rows) != len(selected):
+        lines.append(f'{lane}: {len(rows) - len(selected)} row(s) deferred: reserved by an open owed manifest')
+    return selected
+
+
+def cpu_start():
+    return time.monotonic(), resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
+
+
+def cpu_report(start):
+    elapsed, own, child = start
+    own_end, child_end = resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
+    return dict(elapsed_s=time.monotonic() - elapsed,
+        self_cpu_s=(own_end.ru_utime + own_end.ru_stime) - (own.ru_utime + own.ru_stime),
+        synchronous_child_cpu_s=(child_end.ru_utime + child_end.ru_stime) - (child.ru_utime + child.ru_stime),
+        cpu_source='resource.getrusage(RUSAGE_SELF,RUSAGE_CHILDREN); units=seconds',
+        detached_worker_cpu_s='unknown')
 READMIT_CAP = 16
 RETRY_WINDOW = timedelta(hours=12)
 
@@ -325,7 +441,7 @@ def _record_attempt(row, epochs, now, *, batch=None):
     return _emit(row["spec"], "owed-routed", **fields)
 
 
-def _batch_for(due, all_ev=()):
+def _batch_for(due, all_ev=(), *, limit=MAX_BATCH):
     """Never-batched projects first, then oldest last start and oldest due row."""
     if not due:
         return None, []
@@ -343,7 +459,7 @@ def _batch_for(due, all_ev=()):
         oldest.setdefault(row["project"], row["due_at"])
     project = min(oldest, key=lambda p: (p in last_start,
                   last_start.get(p, datetime.min.replace(tzinfo=timezone.utc)), oldest[p]))
-    return project, [r for r in due if r["project"] == project][:MAX_BATCH]
+    return project, [r for r in due if r["project"] == project][:limit]
 
 
 def _describe(batch):
@@ -689,13 +805,16 @@ def judgment_rows(rows, observations, events=None):
 
 # ─────────────────────────────────── driver ──────────────────────────────────
 
+@owed_pass
 def run(*, dry_run=False, runner=None, now=None):
     """One pass: expiry, resolution, project choice, dispatch and run record."""
     runner = runner or Runner()
     now = now or datetime.now(timezone.utc)
+    started = cpu_start()
     snapshot = fold.ReaderSnapshot()
     all_ev = fold.read_events(snapshot=snapshot)  # events=None default: initial sweep snapshot
     specs = fold.fold(all_ev)[0]
+    budget, yield_reason, _ = admission('owed-sweeper', all_ev, now)
     if not dry_run:
         reap_repo_cwds(all_ev)
 
@@ -711,7 +830,7 @@ def run(*, dry_run=False, runner=None, now=None):
                                             "sweep-owed: recheck ")) for line in lines):
         # re-read: expiry/failure escalation or recheck appended before observations.
         all_ev = fold.read_events(snapshot=snapshot)
-    observations = prod_runner.run(now, dry_run=dry_run, events=all_ev)
+    observations = prod_runner.run(now, dry_run=dry_run or budget == 0, events=all_ev)
     lines.extend(observations["lines"])
     if not dry_run:
         # re-read: runner verdicts must govern routing and open-batch decisions.
@@ -751,14 +870,16 @@ def run(*, dry_run=False, runner=None, now=None):
     retry_keys = {(r["spec"], r["criterion"]) for r in retries}
     due_keys = {(r["spec"], r["criterion"]) for r in due}
     due.extend(r for r in retries if (r["spec"], r["criterion"]) not in due_keys)
+    due = without_reservations(due, all_ev, now, lines, 'sweep-owed')
     due, script_lines = provision.script_rows(due, all_ev, fold.EVENTS / "L-owed-sweeper-script.jsonl",
-                                              lane="sweep", dry_run=dry_run)
+                                              lane="sweep", dry_run=dry_run or budget == 0)
     lines.extend(script_lines)
     # Capability browser always goes to the browser seat, even for judgment rows.
     handed = prod_runner.batch_for_browser(due, events=all_ev)
     handed_keys = {(r["spec"], r["criterion"]) for r in handed}
     handed.extend(r for r in retries if owed_routes.route_for(r["capability"]) == "browser"
                   and (r["spec"], r["criterion"]) not in handed_keys)
+    handed = without_reservations(handed, all_ev, now, lines, 'sweep-owed browser')
     e2e, browser_seat = prod_browser.split(handed, events=all_ev)
     if e2e:
         lines.append(f"sweep-owed: {len(e2e)} browser row(s) assigned to committed e2e observations")
@@ -792,26 +913,30 @@ def run(*, dry_run=False, runner=None, now=None):
     project, _ = _batch_for([*due, *browser_seat], all_ev)
     kind = "browser" if project is not None and project != plain_project else "plain"
     candidates = browser_seat if kind == "browser" else due
-    record = {"quarantined": quarantined}
+    record = {"quarantined": quarantined, "budget": budget, "yield_reason": yield_reason}
     plain_open = open_batch(all_ev, now, "plain") or open_batch(all_ev, now, "browser")
     repo_open = open_batch(all_ev, now, "repo")
     if (not candidates or plain_open) and repo_rows and not repo_open:
         candidates, kind = repo_rows, "repo"
-    if (repo_open if kind == "repo" else plain_open) or (not candidates and repo_rows and repo_open):
+    if budget == 0:
+        deferred = len({(r['spec'], r['criterion']) for r in [*due, *browser_seat, *repo_rows]})
+        record.update(outcome='yielded', reason=yield_reason, deferred=deferred)
+        lines.append(f'sweep-owed: yielded budget=0 reason={yield_reason}; {deferred} row(s) remain queued')
+    elif (repo_open if kind == "repo" else plain_open) or (not candidates and repo_rows and repo_open):
         record["outcome"] = "open"
         lines.append("sweep-owed: an owed-sweeper batch is already open; nothing dispatched this run")
     elif not candidates:
         record["outcome"] = "nothing-due"
         lines.append("sweep-owed: nothing due to batch")
     else:
-        project, batch = _batch_for(candidates, all_ev)
+        project, batch = _batch_for(candidates, all_ev, limit=budget)
         if kind == "repo":
             sha = batch[0]["shipped_sha"]
             batch = sorted([row for row in candidates if row["project"] == project and row["shipped_sha"] == sha],
-                           key=lambda r: (r.get("status", "due") != "due", r["due_at"]))[:MAX_BATCH]
+                           key=lambda r: (r.get("status", "due") != "due", r["due_at"]))[:budget]
             deferred = sum(row["project"] == project for row in candidates) - len(batch)
             if deferred:
-                lines.append(f"sweep-owed: {deferred} repo row(s) deferred: one shipped sha and at most {MAX_BATCH} rows per batch")
+                lines.append(f"sweep-owed: {deferred} repo row(s) deferred: one shipped sha and at most {budget} rows per batch")
         try:
             batch_lines = dispatch_batch(project, batch, runner, dry_run=dry_run, kind=kind)
         except (OSError, subprocess.SubprocessError) as exc:
@@ -829,6 +954,8 @@ def run(*, dry_run=False, runner=None, now=None):
                         refused = _record_attempt(row, retry_epochs[row["project"]], now, batch=record["batch"])
                         if refused:
                             lines.append(f"sweep-owed: attempt for {row['spec']}/{row['criterion']} refused: {refused}")
+    record.update(cpu_report(started))
+    lines.append('sweep-owed: pass ' + json.dumps(record, sort_keys=True))
     if not dry_run:
         refused = _emit("sweep-owed", "sweep-run", **record)
         if refused:
