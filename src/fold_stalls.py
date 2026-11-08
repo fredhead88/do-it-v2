@@ -113,12 +113,16 @@ def classify(spec, specs, by_subject, context, now, dwell):
     import autodispatch
     import dispatch
     from realm_glance import recorded_hold
-    # Rule 1: only recorded holds; neither active rework nor arbitrary prose.
+    # Rule 1: unresolved ledger holds and explicit text declarations.
     dependency = autodispatch.held_by_dependency(evs, context['events'], shipped=context['shipped'])
-    if dependency and 'unresolvable' not in dependency:
-        hold = latest(evs, {'dependency-hold'})
+    if dependency:
+        dependencies = autodispatch.open_dependencies(evs, context['events'], shipped=context['shipped'])
+        holds = autodispatch._open_dependency_holds(evs, context['events'], shipped=context['shipped'])
+        hold = holds[0]
+        if '_dependency_error' in hold:
+            return result('STUCK', dependency, hold.get('owner') or hold.get('actor'), hold)
         return result('held', dependency, hold.get('owner') or hold.get('actor'), hold,
-                      blocker=hold.get('waits_for'), hold_kind='dependency')
+                      blocker=dependencies[0], hold_kind='dependency')
     if sid in context['capability_specs']:
         subject = context['capability_specs'][sid][0]
         hold = latest(by_subject[subject], {'capability-hold'})

@@ -44,30 +44,61 @@ def _hold_order(e):
     return fold.ts(e.get('ts')), source, int(line) if line.isdigit() else 0
 
 
-def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
-    """The newest hold stands until its dependency ships or an own clearer wins.
+def _unresolved_holds(holds, spec_evs, all_evs, *, shipped=None):
+    """Validate every unreleased hold; invalid history takes precedence."""
+    shipped = shipped if shipped is not None else {
+        e.get('subject') for e in all_evs if e.get('type') == 'shipped'}
+    unresolved = []
+    for hold in sorted(holds, key=_hold_order):
+        if '_dependency_error' not in hold and _hold_released(hold, spec_evs):
+            continue
+        hold = dict(hold)
+        dependency = hold.get('waits_for')
+        if '_dependency_error' not in hold:
+            if not fold.valid_dependency(dependency):
+                hold['_dependency_error'] = 'held: invalid waits_for; unresolvable dependency-hold'
+            elif dependency == hold.get('subject'):
+                hold['_dependency_error'] = ('held: unresolvable dependency-hold '
+                                             f'(waits_for is self: {dependency})')
+        if '_dependency_error' in hold or dependency not in shipped:
+            unresolved.append(hold)
+    return sorted(unresolved, key=lambda e: '_dependency_error' not in e)
 
-    Invalid dependencies fail closed. Thinker/operator unblocked or a decision
-    referring to the hold releases it; answers to other questions do not.
-    A dependency shipped before the hold is already satisfied.
-    """
-    spec_evs = list(spec_evs)
-    holds = [e for e in spec_evs if e.get("type") == "dependency-hold"]
+
+def _open_dependency_holds(spec_evs, all_evs, *, shipped=None):
+    """One projection for ledger holds and the current text declaration epoch."""
+    import dependency_holds
+    own = list(spec_evs)
+    holds = [e for e in own if e.get('type') == 'dependency-hold']
+    declaration = dependency_holds._text_declaration(own)
+    if declaration is not None:
+        holds.append(declaration)
+    return _unresolved_holds(holds, own, all_evs, shipped=shipped)
+
+
+def open_dependencies(spec_evs, all_evs, *, shipped=None) -> list[str]:
+    """Distinct validated prerequisites still awaiting shipment or release."""
+    holds = _open_dependency_holds(spec_evs, all_evs, shipped=shipped)
+    return list(dict.fromkeys(h['waits_for'] for h in holds if '_dependency_error' not in h))
+
+
+def _dependency_reason(holds, all_evs):
     if not holds:
         return None
-    hold = max(holds, key=_hold_order)
-    if _hold_released(hold, spec_evs):
-        return None
+    hold = holds[0]
     source = f" [{hold['_src']}]" if hold.get('_src') else ''
-    dependency = hold.get("waits_for")
-    if not fold.valid_dependency(dependency):
-        return "held: invalid waits_for; unresolvable dependency-hold" + source
-    if dependency == hold.get("subject"):
-        return f"held: unresolvable dependency-hold (waits_for is self: {dependency})" + source
-    if (dependency in shipped if shipped is not None else
-            any(e.get("type") == "shipped" and e.get("subject") == dependency for e in all_evs)):
-        return None
-    return f"held: waits for {dependency} ({hold.get('why', '')})" + source
+    if '_dependency_error' in hold:
+        return hold['_dependency_error'] + source
+    dependency = hold['waits_for']
+    killed = any(e.get('type') == 'spec-killed' and e.get('subject') == dependency for e in all_evs)
+    return f"held: waits for {'killed ' if killed else ''}{dependency} ({hold.get('why', '')})" + source
+
+
+def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
+    """Fail closed until every ledger and declared prerequisite is resolved."""
+    all_evs = list(all_evs)
+    holds = _open_dependency_holds(spec_evs, all_evs, shipped=shipped)
+    return _dependency_reason(holds, all_evs)
 
 
 def _standing_ruling(spec_evs):
@@ -89,10 +120,6 @@ def _automatic_hold(spec_evs, all_evs, *, shipped=None):
     dependency = held_by_dependency(evs, all_evs, shipped=shipped)
     if dependency:
         return dependency
-    import dependency_holds
-    text_hold = dependency_holds.text_hold_reason(evs, all_evs, shipped=shipped)
-    if text_hold:
-        return text_hold
     ruling = _standing_ruling(evs)
     if ruling is not None:
         return f"held: ruling {ruling['action']} ({ruling.get('_src') or 'source missing'})"

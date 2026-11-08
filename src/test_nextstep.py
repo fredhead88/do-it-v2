@@ -55,6 +55,20 @@ def replay(name):
     return events, specs, now, waves
 
 
+_REAL_OPEN = open
+
+
+def allow_dependency_reads(stack):
+    """Permit only the new read-only dependency lookup under the scratch root."""
+    content = dispatch.CONTENT
+    def read_only(file, mode='r', *args, **kwargs):
+        if not Path(file).is_relative_to(content) or mode not in ('r', 'rb'):
+            raise AssertionError('unexpected filesystem access')
+        return _REAL_OPEN(file, mode, *args, **kwargs)
+    for hook in ('builtins.open', 'io.open', 'pathlib.Path.open'):
+        stack.enter_context(patch(hook, new=read_only))
+
+
 class NextStepTests(unittest.TestCase):
     def test_current_blocked_build_never_grades_stale_success(self):
         from test_fold_stalls import admitted, row, outcome, NOW as cut, SID as sid, evidence
@@ -73,6 +87,12 @@ class NextStepTests(unittest.TestCase):
 
     def setUp(self):
         self.rules = lr.load()
+        temporary = tempfile.TemporaryDirectory(prefix='nextstep-content-')
+        self.addCleanup(temporary.cleanup)
+        self.content = Path(temporary.name)
+        content_patch = patch.object(dispatch, 'CONTENT', self.content)
+        content_patch.start()
+        self.addCleanup(content_patch.stop)
 
     def steps(self, events, specs=None, now=NOW, rules=None, waves=None):
         return ns.next_steps(events, specs if specs is not None else specs_for(events),
@@ -360,6 +380,7 @@ class NextStepTests(unittest.TestCase):
                          'time.time', 'lane_rules.load', 'lane_rules.due',
                          'dispatch.spec_wave', 'fold.spec_state', 'fold.owed_due'):
                 stack.enter_context(patch(name, side_effect=AssertionError(name)))
+            allow_dependency_reads(stack)
             stack.enter_context(patch.object(os, 'environ', NoEnvironment()))
             stack.enter_context(patch.object(fold, 'NOW', NOW.replace(year=2040)))
             self.assertEqual(calls(), expected)
@@ -1266,6 +1287,7 @@ class NoSilentUndeterminedTests(unittest.TestCase):
                          'subprocess.run', 'subprocess.Popen', 'dispatch.emit', 'fold.read_events',
                          'time.time'):
                 stack.enter_context(patch(hook, side_effect=AssertionError(hook)))
+            allow_dependency_reads(stack)
             stack.enter_context(patch.object(tick, 'launch', side_effect=AssertionError('launch')))
             self.assertEqual(grading_env.failure_kind(self.diagnostic), 'unknown')
             held = ns.step_for(events, specs, SID, NOW, rules)
@@ -1471,6 +1493,12 @@ class GraderRetryTests(unittest.TestCase):
 
     def setUp(self):
         self.rules = lr.load()
+        temporary = tempfile.TemporaryDirectory(prefix='nextstep-content-')
+        self.addCleanup(temporary.cleanup)
+        self.content = Path(temporary.name)
+        content_patch = patch.object(dispatch, 'CONTENT', self.content)
+        content_patch.start()
+        self.addCleanup(content_patch.stop)
 
     steps = NextStepTests.steps
     one = NextStepTests.one

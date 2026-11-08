@@ -646,7 +646,7 @@ def _held_result(c, blocker, kind):
     evs = c['by_subject'].get(blocker, [])
     terminal = _terminal(evs, c['specs'].get(blocker))
     if kind == 'dependency-held' and (not evs or terminal or c['specs'].get(blocker, {}).get('state', 'unknown') == 'unknown'):
-        hold = _dependency_hold(c['evs'])
+        hold = _dependency_hold(c['evs'], c['events'])
         return _result(hold, 'blocker-dead: ' + str(blocker), blocker=blocker, overdue=True)
     owned = next((r for r in c['acting_rows'] if r['spec'] == blocker
                   and not r['reason'].startswith('undetermined: ')), None)
@@ -665,18 +665,22 @@ def _wave_held(c):
 
 
 
-def _dependency_hold(evs):
-    return max((e for e in evs if e.get('type') == 'dependency-hold'),
-               key=autodispatch._hold_order, default=None)
+def _dependency_hold(evs, all_evs=None):
+    holds = autodispatch._open_dependency_holds(evs, evs if all_evs is None else all_evs)
+    return holds[0] if holds else None
 
 
 def _dependency_held(c):
     if not c['dependency']:
         return None
-    hold = _dependency_hold(c['evs'])
-    if not fold.valid_dependency(hold.get('waits_for')):
-        return _result(hold, c['dependency'], invalid_dependency=True)
-    return _held_result(c, hold.get('waits_for'), 'dependency-held')
+    hold = _dependency_hold(c['evs'], c['events'])
+    if hold is None or '_dependency_error' in hold:
+        return _result(hold or c['evs'][-1], c['dependency'], invalid_dependency=True)
+    result = _held_result(c, hold.get('waits_for'), 'dependency-held')
+    if any(e.get('type') == 'spec-killed' and e.get('subject') == hold.get('waits_for')
+           for e in c['events']):
+        result['reason'] += '; ' + c['dependency']
+    return result
 
 
 
@@ -1071,10 +1075,10 @@ def _spec_exception(sid, evs, exc):
                  'correct affected spec input and re-evaluate ' + sid)
 
 
-def _invalid_dependency_step(sid, evs, reason):
-    return _hold(sid, 'spec', _stage(evs), _dependency_hold(evs), reason,
-                 'thinker/operator append a newer dependency-hold with '
-                 'waits_for=L-spec-<digits> or explicitly release the hold')
+def _invalid_dependency_step(sid, evs, reason, all_evs=None):
+    return _hold(sid, 'spec', _stage(evs), _dependency_hold(evs, all_evs), reason,
+                 'thinker/operator explicitly release the malformed hold; '
+                 'repair invalid spec text before re-evaluating')
 
 
 def next_steps(events, specs, now, rules, waves=None):
@@ -1171,15 +1175,15 @@ def next_steps(events, specs, now, rules, waves=None):
                      by_subject=by, now=now, table=rules, busy=busy, live=busy,
                      capabilities=capabilities, memo={}, acting_rows=rows)
             c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
-            hold = _dependency_hold(evs)
-            if c['dependency'] and hold is not None and not fold.valid_dependency(hold.get('waits_for')):
-                steps.append(_invalid_dependency_step(sid, evs, c['dependency']))
+            hold = _dependency_hold(evs, events)
+            if c['dependency'] and hold is not None and '_dependency_error' in hold:
+                steps.append(_invalid_dependency_step(sid, evs, c['dependency'], events))
                 continue
             c['wave'] = _wave(sid, evs, by, specs, waves)
             ruling_step = _ruling_step(c, spawn_events, owners)
             ruling = autodispatch._standing_ruling(evs)
             if ruling is not None and c['dependency']:
-                hold = _dependency_hold(evs)
+                hold = _dependency_hold(evs, events)
                 steps.append(_hold(sid, 'spec', stage, hold, c['dependency'],
                                    str(hold.get('waits_for')) + ' shipped', 'tick'))
                 continue

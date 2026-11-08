@@ -35,8 +35,8 @@ INVALID = [None, '', '   ', 'L-spec-1\n', ' L-spec-1890', 'L-spec-1890 ', 'other
            [], ['L-spec-1890'], ['L-spec-1890', 'L-spec-1892'], {},
            {'id': 'L-spec-1890'}, True, False, 7, 1.5]
 PREFIX = 'held: invalid waits_for; unresolvable dependency-hold'
-CLEARS = ('thinker/operator append a newer dependency-hold with '
-          'waits_for=L-spec-<digits> or explicitly release the hold')
+CLEARS = ('thinker/operator explicitly release the malformed hold; '
+          'repair invalid spec text before re-evaluating')
 
 
 def event(kind, subject=SID, minute=-120, actor='thinker', **kv):
@@ -178,6 +178,10 @@ class HistoricalHoldTests(Scratch):
         corrected = event('dependency-hold', minute=-119, waits_for='L-spec-1890')
         corrected['_src'] = 'L-thinker-0004.jsonl:11028'
         for rows in ([incident, corrected], [corrected, incident]):
+            self.assertIn('unresolvable', ad.held_by_dependency(rows, []))
+            self.assertIn('unresolvable', ad.held_by_dependency(rows, [], shipped={'L-spec-1890'}))
+            release = event('decision', minute=-118, ref=incident['_src'])
+            rows = rows + [release]
             self.assertIn('waits for L-spec-1890', ad.held_by_dependency(rows, []))
             self.assertIsNone(ad.held_by_dependency(rows, [], shipped={'L-spec-1890'}))
             self.assertIsNone(ad.held_by_dependency(rows, [event('shipped', subject='L-spec-1890', minute=-130)]))
@@ -195,8 +199,10 @@ class HistoricalHoldTests(Scratch):
                        answered=set(), windows={})
         result = fold_stalls.classify(spec, {SID: spec}, {SID: rows}, context, NOW, {'written': 1})
         self.assertEqual(result['bucket'], 'STUCK')
+        self.assertIsNone(result['blocker'])
+        self.assertIn('unresolvable', result['reason'])
         signed('AC2', dict(matrix=results, immutable_snapshot=True,
-                          incident_source=incident['_src'], corrected_newer=True,
+                          incident_source=incident['_src'], malformed_requires_release=True,
                           authorized_release=True, overdue=result))
 
 
@@ -214,7 +220,7 @@ class PerSpecIsolationTests(Scratch):
                 self.assertTrue(step.reason.startswith(PREFIX), step)
                 self.assertEqual(step.clears, CLEARS)
                 # Direct predicate path must also avoid blocker lookup.
-                c = dict(dependency=PREFIX, evs=rows)
+                c = dict(dependency=PREFIX, evs=rows, events=rows)
                 with patch.object(nextstep, '_held_result', side_effect=AssertionError('lookup')):
                     result = nextstep._dependency_held(c)
                 self.assertEqual(result['reason'], PREFIX)
@@ -244,16 +250,21 @@ class PerSpecIsolationTests(Scratch):
             rows = fold.read_events(snapshot=fold.ReaderSnapshot())
         step, = self.steps(rows)
         self.assertTrue(step.reason.startswith(PREFIX))
-        # A corrected hold at the same timestamp wins by numeric source line,
-        # even when snapshot content ordering places an invalid row last.
+        # A valid row at the same timestamp cannot replace malformed history,
+        # regardless of numeric source line or snapshot content ordering.
         old = event('dependency-hold', waits_for=['L-spec-1890', 'L-spec-1892'])
         old['_src'] = 'L-thinker-fixture.jsonl:9'
         new = dict(old, waits_for='L-spec-1890', _src='L-thinker-fixture.jsonl:10')
         ruling = event('decision', action='hold', waits_for='L-spec-1890')
         for holds in ([old, new], [new, old]):
             chosen, = self.steps([self.written(), ruling, *holds])
-            self.assertIn('waits for L-spec-1890', chosen.reason)
-            self.assertEqual(chosen.trigger, new['_src'])
+            self.assertIn('unresolvable', chosen.reason)
+            self.assertEqual(chosen.trigger, old['_src'])
+            released = [self.written(), ruling, *holds,
+                        event('decision', minute=-117, ref=old['_src'])]
+            released_step, = self.steps(released)
+            self.assertIn('waits for L-spec-1890', released_step.reason)
+            self.assertEqual(released_step.trigger, new['_src'])
         signed('AC3-invalid', dict(values=INVALID, both_ruling_branches=True,
                                   immutable_snapshot=True, step=step.__dict__))
 

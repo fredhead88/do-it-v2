@@ -61,10 +61,13 @@ class TextHoldTests(unittest.TestCase):
                 self.assertIsNone(autodispatch._automatic_hold(events, events + [event('shipped') | {'subject': DEP}]))
                 released = events + [event('unblocked', 1, ref='spec-text:' + SID)]
                 self.assertIsNone(autodispatch._automatic_hold(released, released))
-                # A newer explicit recorded hold supersedes an older text declaration.
+                # A newer recorded hold stacks with the text declaration.
                 explicit = events + [event('dependency-hold', 1, waits_for='L-spec-9003', why='new prerequisite')]
                 reason = autodispatch._automatic_hold(explicit, explicit)
-                self.assertIn('L-spec-9003', reason)
+                self.assertEqual(set(autodispatch.open_dependencies(explicit, explicit)), {DEP, 'L-spec-9003'})
+                self.assertIn(DEP, reason)
+                shipped = explicit + [event('shipped', 2) | {'subject': 'L-spec-9003'}]
+                self.assertIn(DEP, autodispatch._automatic_hold(explicit, shipped))
 
 
 if __name__ == '__main__':
