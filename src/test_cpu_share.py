@@ -45,7 +45,7 @@ class CpuShareTests(unittest.TestCase):
         global build_runner, dispatch
         import build_runner
         import dispatch
-        temp = tempfile.TemporaryDirectory(prefix='cpu-share-')
+        temp = tempfile.TemporaryDirectory(prefix='cs-', dir='/var/tmp')
         self.addCleanup(temp.cleanup)
         self.top = pathlib.Path(temp.name)
         self.root = self.top / 'root'

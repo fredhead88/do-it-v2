@@ -39,7 +39,7 @@ def evidence(ac, body):
 
 class GradingWaitTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="grading-wait-")
+        self.temp = tempfile.TemporaryDirectory(prefix="gw-")
         self.addCleanup(self.temp.cleanup)
         self.top = pathlib.Path(self.temp.name).resolve()
         self.root = self.top / "ledger"
@@ -55,7 +55,10 @@ class GradingWaitTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.dict(os.environ, DOIT_ROOT=str(self.root),
             DOIT_SCRATCH=str(self.top / "scratch"), DOIT_NO_POKE="1"))
-        aliases, backing = self.top / "aliases", self.top / "backing"
+        # Real short root: the private-socket length check must not depend on how long TMPDIR is.
+        short = pathlib.Path(tempfile.mkdtemp(prefix="gw", dir="/tmp")).resolve()
+        self.addCleanup(shutil.rmtree, short, True)
+        aliases, backing = short / "a", short / "b"
         aliases.mkdir()
         backing.mkdir()
         self.stack.enter_context(patch.multiple(runner, SHORT_TMP_ROOT=aliases,
@@ -211,8 +214,9 @@ class GradingWaitTests(unittest.TestCase):
             tmp = pathlib.Path(env["TMPDIR"])
             self.assertEqual(env["TMPDIR"], env["TMP"])
             self.assertEqual(env["TMPDIR"], env["TEMP"])
-            self.assertTrue(tmp.is_absolute() and tmp.parent == runner.SHORT_TMP_ROOT)
+            self.assertTrue(tmp.is_absolute() and tmp.parent == runner.SHORT_TMP_BACKING_ROOT)
             self.assertEqual(tmp.resolve().parent, runner.SHORT_TMP_BACKING_ROOT)
+            self.assertEqual(tmp, tmp.resolve())
             self.assertTrue(tmp.is_dir())
             self.assertNotEqual(str(tmp), outside)
             self.assertEqual(pathlib.Path(env["HOME"]), auxiliary / "home")
