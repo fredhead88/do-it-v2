@@ -290,6 +290,7 @@ def test_blocked_dossiers():
             if reverse:
                 children.reverse()
             rows = [row('charter-filed', 'operator', minute=-5, subject=cid, goal=gid, covers=['R1']),
+                    row('plan-written', 'planner', minute=-4, subject=cid),
                     *children, outcome('BLOCKED')]
             with admitted(rows) as (root, events, folded):
                 for item in (SID, cid, gid, written):

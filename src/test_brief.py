@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """One runnable check on brief's dossier rules. Run: python3 test_brief.py"""
+import atexit
+import hashlib
 import json
 import os
 import pathlib
@@ -10,7 +12,11 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 
 TMP = pathlib.Path(tempfile.mkdtemp())
+atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 os.environ["DOIT_ROOT"] = str(TMP)
+os.environ["HOME"] = str(TMP / "home")
+os.environ["XDG_CONFIG_HOME"] = str(TMP / "config")
+os.environ["DOIT_READ_CACHE"] = "0"
 # Same reasoning as test_fold.py: carry.uncarried() reads V4_LEDGER_DIR/V4_INBOX_DIR,
 # not DOIT_ROOT — pinned so this file never touches the operator's real inbox.
 os.environ["V4_LEDGER_DIR"] = str(TMP / "v4-ledger-absent")
@@ -209,7 +215,10 @@ PROV_MATCH, PROV_NOMATCH = "L-charter-0940", "L-charter-0941"
 def _fake_fold(_events):
     def _c(cid):
         evs = [{"type": "charter-filed", "subject": cid, "goal": None, "ts": stamp(5),
-               "actor": "thinker", "_src": "fake:1"}]
+               "actor": "thinker", "_src": "L-thinker-fixture.jsonl:1"},
+               {"type": "plan-written", "subject": cid, "ts": stamp(4),
+                "actor": "planner", "_src": "L-planner-fixture.jsonl:1"}]
+        assert all(fold.admits(e, e["actor"]) is None for e in evs)
         return {"id": cid, "evs": evs, "age": 0.0, "state": "proving", "briefs": 0,
                 "owed": 0, "unbuilt": 0, "closable": None}
     charters = {PROV_MATCH: _c(PROV_MATCH), PROV_NOMATCH: _c(PROV_NOMATCH)}
@@ -311,5 +320,152 @@ assert "brief" in r_help.stdout
 r_bashn = subprocess.run(["bash", "-n", str(DOIT)], capture_output=True, text=True)
 assert r_bashn.returncode == 0, r_bashn.stderr
 print("AC8 ok")
+
+# L-spec-2158: real reader/fold integration, including rejected raw fallback.
+CP, GP, SP, OTHER = "L-charter-0960", "L-goal-0960", "L-spec-0960", "L-charter-0961"
+PLANNING = {"text": "plan this charter", "owner": "planner"}
+CLOSING = {"text": "final checks and close", "owner": "executor"}
+write_content(CP, "# Planning fixture\n\n## Intent\nPlan before closing.\n")
+
+
+def planning_event(kind, subject=CP, **fields):
+    return dict(type=kind, subject=subject, ts=stamp(2), **fields)
+
+
+def planning_fixture(planner=(), rejected=(), *, filed=True, child=False, thinker=(),
+                     operator=(), executor=(), reviewer=()):
+    return ledger(**{
+        "L-thinker-fixture.jsonl": [
+            planning_event("goal-filed", GP, title="Planning goal"),
+            *([planning_event("charter-filed", goal=GP, covers="none")] if filed else []),
+            *[planning_event(kind) for kind in rejected], *thinker],
+        "L-planner-fixture.jsonl": [planning_event(kind) if isinstance(kind, str) else kind
+                                    for kind in planner],
+        "L-spec-writer-fixture.jsonl": [planning_event("spec-written", SP, charter=CP)] if child else [],
+        "L-operator-fixture.jsonl": list(operator),
+        "L-executor-fixture.jsonl": list(executor),
+        "L-charter-reviewer-fixture.jsonl": list(reviewer),
+    })
+
+
+def planning_response(case, dossier, **surfaces):
+    body = json.dumps(dict(case=case, status=dossier["status"], next=dossier["next"],
+                          **surfaces), sort_keys=True)
+    print(json.dumps(dict(url="scratch://brief-planning/" + case, status=0,
+                          body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+                          body_excerpt=body)))
+
+
+cases = [
+    ("1-filed-zero-specs", {}),
+    ("2-planner-started", dict(planner=["planner-started"])),
+    ("3-l1-complete", dict(planner=["l1-complete"])),
+    ("4-child-without-plan", dict(child=True)),
+    ("5-other-charter-plan", dict(planner=[planning_event("plan-written", OTHER)])),
+    ("6-own-plan-written", dict(planner=["plan-written"])),
+    ("7-own-cut-written", dict(planner=["cut-written"])),
+    ("8-rejected-plan", dict(rejected=["plan-written"])),
+    ("8-rejected-cut", dict(rejected=["cut-written"])),
+    ("8-rejected-both", dict(rejected=["plan-written", "cut-written"])),
+    ("9-content-only", dict(filed=False)),
+    ("9-content-rejected-plan", dict(filed=False, rejected=["plan-written"])),
+    ("9-content-rejected-cut", dict(filed=False, rejected=["cut-written"])),
+    ("10-started-unfiled", dict(filed=False, planner=["planner-started"])),
+]
+for case, options in cases:
+    evs = planning_fixture(**options)
+    _, charters, ignored, _ = fold.fold(evs)
+    own = charters.get(CP, {}).get("evs", [])
+    assert any(e["type"] == "charter-filed" for e in own) == options.get("filed", True), case
+    for kind in options.get("rejected", []):
+        raw = next(e for e in evs if e["subject"] == CP and e["type"] == kind)
+        assert raw["actor"] == "thinker" and raw["_src"].startswith("L-thinker-"), raw
+        assert fold.EMITS[kind] == {"planner"}, kind
+        assert fold.admits(raw, raw["actor"]) is not None and raw in ignored, raw
+        assert raw not in own, own
+    if case.startswith("9-"):
+        assert CP not in charters, charters
+    if case.startswith("10-"):
+        assert CP in charters and not any(e["type"] == "charter-filed" for e in own), own
+    if case.startswith(("6-", "7-")):
+        assert any(e["type"] in ("plan-written", "cut-written") for e in own), own
+    before = {p.name: p.read_bytes() for p in (TMP / "events").glob("*.jsonl")}
+    result = brief.dossier(CP, evs, TMP, T)
+    expected = CLOSING if case.startswith(("6-", "7-", "9-", "10-")) else PLANNING
+    assert result["next"] == expected, (case, result["status"], result["next"])
+    if case.startswith("9-"):
+        assert result["status"]["state"] == "unknown", result
+    surfaces = {}
+    if case.startswith("1-"):
+        sentence = "What happens next: plan this charter (planner)"
+        assert result["catch_me_up"][2] == sentence, result
+        assert sentence in brief.render(result), brief.render(result)
+        goal = brief.dossier(GP, evs, TMP, T)
+        assert goal["next"] == PLANNING, goal
+        child = next(c for c in goal["children"] if c["id"] == CP)
+        assert child["waiting_on"] == "plan this charter (planner)", child
+        cli_json = subprocess.run(["bash", str(DOIT), "brief", CP, "--json"],
+                                  capture_output=True, text=True, check=True)
+        cli_text = subprocess.run(["bash", str(DOIT), "brief", CP],
+                                  capture_output=True, text=True, check=True)
+        assert json.loads(cli_json.stdout)["next"] == PLANNING, cli_json.stdout
+        assert sentence in cli_text.stdout, cli_text.stdout
+        surfaces = dict(catch_me_up=result["catch_me_up"][2], rendered=brief.render(result),
+                        cli_json=json.loads(cli_json.stdout)["next"], cli_text=cli_text.stdout,
+                        goal_next=goal["next"], waiting_on=child["waiting_on"])
+    assert brief.dossier(CP, fold.read_events(), TMP, T) == result, case
+    assert before == {p.name: p.read_bytes() for p in (TMP / "events").glob("*.jsonl")}, case
+    planning_response(case, result, **surfaces)
+
+# Compatibility uses admitted fixture histories, preserving the proving checks above.
+original_proving_path = brief.PROVING_PATH
+try:
+    for path, owner in ((FAKE_C, "operator"), (TMP / "absent.py", "executor"),
+                        (FAKE_B, "executor")):
+        # FAKE_C matches PROV_MATCH; a filed/planned l1-complete zero-spec charter is proving.
+        evs = ledger(**{
+            "L-thinker-fixture.jsonl": [planning_event("charter-filed", PROV_MATCH, covers="none")],
+            "L-planner-fixture.jsonl": [planning_event("plan-written", PROV_MATCH),
+                                        planning_event("l1-complete", PROV_MATCH)],
+        })
+        brief.PROVING_PATH = path
+        result = brief.dossier(PROV_MATCH, evs, TMP, T)
+        assert result["status"]["state"] == "proving", result
+        assert result["next"] == dict(text="final checks and close", owner=owner), result
+        planning_response("compat-proving-" + path.name, result)
+    evs = ledger(**{
+        "L-thinker-fixture.jsonl": [planning_event("charter-filed", PROV_NOMATCH, covers="none")],
+        "L-planner-fixture.jsonl": [planning_event("cut-written", PROV_NOMATCH),
+                                    planning_event("l1-complete", PROV_NOMATCH)],
+    })
+    brief.PROVING_PATH = FAKE_C
+    result = brief.dossier(PROV_NOMATCH, evs, TMP, T)
+    assert result["status"]["state"] == "proving" and result["next"] == CLOSING, result
+    planning_response("compat-proving-no-match", result)
+finally:
+    brief.PROVING_PATH = original_proving_path
+
+compatibility = [
+    ("open-brief", dict(planner=["plan-written"], thinker=[planning_event("brief", requirement="R1", why="fixture")]),
+     {"text": "answer the open brief", "owner": "executor"}),
+    ("child-action", dict(planner=["cut-written"], child=True), None),
+    ("retracted", dict(operator=[planning_event("charter-retracted")]),
+     {"text": "nothing — withdrawn", "owner": "nobody"}),
+    ("l2-complete", dict(operator=[planning_event("l1-complete")],
+                         executor=[planning_event("sweep-fixpoint")],
+                         reviewer=[planning_event("charter-review-complete")]),
+     {"text": "nothing — done", "owner": "nobody"}),
+]
+for case, options, expected in compatibility:
+    evs = planning_fixture(**options)
+    result = brief.dossier(CP, evs, TMP, T)
+    if expected is None:
+        expected = brief.dossier(SP, evs, TMP, T)["next"]
+        assert expected["owner"] == "tick" and "ready to audit" in expected["text"], expected
+    assert result["next"] == expected, (case, result)
+    if case in ("retracted", "l2-complete"):
+        assert result["status"]["state"] == ("retracted" if case == "retracted" else "L2-complete"), result
+        assert not any(e["type"] in ("plan-written", "cut-written") for e in fold.fold(evs)[1][CP]["evs"])
+    planning_response("compat-" + case, result)
 
 print("all ok")
