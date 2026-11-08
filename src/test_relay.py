@@ -846,6 +846,12 @@ for label, event in [
     ("malformed-hold", hold_event("planner-held", ts=None)),
 ]:
     hold_table.append((label, base_hold + [event], hold_ts))
+for note in ("lesson", "question"):
+    for note_actor in ("planner", "operator"):
+        hold_table.append((f"note-{note}-{note_actor}-keeps-hold",
+                           base_hold + [hold_event(note, HA, note_actor)], hold_ts))
+hold_table.append(("lesson-then-decision",
+                   base_hold + [hold_event("lesson", HA), hold_event("decision", HA, "operator")], None))
 hold_table.extend([
     ("newer-valid-hold", base_hold + [hold_event("planner-held", ts="replacement")], "replacement"),
     ("earlier-ts-later-position", base_hold + [hold_event("decision", actor="operator", ts="2000-01-01")], None),

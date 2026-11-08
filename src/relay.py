@@ -297,7 +297,7 @@ def held_since(events, charter, folded_specs=None):
     refs = {e["_src"] for e in rows if escalation(e) and isinstance(e.get("_src"), str)}
     for event in rows[hold + 1:]:
         kind = event.get("type")
-        if not isinstance(kind, str) or kind in ("planner-started", "planner-ended", "planner-held"):
+        if not isinstance(kind, str) or kind in ("planner-started", "planner-ended", "planner-held", "lesson", "question"):
             continue
         if (on_subject(event) or escalation(event)
                 or (kind in ("decision", "unblocked") and isinstance(event.get("ref"), str)
