@@ -4,6 +4,10 @@ Only Git objects are edited; fingerprinting uses a disposable detached worktree.
 The PG override accepts <directory> loopback to start and <directory> stop to stop.
 """
 import ast
+import copy
+import difflib
+import io
+import tokenize
 import hashlib
 import json
 import os
@@ -139,7 +143,12 @@ def test_edit(source, old, new):
     for fn in tree.body:
         if not isinstance(fn, ast.FunctionDef) or not re.search(r"isolated_heads|scratch|cli|route", fn.name):
             continue
+        historical = {id(n) for stmt in ast.walk(fn) if isinstance(stmt, ast.Assert)
+                      and isinstance(stmt.test, ast.Call) and isinstance(stmt.test.func, ast.Name)
+                      and stmt.test.func.id == "is_ancestor" for n in ast.walk(stmt)}
         for node in ast.walk(fn):
+            if id(node) in historical:
+                continue
             if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
             if node.lineno != node.end_lineno:
@@ -159,6 +168,224 @@ def test_edit(source, old, new):
     for i, start, end, value in sorted(edits, reverse=True):
         lines[i] = lines[i][:start] + value + lines[i][end:]
     return "".join(lines)
+
+
+def ancestry(node, revision_id):
+    """Recognise only the approved, message-free ancestry statement."""
+    expected = ast.parse(f'assert is_ancestor(graph, {revision_id!r}, ROUTED_HEAD)').body[0]
+    return ast.dump(node) == ast.dump(expected)
+
+
+def isolation_edit(base, branch, current, old, new, head):
+    rule = "unrecognised isolation-test branch change"
+    bt, nt, ct = map(ast.parse, (base, branch, current))
+    additions = []
+    # Only direct statements in an existing, uniquely named function can be
+    # carried. Historical assertions must survive the structural comparison.
+    for fn in nt.body:
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        originals = [f for f in bt.body if isinstance(f, ast.FunctionDef) and f.name == fn.name]
+        extra = [n for n in fn.body if ancestry(n, new)]
+        inherited = [n for f in originals for n in f.body if ancestry(n, new)]
+        if extra and not inherited:
+            if len(extra) != 1 or len(originals) != 1:
+                raise ValueError(rule)
+            fn.body.remove(extra[0])
+            additions.append((fn.name, extra[0]))
+
+    def normalise(tree):
+        for fn in tree.body:
+            if not isinstance(fn, ast.FunctionDef) or not re.search(r"isolated_heads|scratch|cli|route", fn.name):
+                continue
+            # Existing ancestry is history, not a current-head expectation.
+            protected = {id(n) for stmt in ast.walk(fn) if isinstance(stmt, ast.Assert)
+                         and isinstance(stmt.test, ast.Call) and isinstance(stmt.test.func, ast.Name)
+                         and stmt.test.func.id == "is_ancestor" for n in ast.walk(stmt)}
+            for node in ast.walk(fn):
+                if id(node) in protected:
+                    continue
+                if isinstance(node, (ast.Tuple, ast.List)):
+                    # test_edit retains old CLI input while adding the new head.
+                    for i in range(len(node.elts) - 2, -1, -1):
+                        left, right = node.elts[i:i + 2]
+                        if (isinstance(left, ast.Constant) and left.value in (old + "\n", old + " (head)\n")
+                                and isinstance(right, ast.Constant) and right.value == new + " (head)\n"):
+                            del node.elts[i]
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    for suffix in ("", "\n", " (head)\n"):
+                        if node.value == new + suffix:
+                            node.value = old + suffix
+        return ast.dump(tree)
+
+    if normalise(copy.deepcopy(bt)) != normalise(copy.deepcopy(nt)):
+        raise ValueError(rule)
+    # Comments are data too: permit spacing/quotes and the specialised current
+    # head comment, but do not silently accept a new helper hidden in comments.
+    def comments(source):
+        return [t.string.replace(old, "<head>").replace(new, "<head>")
+                if re.search(r"current head|one current head", t.string) else t.string
+                for t in tokenize.generate_tokens(io.StringIO(source).readline) if t.type == tokenize.COMMENT]
+    if comments(base) != comments(branch):
+        raise ValueError(rule)
+    result = test_edit(current, head, new)
+    for name, stmt in additions:
+        targets = [f for f in ct.body if isinstance(f, ast.FunctionDef) and f.name == name]
+        if len(targets) != 1:
+            raise ValueError(rule)
+        target = targets[0]
+        if target.body[0].lineno == target.lineno:
+            raise ValueError(rule)
+        present = [n for n in ast.walk(target) if ancestry(n, new)]
+        if len(present) > 1:
+            raise ValueError(rule)
+        if present:
+            continue
+        # Append within the same existing function; no cross-function anchor.
+        tree = ast.parse(result)
+        target, = [f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == name]
+        lines = result.splitlines(keepends=True)
+        indent = " " * target.body[0].col_offset
+        lines.insert(target.end_lineno, indent + ast.unparse(stmt) + "\n")
+        result = "".join(lines)
+    return result
+
+
+def equal_spans(base, branch):
+    """Anchor unchanged lines first, then compare changed lines characterwise.
+
+    Repeated changed lines cannot prove which historical literal survived.
+    """
+    bl, nl = base.splitlines(keepends=True), branch.splitlines(keepends=True)
+    bo, no = [0], [0]
+    for line in bl:
+        bo.append(bo[-1] + len(line))
+    for line in nl:
+        no.append(no[-1] + len(line))
+    spans = []
+    for tag, i, j, k, l in difflib.SequenceMatcher(None, bl, nl, autojunk=False).get_opcodes():
+        if tag == "equal":
+            spans.append((bo[i], no[k], no[l] - no[k]))
+        else:
+            left, right = "".join(bl[i:j]), "".join(nl[k:l])
+            # Only pair one changed line with one changed line. Cross-line
+            # matching can misattribute a newly inserted pin to deleted history.
+            if j - i == l - k == 1:
+                for a, b, size in difflib.SequenceMatcher(None, left, right, autojunk=False).get_matching_blocks():
+                    if size:
+                        spans.append((bo[i] + a, no[k] + b, size))
+    return spans
+
+
+def literal_pins(base, branch, old, new, revisions, revision_id):
+    """Rewrite only demonstrably introduced complete string literal parents."""
+    rule = "old parent literal in another changed file"
+    spans = equal_spans(base, branch)
+    def positions(source):
+        lines = source.splitlines(keepends=True)
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line))
+        def bounds(node):
+            start = offsets[node.lineno - 1] + len(lines[node.lineno - 1].encode()[:node.col_offset].decode())
+            end = offsets[node.end_lineno - 1] + len(lines[node.end_lineno - 1].encode()[:node.end_col_offset].decode())
+            return start, end
+        return lines, offsets, bounds
+    _, base_offsets, base_bounds = positions(base)
+    original_constants = {(*base_bounds(node), node.value) for node in ast.walk(ast.parse(base))
+                          if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    original_tokens = {(base_offsets[t.start[0] - 1] + t.start[1],
+                        base_offsets[t.end[0] - 1] + t.end[1], t.type)
+                       for t in tokenize.generate_tokens(io.StringIO(base).readline)
+                       if t.type not in (tokenize.ENDMARKER, tokenize.NEWLINE, tokenize.NL)}
+    def inherited(start, end, inventory, kind):
+        return any(b <= start and end <= b + size and (a + start - b, a + end - b, kind) in inventory
+                   for a, b, size in spans)
+    lines, offsets, bounds = positions(branch)
+    tree = ast.parse(branch)
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    edits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        start, end = bounds(node)
+        line = lines[node.lineno - 1]
+        old_count = base.splitlines(keepends=True).count(line)
+        if node.value == old and old_count > 1 and lines.count(line) != old_count:
+            raise ValueError(rule)
+        if inherited(start, end, original_constants, node.value):
+            continue
+        if node.value in revisions and node.value not in (old, revision_id):
+            raise ValueError(rule)
+        if node.value != old:
+            if old in node.value:
+                raise ValueError(rule)
+            continue
+        segment = branch[start:end]
+        if (not re.fullmatch(r"""(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")""", segment)
+                or isinstance(parents.get(id(node)), (ast.BinOp, ast.JoinedStr, ast.Attribute, ast.Subscript))):
+            raise ValueError(rule)
+        # Identical repeated lines across a changed region have no unique
+        # correspondence. Do not let SequenceMatcher arbitrarily pick history.
+        line = lines[node.lineno - 1]
+        if base.splitlines(keepends=True).count(line) and lines.count(line) != base.splitlines(keepends=True).count(line):
+            raise ValueError(rule)
+        edits.append((start, end, segment[0] + new + segment[-1]))
+    for token in tokenize.generate_tokens(io.StringIO(branch).readline):
+        if old not in token.string:
+            continue
+        start = offsets[token.start[0] - 1] + token.start[1]
+        end = offsets[token.end[0] - 1] + token.end[1]
+        if not inherited(start, end, original_tokens, token.type) and not any(a <= start and end <= b for a, b, _ in edits):
+            raise ValueError(rule)
+    for start, end, value in sorted(edits, reverse=True):
+        branch = branch[:start] + value + branch[end:]
+    return branch, bool(edits)
+
+
+def merge_test(base, branch, current, head):
+    """Use Git's ordinary three-way merge; any remaining body conflict declines."""
+    # Anonymous files close with the operation and need no directory lifecycle.
+    with tempfile.TemporaryFile() as cf, tempfile.TemporaryFile() as bf, tempfile.TemporaryFile() as nf:
+        handles = (cf, bf, nf)
+        fds = tuple(handle.fileno() for handle in handles)
+        paths = [f"/proc/self/fd/{fd}" for fd in fds]
+        for handle, content in zip(handles, (current, base, branch)):
+            handle.write(content.encode())
+            handle.flush()
+        merged = subprocess.run(["git", "merge-file", "-p", *paths], pass_fds=fds,
+                                capture_output=True, timeout=60)
+        if merged.returncode == 0:
+            return merged.stdout.decode()
+        # A residual quote-style conflict is resolvable only when both sides
+        # have identical tokens apart from the proven new parent literal.
+        merged = subprocess.run(["git", "merge-file", "-p", "--diff3", "-L", "current", "-L", "base",
+                                 "-L", "branch", *paths], pass_fds=fds, capture_output=True, timeout=60)
+        if merged.returncode < 1 or merged.returncode > 127:
+            raise ValueError("conflict outside re-chain allowlist")
+        def tokens(source):
+            result, pins = [], 0
+            try:
+                for token in tokenize.generate_tokens(io.StringIO(source).readline):
+                    value = token.string
+                    if token.type == tokenize.STRING and ast.literal_eval(value) == head:
+                        value = "<parent>"
+                        pins += 1
+                    if token.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.ENDMARKER):
+                        result.append((token.type, value))
+            except (tokenize.TokenError, IndentationError, ValueError, SyntaxError):
+                raise ValueError("conflict outside re-chain allowlist") from None
+            return result, pins
+        def conflict(match):
+            left, right = tokens(match[1]), tokens(match[3])
+            if left != right or not right[1]:
+                raise ValueError("conflict outside re-chain allowlist")
+            return match[3]
+        result, count = re.subn(r"(?m)^<<<<<<< current\n(.*?)^\|\|\|\|\|\|\| base\n(.*?)^=======\n(.*?)^>>>>>>> branch\n",
+                                conflict, merged.stdout.decode(), flags=re.DOTALL)
+        if not count or re.search(r"(?m)^(?:<<<<<<<|=======|>>>>>>>)", result):
+            raise ValueError("conflict outside re-chain allowlist")
+        return result
 
 
 def reason_addition(base, branch):
@@ -235,22 +462,29 @@ def mechanical(repo, cur, branch):
         raise ValueError("branch manifest and migration disagree")
     allowed = SHARED | {path}
     changed = out(repo, "diff", "--name-only", f"{base}..{branch}").splitlines()
-    added = set(out(repo, "diff", "--diff-filter=A", "--name-only", f"{base}..{branch}").splitlines())
+    revisions = set()
+    for rev in (base, branch, cur):
+        for item in out(repo, "ls-tree", "-r", "--name-only", rev, VERSIONS).splitlines():
+            if item.endswith(".py") and "/_archive/" not in item and not item.endswith("/__init__.py"):
+                revisions.add(revision(text(repo, rev, item))[0])
     rewritten_tests = {}
     for other in changed:
         if other in allowed:
             continue
         content = git(repo, "show", f"{branch}:{other}", check=False).stdout
-        if (other in added and re.fullmatch(r"(?:api/)?tests/(?:.*/)?test_[^/]*\.py", other)
-                and git(repo, "cat-file", "-e", f"{cur}:{other}", check=False).returncode != 0):
-            for quote in (b'"', b"'"):
-                content = content.replace(quote + p.encode() + quote, quote + h.encode() + quote)
-            rewritten_tests[other] = content
-        if p.encode() in content:
+        if re.fullmatch(r"(?:api/)?tests/(?:.*/)?test_[^/]*\.py", other):
+            previous = git(repo, "show", f"{base}:{other}", check=False)
+            before = previous.stdout.decode()
+            rewritten, edited = literal_pins(before, content.decode(), p, h, revisions, r)
+            if edited:
+                current = git(repo, "show", f"{cur}:{other}", check=False)
+                if (previous.returncode and not current.returncode) or (not previous.returncode and current.returncode):
+                    raise ValueError("old parent literal in another changed file")
+                rewritten_tests[other] = merge_test(before, rewritten, current.stdout.decode(), h)
+                allowed.add(other)
+        elif p.encode() in content:
             raise ValueError("old parent literal in another changed file")
-    expected = test_edit(text(repo, base, TEST), p, r)
-    if text(repo, branch, TEST) != expected:
-        raise ValueError("unrecognised isolation-test branch change")
+    isolation = isolation_edit(text(repo, base, TEST), text(repo, branch, TEST), text(repo, cur, TEST), p, r, h)
     addition = reason_addition(bh["reason"], nh["reason"]).replace("from " + p, "from " + h, 1)
     migration, count = re.subn(r'(?m)^(down_revision\s*(?::[^=\n]+)?=\s*)["\'][^"\']+["\']',
                              lambda m: m.group(1) + repr(h), source)
@@ -260,7 +494,7 @@ def mechanical(repo, cur, branch):
     if p == h:
         migration = source
     changes = {path: migration, MANIFEST: manifest_edit(text(repo, cur, MANIFEST), h, r, addition),
-               TEST: test_edit(text(repo, cur, TEST), h, r), FINGERPRINT: blob(repo, cur, FINGERPRINT)}
+               TEST: isolation, FINGERPRINT: blob(repo, cur, FINGERPRINT)}
     changes.update(rewritten_tests)
     def optional(rev):
         q = git(repo, "show", f"{rev}:{AUTHORITY}", check=False)
