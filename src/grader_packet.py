@@ -238,6 +238,13 @@ def spec_criteria_ids(spec_text: str) -> list[str]:
     return [cid for cid, _, _ in packet._criterion_spans(body, allow_bullets=True)]
 
 
+def graded_criteria(events, subject, spec_text) -> list[str]:
+    """The packet's criteria, in spec order, with standing rejections retained."""
+    import empty_grade
+    omitted = empty_grade.omitted(events, subject)
+    return [cid for cid in spec_criteria_ids(spec_text) if cid not in omitted]
+
+
 def validate_output(output, bundle, criteria=None):
     """Return a named validation error before any verdict/hold is emitted."""
     data = bundle["bundle"] if bundle else {}

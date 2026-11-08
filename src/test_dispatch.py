@@ -231,7 +231,7 @@ import grader_packet
 _validate_grader_output = grader_packet.validate_output
 GRADER_CRITERIA = None
 
-def _validate_historical_grade(output, bundle):
+def _validate_historical_grade(output, bundle, criteria=None):
     return _validate_grader_output(output, bundle, criteria=GRADER_CRITERIA)
 
 for _chunk in range(1, 4):

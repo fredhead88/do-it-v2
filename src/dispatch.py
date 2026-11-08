@@ -1640,7 +1640,19 @@ def _main(a):
         if error:
             fail("structured_output violates coupled evidence: " + error)
     if a.role == "grader":
-        error = grader_packet.validate_output(out, g_bundle)
+        # Use the rendered criteria as the immutable selection snapshot: routes
+        # and even the spec revision can change while a grader is running.
+        start = "1. The acceptance criteria, verbatim from the spec, typed, each with its evidence obligation:\n"
+        end = "\n2. The output card's per-criterion rows. These are claims to test, not facts:"
+        _, found, shown = packet.partition(start)
+        shown, complete, _ = shown.partition(end)
+        try:
+            g_criteria = grader_packet.graded_criteria(
+                () if found and complete else g_events, a.subject,
+                shown if found and complete else g_spec_text)
+        except (ValueError, SystemExit):
+            g_criteria = []  # Keep the validator's fail-closed criteria error.
+        error = grader_packet.validate_output(out, g_bundle, criteria=g_criteria)
         if error:
             fail("structured_output violates grader evidence: " + error)
     if out.get("contamination"):
