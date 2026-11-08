@@ -834,6 +834,8 @@ def required_reason(e):
                            or (k == "listed" and isinstance(value, list)))
             elif t == "merge-gate-undetermined":
                 present = k in e
+            elif (t, k) in (("writes-granted", "tests"), ("build-timeout", "wip_commits")):
+                present = isinstance(e.get(k), list)
             elif t == "window-redcut" and k in ("dropped", "returned", "flakes", "residual"):
                 # Empty lists are measured dispositions, not missing evidence.
                 present = isinstance(e.get(k), list)
