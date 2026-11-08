@@ -45,7 +45,7 @@ PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a s
 
 from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency, escalation_required_reason, window_result_reason
 EMITS["suite-run"] = {"suite-daily"}
-EMITS["check-declared"] = {"spec-writer", "executor", "operator"}
+EMITS["check-declared"] = {"spec-writer", "executor", "operator", "check-backfill"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
 for _verdict in ("owed-met", "owed-failed"):
     EMITS[_verdict].update({"owed-verifier", "verifier"})

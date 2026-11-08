@@ -508,9 +508,9 @@ def cr_ac4():
 
 
 def cr_ac5():
-    assert fold.EMITS.get("check-declared") == {"spec-writer", "executor", "operator"}
+    assert fold.EMITS.get("check-declared") == {"spec-writer", "executor", "operator", "check-backfill"}
     declaration = cr_declaration(data_source="scratch", customer_data=False, profile="repo-venv")
-    for actor in ("spec-writer", "executor", "operator"):
+    for actor in ("spec-writer", "executor", "operator", "check-backfill"):
         assert fold.admits(declaration, actor) is None
     for actor in ("builder", "grader", "reviewer", "sweep", "alien"):
         assert fold.admits(declaration, actor) is not None
