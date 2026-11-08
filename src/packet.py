@@ -1015,10 +1015,10 @@ def _drop_owed_blocks(lines, owed):
 def p_grader(c):
     spec, card, v = c.spec_file(), c.card_file(), write_verify_script(c)
     body = spec.read_text()
-    # Standing rejections override owed, routed and ruled omissions until cleared.
     rejected = fold.standing_rejects(c.evs)
     owed = __import__('empty_grade').omitted(c.evs, c.a.subject)
-    crit = _drop_owed_blocks(criteria(body), owed)
+    graded = set(grader_packet.graded_criteria(c.evs, c.a.subject, body))
+    crit = _drop_owed_blocks(criteria(body), set(grader_packet.spec_criteria_ids(body)) - graded)
     if not _criterion_spans("\n".join(crit), allow_bullets=True):
         die(f"empty grader criteria for {c.a.subject}: all criteria routed or absent")
     rows = [l for l in card.read_text().splitlines() if AC_ROW.match(l)]

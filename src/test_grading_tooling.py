@@ -64,6 +64,136 @@ def verdict(ac="AC1", reason_code="tooling-defect", **extra):
     return {"ac": ac, "verdict": "cannot-assess", "reason": "fixture", "reason_code": reason_code, **extra}
 
 
+class GradedCriteriaTests(unittest.TestCase):
+    subject = "L-spec-9000"
+
+    def events(self):
+        def event(kind, cid, **fields):
+            return dict(type=kind, subject=self.subject, criterion=cid, **{"actor": "grader", **fields})
+        return [event("criterion-routed", "AC1", capability="git", to="reviewer"),
+                event("owed-ac", "AC2", actor="spec-writer"),
+                event("decision", "AC3", actor="operator", why="fixture ruling"),
+                event("criterion-routed", "AC4", capability="git", to="reviewer"),
+                event("rejected-criterion", "AC4")]
+
+    def signed(self, case, body):
+        import hashlib
+        raw = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(url="cli://graded-criteria/" + case, status=0,
+                             body_sha256=hashlib.sha256(raw).hexdigest(), body_excerpt=body)))
+
+    def render(self, root, text, events, *, as_text=False):
+        spec, card = root / "spec.md", root / "card.md"
+        spec.write_text(text)
+        card.write_text("verify exit 0\n")
+        events = [dict(type="spec-written", subject=self.subject, actor="spec-writer", path=str(spec)), *events]
+        with patch.object(fold, "read_events", return_value=events), \
+                patch.object(packet.Ctx, "spec_file", return_value=spec), \
+                patch.object(packet.Ctx, "card_file", return_value=card), \
+                patch.object(packet.Ctx, "worktree", return_value=str(root)), \
+                patch.object(packet.Ctx, "charter_id", return_value=None), \
+                patch.object(packet, "write_verify_script", return_value=None), \
+                patch.object(packet.models, "resolve", return_value={"backend": "codex"}):
+            ctx = packet.Ctx(argparse.Namespace(subject=self.subject, role="grader", charter=None, project="demo"))
+            rendered = packet.p_grader(ctx)
+        if as_text:
+            return "\n".join(rendered)
+        item2 = rendered.index("2. The output card's per-criterion rows. These are claims to test, not facts:")
+        return grader_packet.spec_criteria_ids("\n".join(rendered[1:item2]))
+
+    def test_packet_and_validator_agree(self):
+        text = "## Acceptance criteria\n" + "\n".join(
+            f"AC{i} [backend]: fixture {i}.\nreview_path: scratch" for i in range(1, 6))
+        events = self.events()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            cases = [("mixed", text, events, ["AC4", "AC5"])]
+            eleven = "## Acceptance criteria\n" + "\n".join(
+                f"AC{i} [backend]: fixture {i}.\nreview_path: scratch" for i in range(1, 12))
+            routed = [dict(type="criterion-routed", subject=self.subject, criterion=f"AC{i}",
+                           actor="grader", capability="git", to="reviewer") for i in range(1, 12)]
+            routed.append(dict(type="rejected-criterion", subject=self.subject, actor="grader", criterion="AC11"))
+            cases.append(("5662", eleven, routed, ["AC11"]))
+            for name, body, rows, expected in cases:
+                with self.subTest(case=name):
+                    selected = grader_packet.graded_criteria(rows, self.subject, body)
+                    shown = self.render(root, body, rows)
+                    error = grader_packet.validate_output(
+                        {"verdicts": [verdict(cid) for cid in shown]}, None, criteria=selected)
+                    self.assertEqual(selected, expected)
+                    self.assertEqual(shown, selected)
+                    self.assertIsNone(error)
+                    self.signed(name, dict(events=rows, packet_ids=shown, validator_ids=selected, error=error))
+            # Every criterion delegated still uses the existing mechanical path.
+            all_owed = [dict(type="owed-ac", subject=self.subject, actor="spec-writer", criterion=f"AC{i}")
+                        for i in range(1, 6)]
+            self.assertEqual(grader_packet.graded_criteria(all_owed, self.subject, text), [])
+            with self.assertRaisesRegex(SystemExit, "empty grader criteria"):
+                self.render(root, text, all_owed)
+
+    def test_no_weakening(self):
+        text = "## Acceptance criteria\n" + "\n".join(
+            f"AC{i} [backend]: fixture." for i in range(1, 6))
+        selected = grader_packet.graded_criteria(self.events(), self.subject, text)
+        for ids, expected in ((["AC4"], "verdicts: missing AC5 (1 of 2)"),
+                              (["AC4", "AC5", "AC1"], "verdicts: extra AC1"),
+                              (["AC4", "AC5", "AC4"], "verdicts: duplicate AC4")):
+            error = grader_packet.validate_output({"verdicts": [verdict(cid) for cid in ids]}, None, criteria=selected)
+            self.assertEqual(error, expected)
+            self.signed("refused", dict(output_ids=ids, validator_ids=selected, error=error))
+        full = grader_packet.graded_criteria([], self.subject, text)
+        self.assertEqual(full, [f"AC{i}" for i in range(1, 6)])
+        self.assertIsNone(grader_packet.validate_output({"verdicts": [verdict(cid) for cid in full]}, None, criteria=full))
+        self.assertEqual(grader_packet.validate_output({"verdicts": [verdict(cid) for cid in selected]}, None, criteria=full),
+                         "verdicts: missing AC1, AC2, AC3 (2 of 5)")
+        self.signed("full-spec", dict(validator_ids=full, accepted_ids=full))
+
+    def test_dispatch_keeps_packet_snapshot(self):
+        import contextlib
+        import io
+        import grading_env
+        import models
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / "content").mkdir()
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            text = "## Acceptance criteria\nAC4 [backend]: shown.\nreview_path: scratch\n"
+            rendered = self.render(root, text, [], as_text=True)
+            path = root / "packet.md"
+            path.write_text(rendered)
+            # Both the current ledger and spec already differ from the packet.
+            current = root / "content" / (self.subject + ".md")
+            current.write_text("## Acceptance criteria\nAC1 [backend]: newer revision.\n")
+            events = [dict(type="owed-ac", subject=self.subject, actor="spec-writer", criterion="AC4")]
+            out = dict(verdicts=[dict(ac="AC4", verdict="met", reason="fixture")], matches_intent="yes",
+                       card_ok="yes", checkers=[], could_not_run=False, contamination=False, declarations=[])
+            def backend(*args, **kwargs):
+                current.write_text("## Acceptance criteria\nAC9 [backend]: changed during run.\n")
+                return subprocess.CompletedProcess([], 0, json.dumps(dict(structured_output=out)))
+            with patch.dict(os.environ, DOIT_ROOT=str(root), DOIT_NO_POKE="1", DOIT_SEAT=""), \
+                    patch.multiple(dispatch, ROOT=root, EVENTS=root / "events", CONTENT=root / "content"), \
+                    patch.multiple(fold, ROOT=root, EVENTS=root / "events"), \
+                    patch.object(fold, "read_events", return_value=events), \
+                    patch.object(models, "resolve", return_value=dict(backend="codex", model="fixture", source="fixture")), \
+                    patch.object(dispatch, "ensure_room", return_value=True), \
+                    patch.object(grading_env, "required", return_value=[]), \
+                    patch.object(grading_env, "route", return_value={}), \
+                    patch.object(grader_packet, "gate", return_value=None), \
+                    patch.object(dispatch, "run_codex", side_effect=backend), \
+                    patch.object(grader_packet, "validate_output", wraps=grader_packet.validate_output) as validate, \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                args = argparse.Namespace(role="grader", subject=self.subject, packet=str(path), path=None,
+                    cwd=str(repo), charter=None, project="fixture", mcp_config=None, timeout=None, max_usd=None, seat=False)
+                dispatch.main(args)
+            self.assertEqual(validate.call_args.kwargs["criteria"], ["AC4"])
+            rows = [json.loads(line) for p in (root / "events").glob("*.jsonl") for line in p.read_text().splitlines()]
+            self.assertTrue(any(row["type"] == "verdict" for row in rows))
+            self.signed("dispatch-snapshot", dict(packet_ids=["AC4"], current_spec_ids=["AC9"],
+                        validator_ids=validate.call_args.kwargs["criteria"], verdict_emitted=True))
+
+
 class GradingToolingTests(unittest.TestCase):
     def test_ac1_criteria_full_block(self):
         with tempfile.TemporaryDirectory() as temporary:
