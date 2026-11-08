@@ -178,43 +178,47 @@ class RelayRestartTests(unittest.TestCase):
 
     def test_2045_targeted_context_restart(self):
         end = {"type": "planner-ended", "subject": "L-charter-9001", "planner": "L-planner-9001",
-               "reason": "ctx", "ts": self.now.isoformat()}
+               "reason": "ctx", "ts": (self.now - datetime.timedelta(minutes=2)).isoformat()}
         source = fold.EVENTS / (end["planner"] + ".jsonl")
         source.write_text(json.dumps(end) + "\n")
-        with patch.object(up, "default_launcher") as launcher, \
-             patch.object(up, "install"), patch.object(up.launch, "model_for", return_value=None):
-            self.assertTrue(up.restart_pane("L-planner-9001"))
+        def wrapper(argv):
+            # The writer is the real wrapper, never restart_pane's admission path.
+            self.assertEqual(argv[-6:], ["planner-run",end["subject"],"--mode","ctx-restart","--attempt","1"])
+            env = {**os.environ, "HOME": str(self.root / "home"), "DOIT_ROOT": str(self.root),
+                   "PATH": str(self.root / "bin") + ":/usr/bin:/bin",
+                   "DOIT_SCRATCH": str(self.root.parent / (self.root.name + "-scratch"))}
+            (self.root / "home").mkdir(exist_ok=True)
+            result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        with patch.object(up, "planner_launcher", side_effect=wrapper) as launcher, \
+             patch.object(up, "planner_alive", return_value=False):
+            self.assertTrue(up.restart_pane(end["planner"]))
             launcher.assert_called_once()
-            argv = launcher.call_args.args[0]
-            started = [r for file in fold.EVENTS.glob("*.jsonl")
-                       for line in file.read_text().splitlines()
-                       if (r := json.loads(line))["type"] == "planner-started"]
-            self.assertEqual(len(started), 1)
-            self.assertEqual(started[0]["subject"], end["subject"])
-            self.assertEqual(started[0]["type"], "planner-started")
-            self.assertNotEqual(started[0]["planner"], end["planner"])
-            self.assertIn("DOIT_SUPERVISED=1", argv)
-            self.assertIn("DOIT_LEDGER_FILE=" + started[0]["planner"] + ".jsonl", argv)
-            self.assertEqual(argv[-1], end["subject"])
-            self.assertIn("--agent", argv)
-        for events, name in (([], end["planner"]), ([end], "L-relay-9001"),
-                             ([{**end, "reason": "exit-0"}], end["planner"]),
-                             ([end, {"type": "planner-started", "subject": end["subject"],
-                                     "ts": self.now.isoformat()}], end["planner"])):
-            source.write_text("".join(json.dumps(e) + "\n" for e in events))
-            with patch.object(up, "default_launcher") as launcher:
+        starts = [r for file in fold.EVENTS.glob("*.jsonl") for line in file.read_text().splitlines()
+                  if (r := json.loads(line))["type"] == "planner-started"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0]["subject"],end["subject"])
+        self.assertGreater(starts[0]["wrapper_pid"],0)
+        self.assertNotEqual(starts[0]["planner"],end["planner"])
+        for file in fold.EVENTS.glob("L-planner-*.jsonl"):
+            if file != source:
+                file.unlink()
+        for events, name in (([],end["planner"]),([end],"L-relay-9001"),
+                             ([{**end,"reason":"exit-0"}],end["planner"]),
+                             ([end,{"type":"planner-started","subject":end["subject"],
+                                    "ts":self.now.isoformat()}],end["planner"])):
+            source.write_text("".join(json.dumps(e)+"\n" for e in events))
+            with patch.object(up,"launch_planner") as launcher:
                 self.assertFalse(up.restart_pane(name))
                 launcher.assert_not_called()
-        source.write_text(json.dumps(end) + "\n")
-        with patch.object(up, "install"), \
-             patch.object(up.launch, "model_for", return_value=None), \
-             patch.object(up, "default_launcher", side_effect=OSError("tmux unavailable")):
-            with self.assertRaises(OSError):
+        source.write_text(json.dumps(end)+"\n")
+        with patch.object(up,"launch_planner",return_value="undetermined"):
+            with self.assertRaises(RuntimeError):
                 up.restart_pane(end["planner"])
-        rows = [json.loads(line) for file in fold.EVENTS.glob("*.jsonl")
-                for line in file.read_text().splitlines()]
-        self.assertEqual([r["reason"] for r in rows if r.get("reason") == "restart-launch-failed"],
-                         ["restart-launch-failed"])
+        with patch.object(up,"launch_planner",return_value="started"), \
+             patch.object(up,"RESTART_CONFIRM_SECONDS",0):
+            self.assertIsNone(up.restart_pane(end["planner"]))
+        self.assertEqual(len(list(fold.EVENTS.glob("L-planner-*.jsonl"))),1)
 
     def test_tick_records_each_restart_result(self):
         with ExitStack() as stack:

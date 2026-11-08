@@ -296,6 +296,15 @@ ok(not out['restarted'] and out['skipped'] == ['L-planner-9002'],
    '2045 AC3: unavailable restart is an explicit skip')
 ok(any(e.get('reason') == 'no-restart-entry' for e in fold.read_events(use_cache=False)),
    '2045 AC3: false targeted restart is recorded')
+# Unconfirmed admission and unknown ownership remain candidates on the next pass.
+for outcome, expected_reason in ((None, 'restart-unconfirmed'), (OSError('synthetic'), 'restart-undetermined')):
+    args = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
+    with patch('up.restart_pane', **args):
+        out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
+    ok(not out['restarted'] and out['skipped'], '2167: only confirmed starts resume')
+    rows = fold.read_events(use_cache=False)
+    ok(any(e.get('reason') == expected_reason for e in rows), '2167: distinct retry reason')
+    ok(bool(pane_resume.ctx_ended_without_successor([end, *rows], NOW)), '2167: skipped remains a candidate')
 with patch('up.restart_pane', return_value=True) as restart:
     out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
     restart.assert_called_once_with('L-planner-9002')

@@ -14,7 +14,8 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 would helpfully break.
 """
 import ledger_files
-import fcntl, importlib, json, math, os, pathlib, subprocess, sys, time
+import fcntl, importlib, json, math, os, pathlib, re, shlex, subprocess, sys, time
+from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -285,7 +286,37 @@ def _ended(ledger):
     return False
 
 
-def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=None):
+PLANNER_OCCUPIED = "planner-occupied"
+
+
+def _planner_lock():
+    """Claim the common lifetime lock; only this parent retains its descriptor."""
+    fd = os.open(fold.ROOT / "planner.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.set_inheritable(fd, False)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=None,
+           *, wrapper_owned=False):
+    fd = _planner_lock()
+    if fd is None:
+        return PLANNER_OCCUPIED
+    try:
+        return _run_planner(subject, mode, attempt, prompt, spawn_ids, started_sha,
+                            wrapper_owned=wrapper_owned)
+    finally:
+        os.close(fd)
+
+
+def _run_planner(subject, mode, attempt, prompt, spawn_ids, started_sha, *, wrapper_owned=False):
     """Start one pane and wait for it. The start row lands in the CHILD's own file
     before the child exists (L-adr-0027) — a pane that dies in its first second has
     still been recorded as started, which is the whole of planner_attempts' input.
@@ -298,23 +329,35 @@ def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=No
     reaches this, so `started_sha` is current at the moment this row lands."""
     ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
     base, ids = {"spawn": ledger.stem}, ({"spawn_ids": spawn_ids} if spawn_ids else {})
-    dispatch.emit(ledger, base, "planner-started", subject=subject, planner=ledger.stem,
-                  attempt=attempt, mode=mode, code_sha=started_sha or "undetermined", **ids)
-    name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
-    mp = models.load(fold.ROOT / "models.toml")
-    model = launch.model_for("planner")
-    model_configured = models.resolve("planner", mp=mp).get("model") if mp is not None else None
-    cmd = pane_cmd(prompt, name=name, model=model)
-    print(f"# planner pane: {ledger.stem} · {mode} · {subject} · attempt {attempt}")
-    env = launch.child_env("planner", base=_child_env(ledger, supervised=True))
-    proc = subprocess.Popen(cmd, env=env)
-    launch.record("planner", ledger.stem, proc.pid, model or "unpinned",
-                  str(dispatch.AGENTS / "planner.md"), model_configured=model_configured)
-    rc = proc.wait()
-    if not _ended(ledger):
+    refusal = dispatch.emit(ledger, base, "planner-started", strict=True, subject=subject, planner=ledger.stem,
+                  attempt=attempt, mode=mode, code_sha=started_sha or "undetermined",
+                  **({"wrapper_pid": os.getpid()} if wrapper_owned else {}), **ids)
+    if refusal:
+        raise ValueError(refusal)
+    try:
+        name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
+        mp = models.load(fold.ROOT / "models.toml")
+        model = launch.model_for("planner")
+        model_configured = models.resolve("planner", mp=mp).get("model") if mp is not None else None
+        cmd = pane_cmd(prompt, name=name, model=model)
+        print(f"# planner pane: {ledger.stem} · {mode} · {subject} · attempt {attempt}")
+        env = launch.child_env("planner", base={**_child_env(ledger, supervised=True),
+                                               "DOIT_ROOT": str(fold.ROOT)})
+        proc = subprocess.Popen(cmd, env=env, cwd=str(HERE.parent))
+    except Exception as exc:
         dispatch.emit(ledger, base, "planner-ended", subject=subject, planner=ledger.stem,
-                      mode=mode, reason=f"exit-{rc}", **ids)
-    launch.ended(ledger.stem, rc)
+                      mode=mode, reason="launch-failed", failure_class=type(exc).__name__, **ids)
+        raise
+    try:
+        launch.record("planner", ledger.stem, proc.pid, model or "unpinned",
+                      str(dispatch.AGENTS / "planner.md"), model_configured=model_configured)
+    finally:
+        # Even a record failure cannot abandon a running child or release its lock early.
+        rc = proc.wait()
+        if not _ended(ledger):
+            dispatch.emit(ledger, base, "planner-ended", subject=subject, planner=ledger.stem,
+                          mode=mode, reason=f"exit-{rc}", **ids)
+        launch.ended(ledger.stem, rc)
 
 
 def ctx_handover(events, charter):
@@ -377,9 +420,9 @@ def _charter_pass(state, events, charter, started_sha):
     maybe_reexec("planner", started_sha)  # R2 point 5(b): immediately before THIS charter's pane
     handover = ctx_handover(events, charter)
     prompt = f"{charter}\nRead the handover file {handover} before continuing." if handover else charter
-    _start(state, subject=charter, mode="charter",
+    result = _start(state, subject=charter, mode="charter",
            attempt=int(att.get("attempts") or 0) + 1, prompt=prompt, started_sha=started_sha)
-    return True
+    return PLANNER_OCCUPIED if result == PLANNER_OCCUPIED else True
 
 
 def _hold(state, lines, *, relay_only=False):
@@ -418,7 +461,12 @@ def _cycle(state, started_sha):
     ready = list(plan[0])
     if ready:
         for charter in ready:
-            if not _charter_pass(state, events, charter, started_sha):
+            result = _charter_pass(state, events, charter, started_sha)
+            if result == PLANNER_OCCUPIED:
+                # Unlike a dry-queue hold, ledger writes cannot shorten this wait.
+                _SLEEP(_interval())
+                return
+            if not result:
                 return _degrade()
         return
     ok, lines = _guarded("waiting_lines", events, fold.ROOT)
@@ -464,52 +512,128 @@ def default_launcher(argv, *, runner=None):
     runner(["tmux", "new-window", "-d", "-t", session, *argv], check=True, capture_output=True)
 
 
-def restart_pane(pane_name: str) -> bool:
-    """Issue one targeted Planner launch, retaining its charter and handover."""
-    if panes.ledger_role(pane_name) != "planner":
-        return False
-    ledger_files.assert_readable(fold.EVENTS)
+def _planner_args(charter, mode, attempt):
+    if not isinstance(charter, str) or not re.fullmatch(r"L-charter-[0-9]+", charter):
+        raise ValueError("invalid charter")
+    if mode not in ("charter", "ctx-restart"):
+        raise ValueError("invalid Planner mode")
+    if type(attempt) is not int or attempt <= 0:
+        raise ValueError("attempt must be a positive integer")
+
+
+def planner_alive() -> bool | None:
+    """Read both ownership and pane identity; uncertainty never admits a launch."""
     try:
-        text = ledger_files.read_text(fold.EVENTS, f"{pane_name}.jsonl")
-    except FileNotFoundError:
-        return False
-    events = [json.loads(line) for line in text.splitlines() if line.strip()]
-    end = next((e for e in reversed(events) if e.get("type") == "planner-ended"
-                and (e.get("planner") or e.get("spawn") or
-                     pane_name) == pane_name), None)
-    if not end or end.get("reason") not in ("ctx", "held") or not end.get("subject"):
-        return False
-    ended_at = panes._ts(end.get("ts"))
-    if ended_at is None or any(e.get("type") == "planner-started" and e.get("subject") == end["subject"]
-                               and (panes._ts(e.get("ts")) is None or panes._ts(e["ts"]) >= ended_at)
-                               for e in events):
-        return False
-    install(dispatch.AGENTS / "planner.md")
-    ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
-    prompt = end["subject"]
-    handover = ctx_handover(events, prompt)
-    if handover:
-        prompt += f"\nResume from the handover: {handover}"
-    # Pass only launcher settings as argv; ambient credentials stay out of argv.
-    inherited = _child_env(ledger, supervised=True)
-    clean = launch.child_env("planner", base={})
-    settings = {k: inherited[k] for k in ("PATH", "DOIT_LEDGER_FILE", "DOIT_SUPERVISED")}
-    settings.update(clean, DOIT_ROOT=str(fold.ROOT))
-    removed = [k for k in os.environ if k not in launch.child_env("planner")]
-    argv = ["env", *(x for k in removed for x in ("-u", k)),
-            *(f"{k}={v}" for k, v in settings.items()),
-            *pane_cmd(prompt, name=ledger.stem, model=launch.model_for("planner"))]
-    refusal = dispatch.emit(ledger, {"spawn": ledger.stem}, "planner-started", strict=True,
-                            subject=end["subject"], planner=ledger.stem, mode="ctx-restart", attempt=1)
-    if refusal:
-        raise ValueError(refusal)
+        ledger_files._accessible(fold.ROOT, directory=True)
+        lock = fold.ROOT / "planner.lock"
+        held = False
+        try:
+            ledger_files._accessible(lock)
+            fd = os.open(lock, os.O_RDONLY)
+        except FileNotFoundError:
+            fd = None
+        if fd is not None:
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    held = True
+            finally:
+                os.close(fd)
+        directory = panes.SESSIONS
+        # A not-yet-created sessions directory under a readable HOME has no panes.
+        try:
+            ledger_files._accessible(directory, directory=True)
+            files = list(directory.iterdir())
+        except FileNotFoundError:
+            ledger_files._accessible(pathlib.Path(os.environ["HOME"]), directory=True)
+            files = []
+        live = False
+        for path in files:
+            if path.suffix != ".json" or not path.stem.isdigit():
+                continue
+            ledger_files._accessible(path)
+            meta = json.loads(path.read_text())
+            if not isinstance(meta, dict) or not isinstance(meta.get("name"), str) or not meta["name"]:
+                raise ValueError("pane identity unreadable")
+            if panes._is_live(int(path.stem), meta) and panes.ledger_role(meta["name"]) == "planner":
+                live = True
+        return held or live
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def planner_launcher(argv, *, runner=None):
+    """Only Planner windows get the trusted checkout cwd; quote the tmux shell boundary."""
+    runner = runner or subprocess.run
+    session = "do-it-relay"
+    present = runner(["tmux", "has-session", "-t", session], capture_output=True)
+    if present.returncode == 1:
+        runner(["tmux", "new-session", "-d", "-s", session, "-c", str(HERE.parent)],
+               check=True, capture_output=True)
+    elif present.returncode != 0:
+        raise OSError("tmux session state undetermined")
+    runner(["tmux", "new-window", "-d", "-t", session, "-c", str(HERE.parent), shlex.join(argv)],
+           check=True, capture_output=True)
+
+
+def launch_planner(charter, mode, attempt, *, launcher=None, now=None):
+    """Admit one wrapper using an exclusive, bounded start window."""
     try:
-        default_launcher(argv)
+        _planner_args(charter, mode, attempt)
+        alive = planner_alive()
+        if alive is True:
+            return "alive"
+        if alive is None:
+            return "undetermined"
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            return "undetermined"
+        window = float(os.environ.get("DOIT_TICK_MIN", "5")) * 60
+        stamp = now.timestamp()
+        if not math.isfinite(window) or window <= 0 or not math.isfinite(stamp):
+            return "undetermined"
+        marker = fold.ROOT / "planner.starting"
+        for _ in range(2):
+            try:
+                fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                # Serialize stale recovery on the old inode, then verify it is still current.
+                ledger_files._accessible(marker)
+                with marker.open("rb") as stream:
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return "starting"
+                    stat = os.fstat(stream.fileno())
+                    if (stat.st_dev, stat.st_ino) != (marker.stat().st_dev, marker.stat().st_ino):
+                        continue
+                    age = stamp - stat.st_mtime
+                    if not math.isfinite(age) or age < 0:
+                        return "undetermined"
+                    if age <= window:
+                        return "starting"
+                    marker.unlink()
+            else:
+                try:
+                    os.utime(fd, (stamp, stamp))
+                finally:
+                    os.close(fd)
+                (launcher or planner_launcher)(["env", f"DOIT_ROOT={fold.ROOT}", str(DOIT),
+                    "planner-run", charter, "--mode", mode, "--attempt", str(attempt)])
+                return "started"
+        return "starting"
     except Exception:
-        dispatch.emit(ledger, {}, "planner-ended", subject=end["subject"], planner=ledger.stem,
-                      reason="restart-launch-failed")
-        raise
-    return True
+        return "undetermined"
+
+
+RESTART_CONFIRM_SECONDS = 5.0
+
+
+def restart_pane(pane_name: str) -> bool | None:
+    """Confirm a targeted restart through the wrapper's lifecycle reader."""
+    import planner_run
+    return planner_run.restart_pane(pane_name)
 
 
 def ensure_relay(events, now, *, launcher=None):
