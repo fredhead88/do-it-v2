@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Callable
 
 import fold
 import merge_gate
@@ -28,6 +29,8 @@ DOIT = Path(__file__).resolve().parent.parent / "doit"
 HEX = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 TEST_TOKEN = re.compile(r"(?<![\w/])(?:[\w./-]+/)?test_[\w.-]+\.py(?:::[\w.\[\]/:-]+)?")
 SAFE_TEST = re.compile(r"(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_.-]+\.py(?:::[A-Za-z0-9_.\[\]/:-]+)?\Z")
+after_run: list[Callable[[str, dict, dict, Path | None], None]] = []
+_DEFERRED = "_defer_append"
 
 
 def _process(argv, *, timeout=30, **kwargs):
@@ -298,7 +301,7 @@ def _text_identity(root, event):
             hashlib.sha256(source.read_bytes()).hexdigest())
 
 
-def run(spec_id, *, root=None, now=None, events=None):
+def run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_identity=None):
     root = Path(root) if root is not None else fold.ROOT
     body = dict(spec=spec_id, findings=[], red_on_master=[], undetermined=[])
     try:
@@ -352,6 +355,23 @@ def run(spec_id, *, root=None, now=None, events=None):
                     check()
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     _reason(body, number, str(exc))
+            # Validate the original schema before extensions, while the checkout
+            # is alive. Hook-added fields belong to the consuming units.
+            _validate(body)
+            for hook in hooks or ():
+                try:
+                    identity = _text_identity(root, written)
+                except OSError:
+                    identity = None
+                if identity is None or identity != expected_identity:
+                    body[_DEFERRED] = True
+                    break
+                try:
+                    hook(spec_id, body, written, checkout)
+                except Exception as exc:
+                    name = getattr(hook, "__qualname__", type(hook).__qualname__)
+                    body["undetermined"].append(f"hook {name}: {type(exc).__name__}")
+            return body
     except (OSError, ValueError, StopIteration, scratch.ScratchRootError) as exc:
         body["undetermined"].append("spec: " + (str(exc) or "spec file unavailable"))
     return _validate(body)
@@ -417,12 +437,14 @@ def tick(*, root=None, now=None):
             if identities[sid] is None:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
-            body = run(sid, root=root, now=now, events=events)
+            body = run(sid, root=root, now=now, events=events,
+                       hooks=after_run, expected_identity=identities[sid])
+            deferred = body.pop(_DEFERRED, False)
             try:
                 unchanged = _text_identity(root, written[sid]) == identities[sid]
             except OSError:
                 unchanged = False
-            if not unchanged:
+            if deferred or not unchanged:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
             stamp = datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00"))
