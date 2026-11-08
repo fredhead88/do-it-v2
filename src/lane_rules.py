@@ -205,11 +205,25 @@ def ladder(events, row, now):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--json', action='store_true')
-    parser.add_argument('--table')
-    args = parser.parse_args()
-    events = fold.read_events()
+    migration_order_mode = sys.argv[1:2] == ['--migration-order']
+    if migration_order_mode:
+        # Corrections and project ownership must be resolved before scoping.
+        fold.PROJECT = None
+    else:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('--json', action='store_true')
+        parser.add_argument('--table')
+        args = parser.parse_args()
+    try:
+        events = fold.read_events()
+    except Exception:
+        if not migration_order_mode:
+            raise
+        print('migration-order: undetermined project evidence', file=sys.stderr)
+        return 2
+    if migration_order_mode:
+        import migration_order
+        return migration_order.cli(sys.argv[2:], events)
     specs = fold.fold(events)[0]
     rows = due(events, specs, datetime.now(timezone.utc), table=args.table)
     try:
@@ -224,4 +238,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

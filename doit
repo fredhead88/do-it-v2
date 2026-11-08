@@ -7,6 +7,7 @@ case "${1:-board}" in
   gate)    shift; exec python3 "$SRC/merge_gate.py" "$@" ;;
   handin-check) shift; exec python3 "$SRC/handin_check.py" "$@" ;;
   queue|window-run) exec python3 "$SRC/merge_queue.py" "$@" ;;
+  migration-order) shift; exec python3 "$SRC/lane_rules.py" --migration-order "$@" ;;
   precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
@@ -234,6 +235,8 @@ doit — a ledger that derives state, and the guards that read it
   doit gate <branch> [main] [--spec ID]   merge guard. exit 1 = DO NOT MERGE
   doit handin-check <subject> --cwd <worktree>   early secret-scan of committed HEAD (exit 0/1/2)
   doit guards-live --project <p>         measure 24 hours of green master safety guards (read-only)
+  doit migration-order --project <p> --specs A,B,C
+                                           order ready specs by prerequisites and chain weight (read-only)
   doit gate-window <id> --project albert-scott [--specs A,B,C]
                                            verify a merge window's candidate tip before master moves (exit 0/1/2/3/4)
   doit throughput [--hours N] [--json]    read-only merge queue, wait, rate and verification metrics
