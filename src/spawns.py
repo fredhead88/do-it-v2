@@ -6,6 +6,8 @@ import os
 import re
 import socket
 import sys
+from contextvars import ContextVar
+from functools import wraps
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -20,6 +22,75 @@ CONFLICTS = {"builder": {"builder", "grader", "reviewer"},
              "charter-reviewer": {"charter-reviewer"}}
 
 
+
+_active_view = ContextVar("dispatch_ledger_view", default=None)
+
+class LedgerView(list):
+    """One invocation's events, with a single lazy post-backend replacement."""
+
+    def __init__(self, events=None):
+        super().__init__([] if events is None else events)
+        self.loaded = events is not None
+        self.after_backend = False
+        self.refreshed = False
+
+    def current(self):
+        import fold
+        if not self.loaded or self.after_backend and not self.refreshed:
+            events = fold.read_events()
+            self[:] = events
+            self.loaded = True
+            if self.after_backend:
+                self.refreshed = True
+        return self
+
+    def committed(self, event):
+        import fold
+        # Reuse the reader's normalization and same-ts merge. Its source order
+        # is recovered from physical file:line identities, never write timing.
+        # Supplied predicate fixtures can omit storage provenance. Retain them
+        # unchanged without inventing file identities for the reader to sort.
+        supplied = [e for e in self if "_src" not in e]
+        stored = [e for e in self if "_src" in e]
+        self[:] = supplied + fold.finish_events([*stored, event])
+
+    def __enter__(self):
+        self._token = _active_view.set(self)
+        return self
+
+    def __exit__(self, *exc):
+        _active_view.reset(self._token)
+
+def dispatch_view(events):
+    return LedgerView(events)
+
+def current_events(events=None):
+    """Optional supplied input, invocation view, or standalone reader."""
+    if events is not None:
+        return events
+    view = _active_view.get()
+    if view is not None:
+        return view.current()
+    import fold
+    return fold.read_events()
+
+def with_dispatch_view(fn):
+    @wraps(fn)
+    def invoke(*args, **kwargs):
+        if _active_view.get() is not None:
+            return fn(*args, **kwargs)
+        with dispatch_view(None):
+            return fn(*args, **kwargs)
+    return invoke
+
+def coverage_changes(checkers, *, events=None):
+    """A checker whose coverage note differs from the last recorded one marks its prior passes stale."""
+    import fold
+    last = {e.get("checker"): e.get("coverage_note") for e in current_events(events)
+            if e.get("type") == "checker-coverage-change"}
+    return [("checker-coverage-change", dict(checker=c["id"], version=c["version"],
+                                             coverage_note=c["coverage_note"]))
+            for c in checkers if last.get(c["id"]) != c["coverage_note"]]
 
 def resolve_cwd(value, root):
     """Planner paths prefer the ledger root; all backends receive an absolute cwd."""
@@ -190,14 +261,14 @@ def norm_ac(s):
     return m.group(1).upper() if m else str(s).strip().casefold()
 
 
-def clear_events(vs, out, subject, confirmed, spawn):
+def clear_events(vs, out, subject, confirmed, spawn, *, events=None):
     """The `criterion-cleared` events a grader's Output earns (L-spec-0755/R3(c)): every
     standing rejection whose normalised id matches a `met` verdict or a `cleared` entry
     (or any, on a confirmed verdict), the standing string being the event's `criterion`.
     COMMIT-SHAPE is never cleared by a grader. A `cleared` entry whose verdict in the
     same Output is not `met` raises ClearedNotMet (the wrapper fails the spawn)."""
     import fold
-    specs, *_ = fold.fold(fold.read_events())
+    specs, *_ = fold.fold(__import__("dispatch").current_events(events))
     standing = fold.standing_rejects(specs.get(subject, {"evs": []})["evs"])
     met = {norm_ac(v["ac"]): v["reason"] for v in vs if v["verdict"] == "met"}
     not_met = {norm_ac(v["ac"]) for v in vs if v["verdict"] != "met"}
