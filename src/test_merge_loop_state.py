@@ -74,6 +74,12 @@ class Fixture(unittest.TestCase):
 
 
 class LoopReadTests(Fixture):
+    def test_missing_repo_history_never_starts_subprocess(self):
+        paths = m._paths(self.root, None)
+        self.assertFalse(paths.repo.is_dir())
+        with patch.object(m.subprocess, 'run', side_effect=AssertionError('subprocess must not run')):
+            self.assertIsNone(m._history(paths, NOW))
+
     def test_queue_grammar_order_and_read_time(self):
         self.batch('002.batch', '2099 2018')
         self.batch('001.batch', '2017 2099')
