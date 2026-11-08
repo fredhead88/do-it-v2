@@ -73,6 +73,42 @@ class CoupledTests(unittest.TestCase):
                           "body_sha256": hashlib.sha256(result.stdout.encode()).hexdigest(),
                           "body_excerpt": result.stdout}))
 
+    def test_expanded_writes_accepts_46_and_100_paths(self):
+        for count in (46, 100):
+            with self.subTest(count=count):
+                for i in range(count):
+                    self.write(f"queries/query_{i}.sql", "SELECT 1;\n")
+                self.commit()
+                rows = coupled_tests.scan("Writes:\n- queries/**\n", self.repo)
+                self.assertEqual(rows, [])
+                self.report("2219/AC1", subprocess.CompletedProcess(
+                    [], 0, json.dumps({"writes_paths": count, "truncated": False})))
+
+    def test_expanded_writes_over_cap_names_count_and_limit(self):
+        for i in range(101):
+            self.write(f"queries/query_{i}.sql", "SELECT 1;\n")
+        self.commit()
+        with self.assertRaises(coupled_tests.Truncated) as raised:
+            coupled_tests.scan("Writes:\n- queries/**\n", self.repo)
+        message = str(raised.exception)
+        self.assertIn("101", message)
+        self.assertIn("MAX_WRITES 100", message)
+        self.assertTrue(message)
+        self.assertNotEqual(message, "readiness undetermined")
+        self.report("2219/AC2", subprocess.CompletedProcess([], 0, message))
+
+    def test_raw_writes_over_cap_names_count_and_limit(self):
+        text = "Writes:\n" + "".join(f"- queries/query_{i}.sql\n" for i in range(101))
+        with self.assertRaisesRegex(coupled_tests.Truncated,
+                                    "^101 Writes paths > MAX_WRITES 100$"):
+            coupled_tests.scan(text, self.repo)
+
+    def test_reference_deadline_names_time_limit(self):
+        with mock.patch.object(coupled_tests.time, "monotonic", side_effect=[100, 160]):
+            with self.assertRaisesRegex(coupled_tests.Truncated,
+                                        "^reference scan exceeded 60s$"):
+                coupled_tests.scan("Writes:\n- pkg/foo.py\n", self.repo)
+
     def test_ac1_grants_and_boundaries(self):
         named = "named\tpkg/foo.py\tpkg/tests/test_foo.py"
         referencing = "referencing\tpkg/foo.py\ttests/test_bar.py"
@@ -121,7 +157,7 @@ class CoupledTests(unittest.TestCase):
             ("no-writes", {"text": "# No grant\n"}),
             ("prose-writes", {"text": "Writes: see the table below\n"}),
             ("nongit", {"repo": nongit}),
-            ("too-many", {"writes": "\n".join(f"pkg/f{i}.py" for i in range(41))}),
+            ("too-many", {"writes": "\n".join(f"pkg/f{i}.py" for i in range(101))}),
             ("bad-rev", {"extra": ("--rev", "missing-revision")}),
         ]
         for label, kwargs in cases:
@@ -228,7 +264,7 @@ class CoupledTests(unittest.TestCase):
             'referencing\tpkg/foo.py\ttests/test_bar.py'])
         result = self.run_tool("\n".join(f"pkg/f{i}.py" for i in range(40)))
         self.assertEqual(result.returncode, 0, result.stderr)
-        for i in range(41):
+        for i in range(101):
             self.write(f"wide/f{i}.py", "# fixture\n")
         self.commit()
         result = self.run_tool("wide/")

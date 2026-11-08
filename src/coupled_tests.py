@@ -17,7 +17,7 @@ import merge_gate
 
 
 TEST = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*\.py$|\.test\.tsx?$")
-MAX_WRITES = 40
+MAX_WRITES = 100
 GREP_SECONDS = 60
 MAX_FILES = 30
 TOTAL_SECONDS = 1200
@@ -293,14 +293,14 @@ def writes_paths(grant, tree):
             paths.add(entry)
     paths = sorted(p for p in paths if not TEST.search(p))
     if len(paths) > MAX_WRITES:
-        raise Truncated
+        raise Truncated(f"{len(paths)} Writes paths > MAX_WRITES {MAX_WRITES}")
     return paths
 
 
 def scan(text, repo, rev=None):
     grant = merge_gate.grant_from_text(text)
     if len(grant) > MAX_WRITES:
-        raise Truncated
+        raise Truncated(f"{len(grant)} Writes paths > MAX_WRITES {MAX_WRITES}")
     base = re.search(r"(?m)^base_sha:[ \t]*['\"]?([^\s'\"#]+)", text)
     rev = rev or (base.group(1) if base else "HEAD")
     # Resolve once: both tree and grep see the same committed snapshot.
@@ -313,7 +313,7 @@ def scan(text, repo, rev=None):
         hits = {p for p in tests if named(source, p)}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise Truncated
+            raise Truncated(f"reference scan exceeded {GREP_SECONDS}s")
         references = {row['test'] for row in reference_matches(
             [source], tests, repo, rev, tree, timeout=remaining)}
         for tier, found in (("named", hits), ("referencing", (references & tests) - hits)):
