@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only merge-stage metrics from already-admitted ledger events."""
+"""Read-only merge and build metrics from already-admitted ledger events."""
 import ledger_files
 import argparse
 import importlib
@@ -12,6 +12,9 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 
 OPEN_WINDOW_MAX_H = 12
+REPEAT_CAUSES = ('merge-gate', 'rejected-criterion', 'conflict', 'stale-branch',
+                 'launch-failure', 'other', 'unrecorded')
+MECHANICAL_REASONS = ('bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress', 'wave-order')
 
 
 def safe_text(value):
@@ -31,6 +34,59 @@ def _same_base(base, sha):
     return len(shorter) >= 7 and longer.startswith(shorter)
 
 
+def _build_metrics(ordered, start, now):
+    """Use the admitted chronology; preserve the legacy clean-history denominator."""
+    failures, cpu = {}, {}
+    day = start.date()
+    while day <= now.date():
+        failures[day.isoformat()] = dict.fromkeys(MECHANICAL_REASONS, 0)
+        cpu[day.isoformat()] = 0
+        day += timedelta(days=1)
+    cutoffs, builds, sendbacks = {}, {}, set()
+    for stamp, event in ordered:
+        subject = event.get('subject')
+        kind = event.get('type')
+        if (start < stamp <= now and kind == 'merge-gate-rework'
+                and event.get('actor') in ('executor', 'tick')):
+            sha = event.get('branch_sha')
+            sendbacks.add((str(subject), sha if isinstance(sha, str) and sha else None))
+        if not isinstance(subject, str) or not subject.startswith('L-spec-'):
+            continue
+        if kind == 'build-started' and event.get('actor') == 'builder' and event.get('continuation') is not True:
+            builds.setdefault(subject, []).append((stamp, event))
+        if not start < stamp <= now:
+            continue
+        day = stamp.date().isoformat()
+        if kind == 'shipped':
+            cutoffs[subject] = stamp
+        elif kind == 'spawn-failed':
+            reason = str(event.get('reason') or '')
+            for prefix in MECHANICAL_REASONS:
+                if reason.startswith(prefix):
+                    failures[day][prefix] += 1
+                    break
+        elif kind == 'handin-checked':
+            value = event.get('cpu_s')
+            if type(value) in (int, float) and value >= 0 and math.isfinite(value):
+                cpu[day] += value
+    counts, causes = [], dict.fromkeys(REPEAT_CAUSES, 0)
+    for subject, cutoff in cutoffs.items():
+        rounds = [event for stamp, event in builds.get(subject, ()) if stamp <= cutoff]
+        counts.append(len(rounds))
+        for event in rounds[1:]:
+            cause = event.get('cause')
+            cause = cause if isinstance(cause, str) and cause in causes else 'unrecorded'
+            causes[cause] += 1
+    merged, total, repeats = len(counts), sum(counts), sum(causes.values())
+    return dict(repeat_rate=repeats/total if total else None,
+                repeats_by_cause={key: dict(count=value, share=value/repeats if repeats else None)
+                                  for key, value in causes.items()},
+                one_build_share=counts.count(1)/merged if merged else None,
+                median_builds=statistics.median(counts) if counts else None,
+                gate_sendbacks_per_merged=len(sendbacks)/merged if merged else None,
+                failed_starts_by_reason_per_day=failures, handin_cpu_s_per_day=cpu)
+
+
 def summary(events, now, hours=24):
     """Compute the SD7 dict without reading files, importing fold, or reading a clock.
 
@@ -45,6 +101,7 @@ def summary(events, now, hours=24):
                   busy_hours=0, shipped=0, stale_merges=None, unproven_merges=0,
                   minutes_per_spec=None, selfhosted_minutes_per_spec=None, reason='')
     if not events:
+        result.update(_build_metrics([], start, now))
         result['reason'] = 'no events'
         return result
     ordered, invalid = [], 0
@@ -57,6 +114,7 @@ def summary(events, now, hours=24):
         if t <= now:
             ordered.append((t, e))
     ordered.sort(key=lambda item: item[0])  # Stable for equal parsed timestamps.
+    result.update(_build_metrics(ordered, start, now))
     reasons = [f'invalid timestamps: {invalid}'] if invalid else []
     specs, queued, merged, waits, busy = {}, set(), set(), [], set()
     windows, previous_sha = {}, {}
