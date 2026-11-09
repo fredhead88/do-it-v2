@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dependency-table and classifier regressions (synthetic inputs only).
 
-The source guard and seed matrix (L-spec-2307/2308) are not supplied here.
+The seed matrix (L-spec-2307) is SeedTests; the source guard (L-spec-2308) is not here.
 FixtureContentTests exercise each declared non-ledger input against the
 production reader with fixture files of their own; they do not certify closure
 completeness or the cross-subject seed matrix.
@@ -19,6 +19,7 @@ import sys
 import sysconfig
 import tempfile
 import unittest
+import zoneinfo
 from unittest.mock import patch
 
 # Establish the data boundary before importing any production module. Inherited
@@ -38,6 +39,8 @@ sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parent
 REPO = SOURCE.parent
 STDLIB = Path(sysconfig.get_path('stdlib')).resolve()
+# Read-only system time-zone data: tg_say builds a ZoneInfo at import.
+TZDATA = tuple(Path(p).resolve() for p in zoneinfo.TZPATH)
 
 
 def _audit(operation, arguments):
@@ -58,7 +61,8 @@ def _audit(operation, arguments):
     library = (path.is_relative_to(STDLIB)
                and not {'site-packages', 'dist-packages'} & set(path.parts)
                and path.suffix in ('.py', '.pyc', '.so'))
-    if not writing and (source or fixture or library or path in (REPO / 'lane_rules.toml', REPO / 'look.toml')):
+    tzdata = any(path.is_relative_to(t) for t in TZDATA)
+    if not writing and (source or fixture or library or tzdata or path in (REPO / 'lane_rules.toml', REPO / 'look.toml')):
         return
     raise PermissionError('forbidden-operation: out-of-root file')
 
@@ -468,6 +472,271 @@ class FixtureContentTests(unittest.TestCase):
         path.unlink()
         with self.assertRaises(ValueError):
             lane_rules.load(path)                                    # removed
+
+
+import json
+from datetime import datetime
+
+
+def _expected_cells(action_class):
+    """Every cross-subject dependency a row declares, as route:kind or structural key."""
+    row = deps.TABLE[action_class]
+    cells = {'global:' + k for k in row.global_kinds} | {'ref:' + k for k in row.ref_kinds}
+    cells |= {'spawn:' + k for k in row.spawn_kinds}
+    cells |= {'mention:dependency-hold'} if 'dependency-hold' in row.mention_kinds else set()
+    cells |= {'sibling:' + k for k in row.mention_kinds if k in ('spec-written', 'spec-carried')}
+    cells |= {'membership:' + k for k in row.membership}
+    cells |= {'ledger-wide:' + k for k in row.ledger_wide_sets}
+    cells |= {'file:' + k for k in row.non_ledger_inputs}
+    return cells | ({'same-ts'} if row.same_ts_neighbours else set())
+
+
+# Every declared cell has a witness. A cell that loses its witness fails the
+# matrix test; there is no gap allowlist. Notes on how cells are witnessed:
+#   file:content:grader-script / spec-membership are read by fold.held_specs,
+#     which merge_queue.queue and autodispatch consult; step_for does not call
+#     it, so their controls ask held_specs itself (answer kind held_specs);
+#   global:decision is witnessed by a ruling-bearing decision (rulings.project_event
+#     projects it onto another spec); global:unblocked / capability-hold by
+#     capability-subject events read through the spec-local regrade rule.
+GAPS = {}
+
+
+class _Evaluator:
+    """Normalize a ledger and ask the production answer functions, at a frozen clock."""
+
+    def __init__(self, content_files):
+        self.dir = Path(tempfile.mkdtemp(dir=SANDBOX))
+        for name, text in content_files.items():
+            if text is not None:
+                (self.dir / name).write_text(text)
+        self.rules = self.dir / 'lane_rules.toml' if 'lane_rules.toml' in content_files else None
+
+    def close(self):
+        shutil.rmtree(self.dir, True)
+
+    def answer(self, kind, raw, item, now):
+        import nextstep
+        import tick
+        events = fold.finish_events([dict(e) for e in raw])
+        env = {'DOIT_LANE_RULES': str(self.rules)} if self.rules else {}
+        seen = {}
+        real_wave, real_next = nextstep._wave, nextstep.next_steps
+
+        def wave(sid, *args):
+            seen[sid] = real_wave(sid, *args)
+            return seen[sid]
+
+        def next_steps(ev, specs, when, rules, waves=None, mains=None):
+            seen['waves'] = dict(waves or {})
+            return real_next(ev, specs, when, rules, waves, mains)
+        with patch.object(dispatch, 'CONTENT', self.dir), patch.dict(os.environ, env), \
+                patch.object(nextstep, '_wave', wave), patch.object(nextstep, 'next_steps', next_steps):
+            if kind == 'capability_holds':
+                return {s: (r['capability'], sorted(r['specs']))
+                        for s, r in sorted(fold.capability_holds(events).items())}
+            if kind == 'closable':
+                return dict(fold.closable(events, item))
+            if kind == 'held_specs':
+                return sorted(fold.held_specs(events, content_dir=self.dir))
+            specs = fold.fold(events)[0]
+            steps = tick._steps(events, specs, datetime.fromisoformat(now.replace('Z', '+00:00')))
+            if kind == 'wave':
+                return {'blocker': seen.get(item), 'derived_wave': seen['waves'].get(item),
+                        'waves': dict(sorted(seen['waves'].items()))}
+            return [s for s in steps if s.item == item]
+
+
+class SeedTests(unittest.TestCase):
+    """AC4: committed single-event mutations change the answer production gives."""
+    CLASSES = deps.ACTION_CLASSES
+    results = []
+
+    def run_row(self, row, seed, content=None):
+        """(baseline, included, omitted-selection result) for one seed."""
+        ev = _Evaluator(seed.content_files if content is None else content)
+        self.addCleanup(ev.close)
+        base = list(seed.base_events)
+        full = base + [seed.event]
+        item, kind, now = seed.item_id, row['answer'], seed.now
+        baseline = ev.answer(kind, base, item, now)
+        mutated = ev.answer(kind, full, item, now)
+        # The dependency-selected input: drop another subject's own-route lines,
+        # keep every line the table gives a cross-subject role and every unknown.
+        cls = row['classes'][0]
+        picked = [e for e in full if e is seed.event or e.get('subject') == item
+                  or deps.classify(e, cls) != 'own'
+                  or e.get('charter') or e.get('subject') in ('fixture',)]
+        selected = ev.answer(kind, picked, item, now)
+        return baseline, mutated, selected
+
+    def test_interface(self):
+        with self.assertRaises(ValueError):
+            deps.seeds('nope')
+        self.assertEqual([f.name for f in fields(deps.Seed)], [
+            'name', 'item_id', 'dependency_kind', 'base_events', 'event', 'now', 'content_files'])
+        self.assertNotIn('waves', [f.name for f in fields(deps.Seed)])
+        for action in deps.ACTION_CLASSES:
+            first, second = deps.seeds(action), deps.seeds(action)
+            self.assertTrue(first, action)
+            self.assertEqual(first, second)
+            for a, b in zip(first, second):
+                self.assertIsNot(a.event, b.event)
+                self.assertIsNot(a.content_files, b.content_files)
+                for x, y in zip(a.base_events, b.base_events):
+                    self.assertIsNot(x, y)
+                self.assertNotIn(a.event['_src'], {e['_src'] for e in a.base_events})
+                datetime.fromisoformat(a.now.replace('Z', '+00:00'))
+                self.assertEqual(a.event['actor'], fold.actor_of(a.event['_src'].split(':')[0]))
+                self.assertTrue(a.dependency_kind and a.item_id)
+            first[0].base_events[0]['type'] = 'tampered'      # contaminate one call
+            first[0].content_files['x.md'] = 'tampered'
+            self.assertNotEqual(deps.seeds(action)[0].base_events[0]['type'], 'tampered')
+            self.assertNotIn('x.md', deps.seeds(action)[0].content_files)
+
+    def test_fixture_loader_refuses_unsafe_input(self):
+        for bad in ('../x', 'a/b', '', '.hidden', 'x..y'):
+            with self.assertRaises(ValueError):
+                deps.scenario_ledgers(bad)
+        with self.assertRaises(ValueError):
+            deps.make_event({}, 'L-thinker-1.jsonl', dict(type='x', actor='operator'))
+        with self.assertRaises(ValueError):
+            deps.make_event({}, '../L-thinker-1.jsonl', dict(type='x'))
+
+    def test_baseline_mutated_omitted(self):
+        print('class | seed | dependency key | derived waves | baseline | mutated | omitted')
+        for action in deps.ACTION_CLASSES:
+            for row, seed in zip(deps.seed_rows(action), deps.seeds(action)):
+                with self.subTest(action=action, seed=seed.name):
+                    baseline, mutated, selected = self.run_row(row, seed)
+                    omitted = baseline
+                    brief = lambda v: ([(s.state, s.action, s.reason[:44]) for s in v] if isinstance(v, list) and v and hasattr(v[0], 'state') else v)
+                    print(action, '|', seed.name, '|', seed.dependency_kind, '|', 'baseline', brief(baseline),
+                          '| mutated', brief(mutated), '| omitted', brief(omitted))
+                    if row['expect'] == 'same':
+                        self.assertEqual(mutated, omitted, 'control must not move the answer')
+                    else:
+                        self.assertNotEqual(mutated, omitted, 'omitting the mutation must change the answer')
+                    self.assertEqual(selected, mutated, 'dependency-selected input must agree with the full fixture')
+
+
+    def evaluate(self, kind, seed, item, content, spy=None):
+        ev = _Evaluator(content)
+        self.addCleanup(ev.close)
+        return ev.answer(kind, list(seed.base_events), item, seed.now)
+
+    def test_waits_for_text_hold(self):
+        seed = next(s for s in deps.seeds('hold-release') if s.name == 'text-shipped')
+        declared = dict(seed.content_files)
+        self.assertIn('Dependency-hold: waits_for=L-spec-9003', declared['L-spec-9001.md'])
+        held = self.evaluate('step', seed, seed.item_id, declared)[0]
+        self.assertEqual(held.state, 'hold')
+        self.assertIn('L-spec-9003', held.clears)
+        released = _Evaluator(declared)
+        self.addCleanup(released.close)
+        after = released.answer('step', list(seed.base_events) + [seed.event], seed.item_id, seed.now)[0]
+        self.assertEqual((after.state, after.action), ('action', 'build'))
+        self.assertNotEqual(held, after)
+        # With the declaration removed the baseline is unheld: the file mattered.
+        stripped = {k: v.replace('Dependency-hold: waits_for=L-spec-9003\n', '') for k, v in declared.items()}
+        unheld = self.evaluate('step', seed, seed.item_id, stripped)[0]
+        self.assertEqual((unheld.state, unheld.action), ('action', 'build'))
+        self.assertEqual(unheld, after.__class__(**{**after.__dict__, 'trigger': unheld.trigger,
+                                                    'since': unheld.since, 'stage': unheld.stage}))
+        print('waits_for: held', held.reason, '| released by shipped ->', after.action,
+              '| declaration removed ->', unheld.action)
+
+    def test_production_derived_waves(self):
+        import nextstep
+        calls = []
+        real = dispatch.spec_wave
+
+        def spy(charter, footprint):
+            calls.append((charter, tuple(footprint or ())))
+            return real(charter, footprint)
+        rows = {r['name']: r for r in deps.seed_rows('wave-order')}
+        by_name = {s.name: s for s in deps.seeds('wave-order')}
+        with patch.object(dispatch, 'spec_wave', spy):
+            for name in ('wave-footprint-corr-wave', 'wave-charter-corr-wave', 'wave-sibling-written-wave'):
+                seed, calls[:] = by_name[name], []
+                ev = _Evaluator(seed.content_files)
+                self.addCleanup(ev.close)
+                before = ev.answer('wave', list(seed.base_events), seed.item_id, seed.now)
+                during = len(calls)
+                after = ev.answer('wave', list(seed.base_events) + [seed.event], seed.item_id, seed.now)
+                self.assertGreater(during, 0, 'baseline did not call dispatch.spec_wave')
+                self.assertGreater(len(calls), during, 'mutation did not re-derive waves')
+                self.assertNotEqual(before, after)
+                print('waves', name, 'baseline', before, 'mutated', after)
+            # Plan text only, ledger fixed: the derived wave moves.
+            control = next(c for c in deps.file_controls() if c['name'] == 'ctl-plan-text')
+            seed = by_name['wave-footprint-corr-wave']
+            plan = dict(seed.content_files)
+            ev = _Evaluator(plan)
+            self.addCleanup(ev.close)
+            first = ev.answer('wave', list(seed.base_events), seed.item_id, seed.now)
+            plan[control['path']] = control['text']
+            ev = _Evaluator(plan)
+            self.addCleanup(ev.close)
+            second = ev.answer('wave', list(seed.base_events), seed.item_id, seed.now)
+            self.assertNotEqual(first['waves'], second['waves'])
+            self.assertIsNone(first['waves'] and second['blocker'], 'later sibling wave releases the target')
+            print('plan-only control: waves', first['waves'], '->', second['waves'])
+        self.assertNotIn('waves', [f.name for f in fields(deps.Seed)])
+
+    def test_file_controls(self):
+        for control in deps.file_controls():
+            with self.subTest(control=control['name']):
+                files = deps.scenario_content(control['scenario'])
+                base = deps.scenario_ledgers(control['scenario'])
+                raw = [e for rows in base.values() for e in rows]
+                text = control['text']
+                if control.get('derive') == 'lane-rules-owner':
+                    text = lane_rules.DEFAULT_TABLE.read_text().replace('actor = "tick"', 'actor = "executor"', 1)
+                    self.assertNotEqual(text, lane_rules.DEFAULT_TABLE.read_text())
+                changed = dict(files)
+                changed[control['path']] = text
+                if text is None:
+                    changed.pop(control['path'])
+                results = []
+                for content in (files, changed):
+                    ev = _Evaluator(content)
+                    self.addCleanup(ev.close)
+                    results.append(ev.answer(control['answer'], raw, control['item_id'], '2026-01-02T00:00:00Z'))
+                print('file control', control['key'], control['name'], '|', results[0], '->', results[1])
+                self.assertNotEqual(results[0], results[1], 'the file edit must move the answer')
+
+    def test_wave_row_omits_sibling_terminals(self):
+        """Finding: a sibling's terminal event changes nextstep._wave yet the
+        wave-order row classifies it as 'own' (not selected by a target-id
+        closure). Recorded so the table owner decides; the Door must read fully."""
+        for name in ('wave-shipped-wave', 'wave-killed-wave', 'wave-closed-wave'):
+            seed = next(s for s in deps.seeds('wave-order') if s.name == name)
+            self.assertEqual(deps.classify(seed.event, 'wave-order'), 'own')
+            self.assertNotIn(seed.event['type'], deps.TABLE['wave-order'].global_kinds)
+
+    def test_coverage_matrix(self):
+        covered, matrix = {}, {}
+        for action in deps.ACTION_CLASSES:
+            expected = _expected_cells(action)
+            witnessed = {}
+            for row in deps.seed_rows(action):
+                if row['expect'] != 'changed':
+                    continue
+                for cell in row['cells']:
+                    witnessed.setdefault(cell, []).append(row['name'])
+            for control in deps.file_controls():
+                if action in control['classes']:
+                    witnessed.setdefault('file:' + control['key'], []).append(control['name'])
+            self.assertFalse(set(witnessed) - expected, (action, sorted(set(witnessed) - expected)))
+            covered[action] = witnessed
+            gaps = sorted(expected - set(witnessed))
+            matrix[action] = gaps
+            print('matrix', action, 'cells', len(expected), 'witnessed', len(witnessed), 'gaps', ','.join(gaps) or '-')
+            for cell, names in sorted(witnessed.items()):
+                print('  ', cell, '<-', ','.join(sorted(names)))
+        self.assertEqual(matrix, {a: sorted(GAPS.get(a, ())) for a in deps.ACTION_CLASSES},
+                         'an unwitnessed cell must be listed in GAPS, and a listed gap must still be a gap')
 
 
 class IsolationTests(unittest.TestCase):

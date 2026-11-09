@@ -1,0 +1,2 @@
+{"project": "fixture", "subject": "L-spec-9001", "ts": "2026-01-01T05:00:00Z", "type": "merge-gate-clean"}
+{"branch": "fixture-t", "project": "fixture", "subject": "L-spec-9001", "ts": "2026-01-01T06:00:00Z", "type": "queue-add"}

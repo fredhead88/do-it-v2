@@ -1,0 +1,2 @@
+{"footprint": ["src/t.py"], "path": "L-spec-9001", "project": "fixture", "subject": "L-spec-9001", "ts": "2026-01-01T00:00:00Z", "type": "spec-written"}
+{"footprint": ["src/p.py"], "path": "L-spec-9003", "project": "fixture", "subject": "L-spec-9003", "ts": "2026-01-01T00:01:00Z", "type": "spec-written"}

@@ -1,0 +1,135 @@
+[
+ {
+  "name": "ctl-spec-text-added",
+  "scenario": "spec-text-free",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "key": "content:spec-text",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "L-spec-9001.md",
+  "text": "AC1 [backend]: fixture criterion\ncheck: fixture\nreview_path: read the output\nDependency-hold: waits_for=L-spec-9003\n"
+ },
+ {
+  "name": "ctl-spec-text-removed",
+  "scenario": "spec-text",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "key": "content:spec-text",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "L-spec-9001.md",
+  "text": "AC1 [backend]: fixture criterion\ncheck: fixture\nreview_path: read the output\n"
+ },
+ {
+  "name": "ctl-plan-text",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "key": "content:plan",
+  "classes": [
+   "wave-order"
+  ],
+  "path": "plan-L-charter-9001.md",
+  "text": "## s\nFootprint:\n- src/s.py\nWave: 3\n\n## t\nFootprint:\n- src/t.py\nWave: 2\n"
+ },
+ {
+  "name": "ctl-plan-text-step",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "key": "content:plan",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "plan-L-charter-9001.md",
+  "text": "## s\nFootprint:\n- src/s.py\nWave: 3\n\n## t\nFootprint:\n- src/t.py\nWave: 2\n"
+ },
+ {
+  "name": "ctl-plan-removed",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "key": "content:plan",
+  "classes": [
+   "wave-order"
+  ],
+  "path": "plan-L-charter-9001.md",
+  "text": null
+ },
+ {
+  "name": "ctl-lane-rules",
+  "scenario": "stage-build-free",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "key": "repo:lane-rules",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "lane_rules.toml",
+  "text": null,
+  "derive": "lane-rules-owner"
+ },
+ {
+  "name": "ctl-spec-membership",
+  "scenario": "held",
+  "item_id": "L-spec-9001",
+  "answer": "held_specs",
+  "key": "content:spec-membership",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "L-spec-9001.md",
+  "text": "AC1 [backend]: x\ncheck: y\nreview_path: do read\n"
+ },
+ {
+  "name": "ctl-grader-script",
+  "scenario": "held-script",
+  "item_id": "L-spec-9001",
+  "answer": "held_specs",
+  "key": "content:grader-script",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "path": "verify-L-spec-9001-grader.sh",
+  "text": "git log\n"
+ }
+]
