@@ -135,7 +135,7 @@ def render(repo: str) -> str:
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:
         raise ValueError('merge_queue: expected positive member verdict settings')
     lines.extend(['', '## Member verdicts',
-                  'Source: `look.toml` `[merge_queue]` and `src/window_members.py`.'])
+                  'Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).'])
     lines.extend(_wrap('After a red window with unnamed owners, each remaining member is verified alone on the '
                        f'window base, at most {parallel} CI runs at once (member_verify_parallel).'))
     lines.extend(_wrap('Each run appends `member-verdict {spec, window, tree, state, url, nodes}`. Drop red members '

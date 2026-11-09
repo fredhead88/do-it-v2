@@ -119,7 +119,7 @@ Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_r
 `bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.
 
 ## Member verdicts
-Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
+Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).
 - After a red window with unnamed owners, each remaining member is verified alone on the window
   base, at most 4 CI runs at once (member_verify_parallel).
 - Each run appends `member-verdict {spec, window, tree, state, url, nodes}`. Drop red members with
