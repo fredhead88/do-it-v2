@@ -469,3 +469,6 @@ REQUIRED_ROWS['branch-recut'] = ('spec', 'from_sha', 'to_sha', 'tag', 'old_base_
 REQUIRED_ROWS['branch-recut-refused'] = ('reason', 'owner', 'project')
 EMITS["pane-dialog-unknown"] = {"pane-watchdog"}
 REQUIRED_ROWS["pane-dialog-unknown"] = ("pane", "role", "prompt", "first_seen_at", "seen_at")
+
+EMITS["preflight-swept"] = {"executor", "operator", "builder", "thinker"}
+REQUIRED_ROWS["preflight-swept"] = ("batch", "base", "stage")
