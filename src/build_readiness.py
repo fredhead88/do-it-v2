@@ -441,12 +441,11 @@ def record(result, project, *, root=None):
 
 def build_done_fields(output):
     """Output-to-ledger fields; dispatch's owner must apply these to build-done."""
-    status = output.get('status')
-    if status not in ('BLOCKED', 'NEEDS_CONTEXT'):
+    if output.get('status') != 'NEEDS_CONTEXT':
         return {}
     reason = output.get('reason')
     if not isinstance(reason, str) or not reason.strip():
-        raise NotReady(f'{status} requires a nonempty reason')
+        raise NotReady('NEEDS_CONTEXT requires a nonempty reason')
     return {'reason': reason.strip()}
 
 

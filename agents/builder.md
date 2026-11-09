@@ -212,10 +212,8 @@ write grant. The same object, on the `claude -p` route, goes through the
 StructuredOutput tool instead; the wrapper validates it against the same schema
 either way.
 
-For BLOCKED and NEEDS_CONTEXT, return a nonblank top-level `reason` naming what
-blocked the build (or the missing context) and what would unblock it. Do not
-invent an explanation: a hand-in with no real reason is refused, recorded as a
-failed spawn, and your card is kept.
+For NEEDS_CONTEXT, return a nonempty top-level `reason` naming the missing
+context and the change needed to unblock the build.
 
 ## Lessons (operator rule, 2026-09-24)
 
