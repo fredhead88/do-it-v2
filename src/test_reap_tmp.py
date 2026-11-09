@@ -826,6 +826,10 @@ EXPECTED_CRONS_ROWS.append({"name": "thinker-inbox", "where": "user",
     "path": "/usr/bin/python3",
     "sig": r"(?:^|\s)(?:\S*/)?(?:thinker-inbox|thinker_inbox)\.py(?=\s|$)|\bcron-run\s+thinker-inbox\s+--\s",
     "owner": "thinker", "project": "do-it-v2"})
+EXPECTED_CRONS_ROWS.append({"name": "auto-carry", "where": "user", "schedule": "7 * * * *",
+    "command": "{doit} cron-run auto-carry -- {repo}/scripts/auto-carry.sh >> {root}/logs/auto-carry.log 2>&1",
+    "path": "{repo}/scripts/auto-carry.sh", "sig": r"(?:/bin/|/scripts/)auto-carry\.sh\b",
+    "owner": "executor", "project": "do-it-v2"})
 ok(crons_doc["row"] == EXPECTED_CRONS_ROWS,
    f"L0440-AC20: cron rows match current wrappers, runtime bounds and */5 reaper cadence: {crons_doc['row']}")
 print("L0440-AC20 ok")

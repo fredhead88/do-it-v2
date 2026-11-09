@@ -109,6 +109,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   merge-news flush >> {root}/logs/merge-news.log 2>&1
   thinker-inbox | */5 * * * * | user | /usr/bin/python3  DOIT_ROOT={root} {doit} cron-run
   thinker-inbox -- /usr/bin/python3 {repo}/src/thinker_inbox.py
+  auto-carry | 7 * * * * | user | {repo}/scripts/auto-carry.sh  {doit} cron-run auto-carry --
+  {repo}/scripts/auto-carry.sh >> {root}/logs/auto-carry.log 2>&1
 
 ## Tick event types
 Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.

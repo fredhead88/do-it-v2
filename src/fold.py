@@ -1869,6 +1869,27 @@ def step_row(step, limits, now):
 def _step_line(value):
     from fold_stalls import _step_line as project
     return project(value)
+
+
+def inbound_rows(events):
+    """Ordered INBOUND row text, shared by the board and read-only CLI."""
+    def inbound_line(r):
+        return (f"{r['source']} · {r['kind']} · registered {r['registered_at']} · {r['attempts']} attempt(s)"
+                + (f" · last_error: {r['last_error']}" if r.get("last_error") else ""))
+    rows = []
+    for name, load, method, format_row in (("carry", _carry, "uncarried", inbound_line),
+                                         ("intake", _intake, "board_rows", lambda row: row)):
+        module, error = load()
+        if module is None:
+            rows.append(f"unavailable — {error}")
+        else:
+            try:
+                rows += [format_row(row) for row in getattr(module, method)(events)]
+            except Exception as x:                         # noqa: BLE001
+                rows.append(f"unavailable — {name}.{method} raised {type(x).__name__}: {x}")
+    return rows
+
+
 def render(events, specs, charters, ignored, by_subject):
     looked = max((ts(e["ts"]) for e in events if e.get("type") == "observed"),
                  default=datetime.min.replace(tzinfo=timezone.utc))
@@ -2084,31 +2105,7 @@ def render(events, specs, charters, ignored, by_subject):
             notes_rows = [f"unavailable — notes.board_rows raised {type(x).__name__}: {x}"]
     block("NOTES", notes_rows)
 
-    # INBOUND — R9/L-spec-0196: one row per `carry.uncarried()` entry, covering
-    # both an uncarried v4 record and an unreadable/uncarried PR source — the
-    # one seam that enumerates both. PANES-idiom degrade (Constraints).
-    def inbound_line(r):
-        base = (f"{r['source']} · {r['kind']} · registered {r['registered_at']} · "
-                f"{r['attempts']} attempt(s)")
-        return base + (f" · last_error: {r['last_error']}" if r.get("last_error") else "")
-
-    carry_mod, carry_err = _carry()
-    if carry_mod is None:
-        inbound_rows = [f"unavailable — {carry_err}"]
-    else:
-        try:
-            inbound_rows = [inbound_line(r) for r in carry_mod.uncarried(events)]
-        except Exception as x:                             # noqa: BLE001
-            inbound_rows = [f"unavailable — carry.uncarried raised {type(x).__name__}: {x}"]
-    intake_mod, intake_err = _intake()
-    if intake_mod is None:
-        inbound_rows.append(f"unavailable — {intake_err}")
-    else:
-        try:
-            inbound_rows += intake_mod.board_rows(events)
-        except Exception as x:                             # noqa: BLE001
-            inbound_rows.append(f"unavailable — intake.board_rows raised {type(x).__name__}: {x}")
-    block("INBOUND", inbound_rows)
+    block("INBOUND", inbound_rows(events))
 
     block("SHIPPED SINCE YOU LOOKED", [e.get("subject", "?") for e in since("shipped")])
     block("DECIDED WITHOUT YOU", [f"{e.get('subject','?')} · {e.get('why','?')} · revert "
@@ -2452,6 +2449,9 @@ if __name__ == "__main__":
         if not show_board:
             sys.exit(0)
     ev = read_events()
+    if cmd == "inbound":
+        sys.stdout.writelines("  " + row + "\n" for row in inbound_rows(ev))
+        sys.exit(0)
     specs, charters, ignored, by_subject = fold(ev)
     if cmd == "events":                      # one subject's events, oldest first, as the fold read them
         for e in ev:

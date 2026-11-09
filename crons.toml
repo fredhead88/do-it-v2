@@ -400,3 +400,13 @@ path = "/usr/bin/python3"
 sig = '(?:^|\s)(?:\S*/)?(?:thinker-inbox|thinker_inbox)\.py(?=\s|$)|\bcron-run\s+thinker-inbox\s+--\s'
 owner = "thinker"
 project = "do-it-v2"
+
+[[row]]
+name = "auto-carry"
+where = "user"
+schedule = "7 * * * *"
+command = "{doit} cron-run auto-carry -- {repo}/scripts/auto-carry.sh >> {root}/logs/auto-carry.log 2>&1"
+path = "{repo}/scripts/auto-carry.sh"
+sig = '(?:/bin/|/scripts/)auto-carry\.sh\b'
+owner = "executor"
+project = "do-it-v2"
