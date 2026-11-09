@@ -1163,7 +1163,7 @@ class TestCompatibility(ScratchLedger):
             "grader", "routed-selection", equality=True, post=True, entry="_main")
         TestReadBudget.assert_budget(self, result)
         events = result["equality"]["final"]
-        self.assertTrue(any(e["type"] == "criterion-routed" and e["criterion"] == "AC1"
+        self.assertFalse(any(e["type"] == "criterion-routed" and e["criterion"] == "AC1"
                             and e["to"] == "owed" for e in events))
         self.assertEqual(result["outcome"], 0, result["diagnostic"])
         verdict = next(e for e in events if e["type"] == "verdict")

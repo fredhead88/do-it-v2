@@ -5,7 +5,7 @@ Four pure library functions a later dispatch step (`grader-dispatch-view`,
 `grader-pane-serve`, both wave 2) uses to run a grader pane inside a real
 `bwrap` sandbox whose filesystem view holds only one grader spawn's build
 artifacts, never `$HOME`, `~/.claude`, `$DOIT_ROOT` (seat included), any
-repository, or any `.git`:
+live repository or its administrative `.git`. Selected history is separate:
 
     build(spec, repo, base_sha, ready_sha, spawn) -> pathlib.Path
     config_dir() -> pathlib.Path
@@ -122,8 +122,8 @@ def _rewrite_verify(text: str, repo, tree_dir, view, venv_rel=None) -> bytes:
     checkout-absolute path and run before any `grading.env` exists comes back
     byte-identical but for that one inserted line."""
     # Thinker 2026-10-12: spec writers routinely open Verification with
-    # `cd "$(git rev-parse --show-toplevel)"`; the view is git-less (R8), so that
-    # substitution is resolved here to the view's tree instead of failing every grade.
+    # `cd "$(git rev-parse --show-toplevel)"`; resolve it to the archived tree
+    # while preserving the existing verification path contract.
     for form in ('"$(git rev-parse --show-toplevel)"', "$(git rev-parse --show-toplevel)"):
         text = text.replace(form, f'"{tree_dir}"')
     # Thinker 2026-10-12: Verification scratch files under /tmp (tee logs, fingerprints)
@@ -148,11 +148,75 @@ def merge_base(repo, ready_sha: str) -> str:
     Raises RuntimeError when neither branch resolves (L-spec-0755/R3(d))."""
     for branch in ("main", "master"):
         r = subprocess.run(["git", "-C", str(repo), "merge-base", ready_sha, branch],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                           env=_history_env())
         out = r.stdout.strip()
         if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{7,40}", out):
             return out
     raise RuntimeError(f"grader_view.build: no merge-base of {ready_sha} with main or master in {repo}")
+
+
+def _history_env():
+    """Never use caller Git overrides, user config, replacements or remotes."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+               GIT_CONFIG_SYSTEM="/dev/null", GIT_NO_REPLACE_OBJECTS="1",
+               GIT_ALLOW_PROTOCOL="", GIT_TERMINAL_PROMPT="0")
+    return env
+
+
+def _build_history(repo, view, ready_sha, base_sha):
+    """Copy only reachable objects; no clone, source config, refs or alternates."""
+    history = view / "history"
+    if history.exists():
+        shutil.rmtree(history)
+    env = _history_env()
+    subprocess.run(["/usr/bin/git", "init", "--bare", "--template=", "-q", str(history)],
+                   env=env, check=True)
+    # --revs selects these ancestry closures, never all source refs/objects.
+    pack = subprocess.run(["/usr/bin/git", "-C", str(repo), "pack-objects", "--stdout", "--revs"],
+                          input=f"{ready_sha}\n{base_sha}\n".encode(),
+                          stdout=subprocess.PIPE, env=env, check=True)
+    subprocess.run(["/usr/bin/git", "--git-dir", str(history), "index-pack", "--stdin"],
+                   input=pack.stdout, stdout=subprocess.DEVNULL, env=env, check=True)
+    (history / "HEAD").write_text(ready_sha + "\n")
+    for name in ("main", "master"):
+        (history / "refs" / "heads" / name).write_text(base_sha + "\n")
+
+
+def history_argv(view, sha) -> list[str]:
+    """Read-only, isolated history fragment. Invalid identity fails closed."""
+    view = pathlib.Path(view).resolve()
+    try:
+        manifest = json.loads((view / "view.json").read_text())
+        if not re.fullmatch(r"[0-9a-f]{40}", sha or "") or manifest["ready_sha"] != sha:
+            raise ValueError("build identity mismatch")
+        history = view / "history"
+        if not history.is_dir() or history.is_symlink():
+            raise ValueError("missing history")
+        if any(p.is_symlink() for p in history.rglob("*")):
+            raise ValueError("history contains a symlink")
+        if (history / "objects/info/alternates").exists():
+            raise ValueError("history contains alternates")
+        if (history / "HEAD").read_text().strip() != sha:
+            raise ValueError("history HEAD mismatch")
+        r = subprocess.run(["/usr/bin/git", "--git-dir", str(history), "cat-file", "-t", sha],
+                           env=_history_env(), capture_output=True, text=True, check=True)
+        if r.stdout.strip() != "commit":
+            raise ValueError("history identity is not a commit")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"git history unavailable: {exc}") from None
+    argv = ["--ro-bind", str(history), str(history),
+            "--ro-bind", str(view / "view.json"), str(view / "view.json")]
+    for name in os.environ:
+        if name.startswith("GIT_"):
+            argv += ["--unsetenv", name]
+    for name, value in _history_env().items():
+        if name.startswith("GIT_"):
+            argv += ["--setenv", name, value]
+    argv += ["--setenv", "GIT_DIR", str(history),
+             "--setenv", "GIT_WORK_TREE", str(view / "tree")]
+    return argv
 
 
 def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib.Path:
@@ -167,6 +231,8 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
         raise FileNotFoundError(f"grader_view.build: missing {verify_path}")
 
     repo = pathlib.Path(repo)
+    if not re.fullmatch(r"[0-9a-f]{40}", ready_sha or ""):
+        raise ValueError("git history unavailable: invalid build identity")
     # L-spec-0755/R3(d): resolved first, so an unresolvable base leaves no view behind.
     base_sha = merge_base(repo, ready_sha)
     view = _scratch_sub("grade") / spawn
@@ -182,7 +248,8 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
         shutil.rmtree(tree_dir)
     tree_dir.mkdir(parents=True)
     archive = subprocess.run(
-        ["git", "-C", str(repo), "archive", ready_sha], stdout=subprocess.PIPE, check=True
+        ["git", "-C", str(repo), "archive", ready_sha], stdout=subprocess.PIPE, check=True,
+        env=_history_env()
     )
     subprocess.run(["tar", "-x", "-C", str(tree_dir)], input=archive.stdout, check=True)
 
@@ -190,9 +257,10 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
     # merge-base of the ready sha and the target branch, never the spec's original
     # base (a branch cut off an old master would list every commit master gained).
     diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", f"{base_sha}..{ready_sha}"],
+        ["git", "-C", str(repo), "diff", "--no-ext-diff", "--no-textconv", f"{base_sha}..{ready_sha}"],
         stdout=subprocess.PIPE,
         check=True,
+        env=_history_env(),
     )
     (view / "diff.patch").write_bytes(diff.stdout)
 
@@ -218,6 +286,7 @@ def build(spec: str, repo, base_sha: str, ready_sha: str, spawn: str) -> pathlib
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     (view / "view.json").write_text(json.dumps(view_json))
+    _build_history(repo, view, ready_sha, base_sha)
 
     return view
 
@@ -334,7 +403,8 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
     pairs, always `--ro-bind`, never `--bind`), a safe Playwright browser
     cache (read-only), `view` and `config_dir()`'s
     own directory (rw) — nothing else. `$HOME`, `~/.claude`, `$DOIT_ROOT`
-    (seat included), any repository, and any `.git` are simply absent."""
+    (seat included) and live repository administration are absent. The view's
+    selected history and identity are nested read-only mounts (SD11)."""
     view = pathlib.Path(view)
     doit_src = pathlib.Path(doit_src)
     cfg = config_dir()
@@ -346,13 +416,16 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
         ("/lib", "/lib"),
         ("/lib64", "/lib64"),
         ("/etc", "/etc"),
-        (launcher, launcher),
-        (resolved, resolved),
         (str(doit_src / "src"), str(doit_src / "src")),
         (str(doit_src / "agents"), str(doit_src / "agents")),
         (str(doit_src / "scripts"), str(doit_src / "scripts")),
         (str(doit_src / "doit"), str(doit_src / "doit")),
     ]
+    # Relay history proofs need no Claude binary. Their declared PATH/HOME
+    # may not locate one; do not turn an optional launcher into a bind error.
+    for binary in (launcher, resolved):
+        if pathlib.Path(binary).is_file():
+            ro_pairs.append((binary, binary))
     # /etc/resolv.conf is a symlink into /run/systemd/resolve on this box; without
     # it the sandbox has no DNS and claude fails with EAI_AGAIN (2026-09-30).
     if pathlib.Path("/run/systemd/resolve").is_dir():
@@ -397,6 +470,11 @@ def bwrap_argv(view, *, doit_src, venvs: tuple = (), binds: tuple = ()) -> list:
         argv += ["--ro-bind", src, dst]
     argv += ["--bind", str(view), str(view)]
     argv += ["--bind", str(cfg), str(cfg)]
+    manifest = view / "view.json"
+    if manifest.is_file():
+        identity = json.loads(manifest.read_text()).get("ready_sha")
+        if identity:
+            argv += history_argv(view, identity)
     argv += ["--setenv", "CLAUDE_CONFIG_DIR", str(cfg)]
     argv += ["--setenv", "HOME", str(view)]
     if browser_allowed:
@@ -447,8 +525,10 @@ def smoke(view) -> dict:
     else:
         result["card_path_unreadable"] = r.returncode != 0
 
-    r1 = run(["git", "-C", str(doit_src), "log", "-1"])
-    r2 = run(["git", "-C", str(ROOT), "log", "-1"])
+    # Test source checkout isolation independently of the selected view history.
+    host_git = ["/usr/bin/env", "-u", "GIT_DIR", "-u", "GIT_WORK_TREE", "git"]
+    r1 = run(host_git + ["-C", str(doit_src), "log", "-1"])
+    r2 = run(host_git + ["-C", str(ROOT), "log", "-1"])
     if _sandbox_unavailable(r1) or _sandbox_unavailable(r2):
         result["skipped"].append("git_unreachable")
     else:

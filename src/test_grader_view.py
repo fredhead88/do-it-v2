@@ -580,6 +580,175 @@ print("L-spec-0755 AC7 ok (neither main nor master raises)")
 shutil.rmtree(MB_REPO, ignore_errors=True)
 
 
+def pinned_history_boundary():
+    """SD11: real Git/bwrap on pane, direct fragment and documented relay."""
+    import hashlib
+    import grading_env
+    assert shutil.which('bwrap'), 'mandatory history sandbox unavailable'
+    with tempfile.TemporaryDirectory(prefix='grader-history-') as tmp:
+        root = pathlib.Path(tmp)
+        source = root / 'source'
+        subprocess.run(['/usr/bin/git', 'init', '-q', '-b', 'master', str(source)], check=True)
+        def git(*args):
+            return subprocess.check_output(['/usr/bin/git', '-C', str(source), *args], text=True).strip()
+        git('config', 'user.name', 'fixture')
+        git('config', 'user.email', 'fixture@example.invalid')
+        (source / 'fixture').write_text('ancestor\n')
+        git('add', '.')
+        git('commit', '-qm', 'ancestor evidence')
+        ancestor = git('rev-parse', 'HEAD')
+        git('checkout', '-qb', 'build')
+        (source / 'fixture').write_text('selected build\n')
+        for module in ('pathlib', 'subprocess', 'json', 'grader_view', 'grading_env'):
+            (source / (module + '.py')).write_text('raise RuntimeError("untrusted tree import")\n')
+        git('add', '.')
+        git('commit', '-qam', 'selected historical evidence')
+        ready = git('rev-parse', 'HEAD')
+        linked = root / 'linked'
+        git('worktree', 'add', '-q', '--detach', str(linked), ready)
+        # Source-only settings, hooks, remote and caller overrides must not leak.
+        git('config', 'remote.origin.url', 'https://example.invalid/history.git')
+        # A hostile diff driver may not execute during view construction.
+        git('config', 'diff.external', '/bin/false')
+        hook = source / '.git/hooks/post-checkout'
+        hook.write_text('#!/bin/sh\nexit 19\n')
+        hook.chmod(0o755)
+        fixture_spec = 'L-spec-history-boundary'
+        (FIXTURE_ROOT / 'content' / f'{fixture_spec}.md').write_text(
+            'AC1 [backend]: History.\nreview_path: git log -1 && git show HEAD:fixture\n')
+        (FIXTURE_ROOT / 'content' / f'verify-{fixture_spec}-grader.sh').write_text(
+            '#!/bin/bash\nset -eu\ncd "$(git rev-parse --show-toplevel)"\n'
+            f'test "$(git rev-parse HEAD)" = "{ready}"\n'
+            'test "$(git show HEAD:fixture)" = "selected build"\necho HISTORY_CHECKER_OK\n')
+        hostile = dict(GIT_DIR=str(source / '.git'), GIT_WORK_TREE=str(source),
+                       GIT_OBJECT_DIRECTORY=str(source / '.git/objects'),
+                       GIT_ALTERNATE_OBJECT_DIRECTORIES=str(source / '.git/objects'),
+                       GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.hooksPath',
+                       GIT_CONFIG_VALUE_0=str(source / '.git/hooks'))
+        with mock.patch.dict(os.environ, hostile):
+            selected = grader_view.build(fixture_spec, linked, ancestor, ready, SPAWN + '-history')
+            pane = grader_view.bwrap_argv(selected, doit_src=REPO)
+        # Move source after construction; add a truly unrelated orphan commit.
+        (source / 'fixture').write_text('later source\n')
+        git('commit', '-qam', 'later source evidence')
+        later = git('rev-parse', 'HEAD')
+        git('-c', 'core.hooksPath=/dev/null', 'checkout', '-q', '--orphan', 'unrelated')
+        git('rm', '-qrf', '.')
+        (source / 'unrelated').write_text('unrelated\n')
+        git('add', '.')
+        git('commit', '-qm', 'unrelated evidence')
+        unrelated = git('rev-parse', 'HEAD')
+
+        history = selected / 'history'
+        def content_snapshot(path):
+            return {str(p.relative_to(path)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in path.rglob('*') if p.is_file()}
+        before_source, before_history = content_snapshot(source), content_snapshot(history)
+        before_refs = git('show-ref')
+        before_objects = git('cat-file', '--batch-all-objects', '--batch-check')
+        before_config = git('config', '--local', '--list')
+        selected_git = ['/usr/bin/git', '-C', str(selected / 'tree')]
+        def pane_run(command, **kw):
+            return subprocess.run(pane + ['--'] + command, capture_output=True, text=True, **kw)
+        # Exercise history_argv independently of its bwrap_argv integration.
+        empty = root / 'empty-view'
+        empty.mkdir()
+        direct = grader_view.bwrap_argv(empty, doit_src=REPO)
+        direct += ['--bind', str(selected), str(selected)] + grader_view.history_argv(selected, ready)
+        direct_read = subprocess.run(direct + ['--'] + selected_git + ['rev-parse', 'HEAD'],
+                                     capture_output=True, text=True)
+        assert direct_read.returncode == 0 and direct_read.stdout.strip() == ready, direct_read.stderr
+        reads = [(['rev-parse', 'HEAD'], ready),
+                 (['show', 'HEAD:fixture'], 'selected build'),
+                 (['log', '--format=%s'], 'ancestor evidence'),
+                 (['merge-base', 'HEAD', 'master'], ancestor),
+                 (['rev-list', '--count', 'HEAD'], '2')]
+        for args, expected in reads:
+            result = pane_run(selected_git + args)
+            assert result.returncode == 0 and expected in result.stdout, (args, result.stderr)
+        assert pane_run(selected_git + ['remote']).stdout == ''
+        for sha in (later, unrelated):
+            assert pane_run(selected_git + ['cat-file', '-e', sha]).returncode != 0
+        for bad in ('unknown', ancestor, '0' * 40):
+            try:
+                grader_view.history_argv(selected, bad)
+            except ValueError as exc:
+                assert 'git history' in str(exc)
+            else:
+                raise AssertionError('unknown/mismatched identity accepted')
+
+        # Extract and execute the actual documented invocation, no mock runner.
+        policy = (REPO / 'agents/grader.md').read_text()
+        seat = policy.split('## Seat route\n', 1)[1].split('## Seat route (sandboxed pane)', 1)[0]
+        documented = seat.split('```bash\n', 1)[1].split('```', 1)[0]
+        assert '/usr/bin/python3 -I -c' in documented, 'relay must exclude graded cwd/PYTHONPATH imports'
+        assert 'parent plain Agent is not OS-isolated' in seat
+        assert 'MUST hop' in seat and 'HOME and cwd can be unrelated' in seat
+        assert 'from the pane\'s HOME' in seat
+        assert 'On every route, never read' not in policy and 'no git command of any kind' not in policy
+        assert 'historical evidence' in policy and 'contamination' in policy
+        sandboxed_policy = policy.split('## Seat route (sandboxed pane)', 1)[1]
+        assert '`git log`' in sandboxed_policy and '`git show`' in sandboxed_policy
+        assert 'run no checker' in sandboxed_policy
+        grading_env.write_grading_env(selected)
+        foreign = root / 'foreign-home'
+        foreign.mkdir()
+        relay_env = dict(os.environ, HOME=str(foreign), VIEW_ROOT=str(selected),
+                         TRUSTED_DOIT_SRC=str(REPO), PROJECT='history-fixture', **hostile)
+        def relay_run(command=None, **kw):
+            script = documented
+            if command is not None:
+                script = script.replace('/usr/bin/git -C "$VIEW_ROOT/tree" log -1', '"$@"')
+            return subprocess.run(['/bin/bash', '-c', script, 'relay', *(command or [])],
+                                  cwd=foreign, env=relay_env, capture_output=True, text=True, **kw)
+        result = relay_run()
+        assert result.returncode == 0 and 'selected historical evidence' in result.stdout, result.stderr
+        result = relay_run(selected_git + ['show', 'HEAD:fixture'])
+        assert result.returncode == 0 and result.stdout.strip() == 'selected build', result.stderr
+        result = relay_run(['/bin/bash', str(selected / 'verify.sh')])
+        assert result.returncode == 0 and 'HISTORY_CHECKER_OK' in result.stdout, result.stderr
+        # Every mutation/escape is attempted on BOTH entry routes.
+        denials = [
+            ('update-ref', selected_git + ['update-ref', 'refs/heads/escape', ready]),
+            ('symbolic-ref', selected_git + ['symbolic-ref', 'HEAD', 'refs/heads/master']),
+            ('hash-object', selected_git + ['hash-object', '-w', '--stdin']),
+            ('commit', selected_git + ['-c', 'user.name=fixture', '-c', 'user.email=f@example.invalid',
+                                       'commit', '--allow-empty', '-m', 'forbidden write']),
+            ('config', selected_git + ['config', 'boundary.write', 'forbidden']),
+            ('remote', selected_git + ['remote', 'add', 'forbidden', 'https://example.invalid/no']),
+            ('source-history', ['/usr/bin/git', '--git-dir', str(source / '.git'), 'log', '-1']),
+            ('linked-admin', ['/usr/bin/git', '--git-dir', str(source / '.git/worktrees/linked'), 'log', '-1']),
+        ]
+        for relative in ('HEAD', 'refs/heads/master', 'objects/new-object', 'objects/info/alternates',
+                         next(p for p in history.rglob('*.pack')).relative_to(history).as_posix()):
+            denials.append(('direct-' + relative, ['/usr/bin/python3', '-c',
+                'import pathlib,sys; p=pathlib.Path(sys.argv[1]).resolve(); p.write_bytes(b"forbidden")',
+                str(history / relative)]))
+        for name, command in denials:
+            for route_name, run in (('pane', pane_run), ('relay', relay_run)):
+                result = run(command, input='unique forbidden object payload\n')
+                assert result.returncode != 0, (route_name, name, 'write/escape unexpectedly succeeded')
+            print('SD11 denied pane+relay:', name)
+        for path in (source / '.git/config', source / 'fixture', FIXTURE_ROOT / 'content',
+                     FIXTURE_HOME / '.claude/.credentials.json'):
+            for run in (pane_run, relay_run):
+                result = run(['/usr/bin/test', '-r', str(path)])
+                assert result.returncode != 0, ('protected path readable', path)
+        # Independent fresh processes/read-backs; no mutation may persist.
+        assert git('show-ref') == before_refs
+        assert git('cat-file', '--batch-all-objects', '--batch-check') == before_objects
+        assert git('config', '--local', '--list') == before_config
+        assert content_snapshot(source) == before_source
+        assert content_snapshot(history) == before_history
+        result = relay_run(selected_git + ['rev-parse', 'HEAD'])
+        assert result.returncode == 0 and result.stdout.strip() == ready
+        result = pane_run(selected_git + ['show', 'HEAD:fixture'])
+        assert result.returncode == 0 and result.stdout.strip() == 'selected build'
+        print('AC2 SD11 real history, isolated fragment, pane and documented relay: reads/denials/read-backs passed')
+
+
+pinned_history_boundary()
+
 shutil.rmtree(FIXTURE_ROOT, ignore_errors=True)
 shutil.rmtree(FIXTURE_SCRATCH, ignore_errors=True)
 shutil.rmtree(FIXTURE_HOME, ignore_errors=True)
