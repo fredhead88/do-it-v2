@@ -53,6 +53,8 @@
 # L-spec-0460 db-time done-bar gate (installed by Thinker 2026-09-30, owed AC20)
 10 3 * * * /opt/albert-scott/scripts/deploy/db_time_gate_wrapper.sh
 # disabled 2026-10-21 (Thinker: temporary 10-04 rule outlived its purpose; auto-converted 1369/1370 capability holds with project=albert-scott) */5 * * * * python3 /home/albert/.do-it/bin/regrade-owed-rule.py >> /home/albert/.do-it/logs/regrade-owed-rule.log 2>&1  # Thinker 2026-10-04: operator A-ruling re-grades, remove once the 13 are graded
+# Pending Thinker reconciliation: install_sync replaces the legacy auto-carry row;
+# retain this observed snapshot until then. Expected machine.check drift after install.
 7 * * * * /home/albert/.do-it/bin/auto-carry.sh >> /home/albert/.do-it/logs/auto-carry.log 2>&1  # Thinker 2026-10-05: auto-carry inbound (operator)
 */5 * * * * /home/albert/do-it-v2/doit cron-run thinker-inbox -- /usr/bin/python3 /home/albert/.do-it/thinker-inbox.py >> /home/albert/.do-it/logs/thinker-inbox.log 2>&1  # doit-cron:thinker-inbox
 # L-spec-0832 twice-daily release (3AM/3PM Israel). Pause: touch ~/.do-it/state/release-hold

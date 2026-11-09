@@ -266,6 +266,7 @@ doit — a ledger that derives state, and the guards that read it
   doit pane-end <charter> --handover F [--root D]   the Planner's ⑦: end this pane's own process, if it may
   doit think <topic> | --land F… | --discard <topic>
                                           open a Thinker session, or land its charters (§3.3)
+  doit inbound                          list incoming work without rendering the board
   doit carry <source> [--repo D] [--project N]
                                           carry an inbound v4 record (or PR url) into a charter:null spec-writer spawn
   doit note-close <pr> --response FILE   post FILE as the closing comment on an inbound-note PR, close it, record it
