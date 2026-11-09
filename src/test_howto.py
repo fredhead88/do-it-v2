@@ -73,7 +73,7 @@ class HowtoTests(unittest.TestCase):
             suffix = '' if 'backend' in contract else ' (default)'
             self.assertIn(f'- {role.stem}: {backend}{suffix}', first)
         rules = tomllib.loads((REPO / 'lane_rules.toml').read_text())['rules']
-        self.assertEqual(howto.event_types(REPO / 'src/tick.py'), LITERALS | {'next-step-held', 'escalation-blocking'})
+        self.assertEqual(howto.event_types(REPO / 'src/tick.py'), LITERALS | {'next-step-held', 'escalation-blocking', 'problem-occurred'})
         normal = ' '.join(first.split())
         for row in rules:
             self.assertIn(' | '.join(str(row[k]) for k in
@@ -148,7 +148,7 @@ class HowtoTests(unittest.TestCase):
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))
-            self.assertLessEqual(len(page.splitlines()), 136)
+            self.assertLessEqual(len(page.splitlines()), 137)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
             self.assertEqual(page.count('\n## '), 6)

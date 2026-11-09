@@ -274,7 +274,44 @@ ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
                      rebuild='builder', regrade='grader', audit='spec-auditor')
 ROUTINE_ACTIONS = set(ROUTINE_ROLES)
 AUDIT_PASS_MAX = 6
-LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge'}
+LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge', 'merge-direct'}
+MERGE_DIRECT_PROBLEM = 'merge-direct-pass-failed'
+_PASS_MERGED = []  # (spec, sha) merged by the pass in flight; read by the failure reporter
+
+
+def _merge_direct(step, events):
+    """Run direct_merge.merge_one for one tick-owned merge-direct Step."""
+    import direct_merge
+    import dispatch
+    import merge_queue
+    import subprocess
+    repo = fold.ROOT / 'repos' / 'do-it-v2'
+    row = next((r for r in merge_queue.queue(events) if r.get('spec') == step.item), None)
+    if row is None:
+        return dict(status='regate', sha=None, detail='queue row no longer live')
+
+    def emit(type_, spec, **kv):
+        refused = dispatch.emit(tick_path(), {'subject': spec}, type_, **kv)
+        if refused:
+            raise ValueError(f'{type_} refused: {refused}')
+
+    return direct_merge.merge_one(step.item, row, repo=repo, gate=direct_merge.cli_gate(repo),
+                                  run=subprocess.run, emit=emit, now=fold.NOW)
+
+
+def _report_merge_pass_failure(merged, exc):
+    """One problem-occurred per merged spec when the pass fails after a merge."""
+    import dispatch
+    for spec, sha in merged:
+        try:
+            if any(e.get('type') == 'problem-occurred' and e.get('problem') == MERGE_DIRECT_PROBLEM
+                   and e.get('subject') == spec and e.get('sha') == sha for e in fold.read_events()):
+                continue
+            dispatch.emit(tick_path(), {'subject': spec}, 'problem-occurred',
+                          problem=MERGE_DIRECT_PROBLEM, sha=sha,
+                          detail=f'{type(exc).__name__} after merge of {spec} at {sha}')
+        except Exception as report_exc:
+            print(f'merge-direct failure report not recorded: {report_exc}', file=sys.stderr)
 
 
 class _PassDispatcher:
@@ -411,6 +448,8 @@ def launch(step, *, dispatcher):
         events = _launch_events()
         if events is None:
             return None
+    if step.action == 'merge-direct':
+        return _merge_direct(step, events)
     evs = [e for e in events if e.get('subject') == step.item]
     base_refresh = False
     if step.action == 'build' and step.reason.startswith('base-refresh:'):
@@ -672,6 +711,9 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     out = []
     audit_launches = 0
     gate_disabled = False
+    merge_direct_done = False
+    merged = _PASS_MERGED
+    merged.clear()
     try:
         try:
             grades_first = bool(gate is not None and gate.grades_first)
@@ -724,6 +766,24 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     if reason:
                         out.append(f'hold {step.item}: {reason}')
                         continue
+                if step.action == 'merge-direct':
+                    # A merge takes no builder seat; one merge-direct merge per pass.
+                    if merge_direct_done:
+                        out.append(f'merge-wait {step.item}')
+                    elif dry_run:
+                        out.append(f'would act {step.item} merge-direct')
+                    else:
+                        result = launch(step, dispatcher=runner)
+                        status = result.get('status') if isinstance(result, dict) else None
+                        if status == 'shipped':
+                            merge_direct_done = True
+                            merged.append((step.item, result.get('sha')))
+                            out.append(f"acted {step.item} merge-direct shipped sha={result.get('sha')}")
+                        else:
+                            if status == 'merge-failed':
+                                merge_direct_done = True
+                            out.append(f"hold {step.item}: merge-direct {status or 'standing dispatch failure'}")
+                    continue
                 if step.action == 'merge':
                     import merge_queue
                     try:
@@ -791,10 +851,16 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                         reporter.fail(step.item, exc, phase='launch')
                     out.append(f'failed {step.item} {step.action}: {exc}')
             except Exception as exc:
+                if merged:
+                    _report_merge_pass_failure(merged, exc)
                 if reporter:
                     reporter.fail(step.item, exc, phase='dispatch')
                 detail = ': ' + dispatch._failure_detail(exc) if isinstance(exc, ValueError) else ''
                 out.append(f'failed {step.item} {step.action}: {type(exc).__name__}{detail}')
+    except Exception as exc:
+        if merged:
+            _report_merge_pass_failure(merged, exc)
+        raise
     finally:
         if gate is not None:
             try:
@@ -1368,6 +1434,8 @@ def _record_pass():
         if failures:
             autodispatch_error = '; '.join(failures)
     except Exception as e:
+        if _PASS_MERGED:
+            _report_merge_pass_failure(list(_PASS_MERGED), e)
         autodispatch_pass_failed = True
         autodispatch_error = f"{e}"
         if not admission:

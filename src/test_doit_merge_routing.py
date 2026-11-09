@@ -33,7 +33,7 @@ class MergeRoutingTests(unittest.TestCase):
         events = [queued(), queued('L-spec-9002', 'albert-scott')]
         own = {s.item: s for s in steps(events)}
         direct = own['L-spec-9001']
-        self.assertEqual((direct.state, direct.action, direct.owner), ('action', 'merge-direct', 'executor'))
+        self.assertEqual((direct.state, direct.action, direct.owner), ('action', 'merge-direct', 'tick'))
         self.assertEqual((own['L-spec-9002'].action, own['L-spec-9002'].owner), ('merge', 'tick'))
         self.assertEqual(direct.since, events[0]['ts'])
         self.assertIn('current main', direct.reason)
