@@ -106,6 +106,13 @@ class HowtoTests(unittest.TestCase):
                        'claude-opus-5-5', '14 days', 'axis=K'):
             self.assertIn(marker, page)
 
+    def test_direct_merge_entry(self):
+        page = ' '.join(howto.render(str(REPO)).split())
+        for marker in ('src/direct_merge.py', 'merge_one', 'one do-it-v2 queue row',
+                       'dirty paths', 'unchanged main/branch shas', 'merge --no-ff',
+                       'emit shipped', 'failed merge is aborted', 'cli_gate'):
+            self.assertIn(marker, page)
+
     def test_ac2_mutation_and_deletion(self):
         before = howto.render(str(self.repo))
         sources = {name: (self.repo / name).read_text()

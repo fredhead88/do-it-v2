@@ -144,6 +144,10 @@ def render(repo: str) -> str:
     lines.extend(['', '## Branch refresh',
                   'Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; '
                   f'max {queue.get("branch_refresh_per_day", 3)}/spec/day.'])
+    lines.extend(_wrap('`src/direct_merge.py`: merge_one handles one do-it-v2 queue row: refuse overlapping '
+                       'dirty paths, gate, require unchanged main/branch shas, merge --no-ff, then emit shipped. '
+                       'A moved ref requires re-gating; a failed merge is aborted. cli_gate uses doit gate. '
+                       'Queue selection and tick wiring belong to the caller.'))
     return '\n'.join(lines) + '\n'
 
 
