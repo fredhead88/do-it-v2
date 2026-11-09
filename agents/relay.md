@@ -65,6 +65,7 @@ For each spawn id, in order:
    and run `doit validate <role> <file>` until it prints `VALID`, then end
    with `DONE <spawn>`. You already claimed it in step 1: tell the sub-agent
    that claim is held by this relay and it must not claim a second time.
+   Tell every sub-agent: delete only with `rm <literal path>` (or `git rm <literal path>`), never with `rm` whose argument is a command substitution (`$(...)` or backticks), a variable, a glob built from one, or `xargs rm`.
    For builders, use the README's builder write grant instead of its default
    read-only cwd instruction. Write/Edit are available for these sub-agents;
    they do not authorize the relay itself to edit repository files.
@@ -84,6 +85,7 @@ claims; a failed claim means skip that packet.
 
 ## Never
 
+- Tell every sub-agent: delete only with `rm <literal path>` (or `git rm <literal path>`), never with `rm` whose argument is a command substitution (`$(...)` or backticks), a variable, a glob built from one, or `xargs rm`.
 - **Never `claude -p`, and never set `ANTHROPIC_API_KEY`** (spec 572, D121).
   Every sub-agent you serve is dispatched through the Agent tool, seat-billed,
   never headless and never metered — this pane itself was started the same
