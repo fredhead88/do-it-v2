@@ -22,10 +22,16 @@ import pathlib, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import carry, dispatch, intake  # noqa: E402
+import carry, dispatch, fold, intake  # noqa: E402
 
 SUCCESS_TEMPLATE = (
     "Carried into DO-IT as {spec_id} (spec written {written_at}). "
+    "Follow it with `doit events {spec_id}` on the builder box. "
+    "Closing: the spec is now the ledger's, not this PR's."
+)
+COVERED_TEMPLATE = (
+    "Covered in DO-IT by {spec_id} (spec written {written_at}). "
+    "The earlier \"Carry failed\" comment is superseded. "
     "Follow it with `doit events {spec_id}` on the builder box. "
     "Closing: the spec is now the ledger's, not this PR's."
 )
@@ -44,6 +50,19 @@ def _already_closed_out(url):
     check for it this call is skipped entirely."""
     return bool(carry.scan_events(
         lambda e: e.get("type") == "inbound-closed" and _matches(url)(e)))
+
+
+def _written_coverage(url):
+    """Newest authorized coverage whose covering spec has been written."""
+    hits = carry.scan_events(
+        lambda e: e.get("type") == "inbound-covered" and _matches(url)(e)
+        and e.get("actor") in fold.EMITS.get("inbound-covered", set()))
+    for event in sorted(hits, key=lambda e: e.get("ts") or "", reverse=True):
+        spec_id = event.get("covered_by")
+        written = carry.spec_written(spec_id) if spec_id else None
+        if written:
+            return spec_id, written
+    return None, None
 
 
 def _already_commented_failed(url):
@@ -91,8 +110,12 @@ def run(events, open_spec_prs):
         carried = carry.already_carried(url)
         spec_id = carried.get("subject") if carried else None
         written = carry.spec_written(spec_id) if spec_id else None
+        template = SUCCESS_TEMPLATE
+        if not written:
+            spec_id, written = _written_coverage(url)
+            template = COVERED_TEMPLATE
         if written:
-            body = SUCCESS_TEMPLATE.format(spec_id=spec_id, written_at=written.get("ts"))
+            body = template.format(spec_id=spec_id, written_at=written.get("ts"))
             intake.comment(url, body, f"closed:{spec_id}")
             intake.close(url)
             dispatch.emit(intake.ledger_path(), {}, "inbound-closed",
