@@ -838,20 +838,27 @@ def spec1869_ac1():
                             self.assertEqual((row['attempt'], row['retry_at']), ('', None))
 
         def test_guard_short_circuits_and_failed_conflict_diagnosis(self):
+            def distinct_guard():
+                # Each matrix case still owes its own receipt: move the tested
+                # branch instead of asking one review to repeat the same key.
+                self.git('checkout', '-q', 'work')
+                self.git('commit', '--allow-empty', '-qm', 'distinct guard fixture')
+                return self.invoke(1)
+
             for grant in ([], ['English'], ['**']):
                 with self.subTest(grant=grant), patch.object(mg, 'secret_scan') as scan:
                     with patch.object(mg, 'grant_for', side_effect=lambda *a: mg.check_grant(grant, 'fixture')):
-                        self.invoke(1)
+                        distinct_guard()
                     scan.assert_not_called()
             for text in ('no grant\n', 'Writes: English prose\n', 'Writes:\n',
                          '---\nwrites: [invalid\n---\n', '---\nwrites: text\n---\n'):
                 with self.subTest(text=text), patch.object(mg, 'grant_for', side_effect=lambda *a: mg.grant_from_text(text)):
-                    self.invoke(1)
+                    distinct_guard()
             for spec_id in ('../../bad', 'L-spec-missing'):
                 with patch.object(mg, 'grant_for', side_effect=lambda *a: mg.writes_grant(spec_id)):
-                    self.invoke(1)
+                    distinct_guard()
             with patch.object(mg, 'REVERT_MAX_PATHS', 1), patch.object(mg, 'gate', side_effect=lambda *a: mg.revert_window(['a','b'], 'main')):
-                self.invoke(1)
+                distinct_guard()
             with patch.object(mg, 'gate', side_effect=mg.Undetermined('synthetic', reason='merge-conflict')), \
                  patch.object(mg, 'conflict_event', return_value=None):
                 self.invoke(2, 'conflict-diagnostic', 'conflict-diagnostic')

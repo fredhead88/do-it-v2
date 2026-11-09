@@ -416,14 +416,28 @@ class StartRefusals(DispatchCase):
 
 
 class GateCase(ScratchCase):
-    def invoke_gate(self, expected, *extra, branch="work", main="main", reason=None):
-        before = len(self.rows())
+    def invoke_gate(self, expected, *extra, branch="work", main="main", reason=None,
+                    duplicate=False):
+        before = self.rows()
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             result = mg.main_([branch, main, *extra])
         self.assertEqual(result, expected)
-        rows = [e for e in self.rows()[before:] if e["type"].startswith("merge-gate-")]
-        self.assertEqual(len(rows), 1, rows)
-        row = rows[0]
+        after = self.rows()
+        rows = [e for e in after[len(before):] if e["type"].startswith("merge-gate-")]
+        self.assertEqual(len(rows), 0 if duplicate else 1, rows)
+        if duplicate:
+            self.assertEqual(expected, 1)
+            self.assertEqual([e for e in after if e["type"].startswith("merge-gate-")],
+                             [e for e in before if e["type"].startswith("merge-gate-")])
+            subject = extra[extra.index("--spec") + 1] if "--spec" in extra else branch
+            matches = [e for e in before if e["type"] == "merge-gate-rework"
+                       and e["subject"] == subject
+                       and e.get("branch_sha") == self.git("rev-parse", branch)
+                       and e.get("check") == reason]
+            self.assertEqual(len(matches), 1, matches)
+            row = matches[0]
+        else:
+            row = rows[0]
         self.assertEqual(row["type"], {0: "merge-gate-clean", 1: "merge-gate-rework",
                                       2: "merge-gate-undetermined"}[expected])
         if reason:
@@ -437,7 +451,7 @@ class GateCase(ScratchCase):
         if row.get("merged_tree"):
             tree = self.git("merge-tree", "--write-tree", main, branch).splitlines()[0]
             self.assertEqual(row["merged_tree"], tree[:len(row["merged_tree"])])
-        self.observations.append(dict(exit_code=result, receipt=row))
+        self.observations.append(dict(exit_code=result, receipt=row, duplicate=duplicate))
         return row
 
     def ready(self, **kw):
@@ -452,9 +466,14 @@ class GateStructural(GateCase):
         self.ready()
         for tokens in (["the", "web", "dashboard"], ["**"], ["*/**"], ["**.*"]):
             with self.subTest(tokens=tokens):
+                # Each independent guard case retains its own receipt assertion.
+                self.git("commit", "--allow-empty", "-qm", "distinct grant fixture")
+                self.branch_sha = self.git("rev-parse", "work")
                 self.invoke_gate(1, "--writes", *tokens)
         for text in ("Writes:\n", "Writes: the web dashboard only\n", "Writes: **\n", "no grant\n"):
             with self.subTest(spec=text):
+                self.git("commit", "--allow-empty", "-qm", "distinct grant fixture")
+                self.branch_sha = self.git("rev-parse", "work")
                 (self.content / "L-spec-9901.md").write_text(text)
                 self.invoke_gate(1, "--spec", "L-spec-9901")
         self.invoke_gate(1, "--spec", "missing")
@@ -615,17 +634,23 @@ class GateScanner(GateCase):
                     if prior:
                         self.handin()
                     count = self.scanner_calls()
-                    row = self.invoke_gate(status, reason="secret-scan" if status else None)
+                    row = self.invoke_gate(status, reason="secret-scan" if status else None,
+                                           duplicate=bool(status and prior))
                     self.assertEqual(self.scanner_calls(), count + 1)
                     if status:
                         self.assertEqual(row["findings"], ["  added.py:1 -- Inert Fixture Finding"])
                 if status:
+                    self.assertEqual(len([e for e in self.rows()
+                        if e["type"] == "merge-gate-rework"]), 1)
                     self.put("added.py", "value = 2\n")
                     self.commit()
                     self.handin()
                     count = self.scanner_calls()
                     self.invoke_gate(1, reason="secret-scan")
                     self.assertEqual(self.scanner_calls(), count + 1)
+                    receipts = [e for e in self.rows() if e["type"] == "merge-gate-rework"]
+                    self.assertEqual(len(receipts), 2)
+                    self.assertEqual(len({e["branch_sha"] for e in receipts}), 2)
                 self.assertEqual(len(self.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 1)
                 self.assertEqual(list(self.scratch.glob("gate/scan-*")), [])
 

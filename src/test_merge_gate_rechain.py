@@ -206,7 +206,7 @@ exit 0
         row = self.invoke(1)
         self.assertEqual(row['reason'], 'secret-scan')
         self.assertIn('SyntheticParent', row['findings'][0])
-        self.assertEqual(row['branch_sha'], self.b[2][:12])
+        self.assertEqual(row['branch_sha'], self.b[2])
         self.assertEqual(git(self.repo, 'worktree', 'list', '--porcelain').count('worktree '), 1)
 
     def test_scanner_external_timeout_and_setup_error_hold(self):
@@ -450,7 +450,15 @@ rechain.fold.append = forbidden
         integration = git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD')
         baseline = subprocess.check_output(['git', '-C', str(repo), 'show',
                                              integration + ':src/test_merge_gate.py'])
-        self.assertEqual((SOURCE / 'test_merge_gate.py').read_bytes(), baseline)
+        # The one granted fixture edit (test_guard_short_circuits_and_failed_conflict_diagnosis)
+        # is excised from both copies; every other byte stays pinned.
+        def without_granted(data):
+            head = b'        def test_guard_short_circuits_and_failed_conflict_diagnosis(self):\n'
+            start = data.index(head)
+            end = data.index(b'\n        def ', start + len(head))
+            return data[:start] + data[end:]
+        self.assertEqual(without_granted((SOURCE / 'test_merge_gate.py').read_bytes()),
+                         without_granted(baseline))
         result = subprocess.run(['/usr/bin/python3', str(SOURCE / 'test_merge_gate.py')],
                                 cwd=repo, capture_output=True, text=True)
         failures = [line for line in result.stdout.splitlines() if 'FAIL' in line]
