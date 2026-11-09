@@ -31,6 +31,7 @@ import argparse, itertools, os, pathlib, re, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
+import migration_cut  # noqa: E402
 
 HEADER = "## Script pre-pass (ground truth — do not re-derive)"
 
@@ -126,6 +127,8 @@ def units(cut_text):
             continue
         wave = next((int(w) for w in f.get("wave", []) if w.isdigit()), None)
         out.append({"name": m.group(2).strip(), "wave": wave,
+                    "text": cut_text[m.end():end],
+                    "id": next(iter(re.findall(r'\bL-spec-[0-9]+\b', m.group(2))), None),
                     **{k: f.get(k, []) for k in ("goal", "delivers", "footprint", "consumes", "produces")}})
     return out
 
@@ -274,7 +277,11 @@ def sizes(us, repo):
     for u in us:
         b, unresolved = 0, []
         for f in u["footprint"]:
-            hits = [h for h in (root.glob(f) if any(c in f for c in "*?[") else [root / f]) if h.is_file()]
+            try:
+                hits = migration_cut.matches(root, f)
+            except (OSError, ValueError):
+                unresolved.append("unsafe or unreadable footprint")
+                continue
             b += sum(h.stat().st_size for h in hits)
             if not hits:
                 unresolved.append(f)
@@ -293,6 +300,22 @@ def dep_name(line):
     return (m.group(1) if m else (s.split() or [""])[0]).strip("*_`,")
 
 
+_EVENTS_UNREADABLE = object()
+
+
+def _event_snapshot(events):
+    if events is _EVENTS_UNREADABLE:
+        raise OSError('ledger unreadable')
+    return fold.read_events() if events is None else events
+
+
+def _prepass_events(events):
+    try:
+        return _event_snapshot(events)
+    except (OSError, ValueError):
+        return _EVENTS_UNREADABLE
+
+
 def acquisition(plan_text, events=None):
     """An acquisition decision for every declared dependency — the ADR-trail diff
     (§3.6, §6). The trail is `adr-filed{kind: acquisition}`; §2.7 gives it that field
@@ -305,7 +328,11 @@ def acquisition(plan_text, events=None):
                 "missing decision (§3.5)"], None
     deps = [d for d in (dep_name(l) for l in sec.splitlines() if l.strip().startswith(("-", "*")))
             if d and d.lower() not in ("none", "n/a", "nothing")]
-    filed = {e.get("candidate") for e in (fold.read_events() if events is None else events)
+    try:
+        snapshot = _event_snapshot(events)
+    except (OSError, ValueError):
+        return [], "ledger unreadable"
+    filed = {e.get("candidate") for e in snapshot
              if e.get("type") == "adr-filed" and e.get("kind") == "acquisition"}
     return [f"`{d}` is declared in the Plan with no acquisition ADR on the trail" for d in deps
             if d not in filed], None
@@ -322,6 +349,136 @@ def units_vs_charter(us, charter_text):
     d = coverage(want, {i for u in us for i in u["delivers"]})
     return ([f"no unit delivers {i}" for i in d["undelivered"]]
             + [f"a unit cites {i}, which the charter does not state" for i in d["creep"]], None)
+
+
+# ── SD10 migration cuts ──────────────────────────────────────────────────────
+
+
+def code_measure(slot, repo):
+    """The existing FLOOR + bytes//4 estimate, on application paths alone."""
+    from rechain import SHARED, TEST
+    paths = [p for p in slot['footprint']
+             if not migration_cut.is_version(p) and p not in SHARED and p != TEST]
+    if not repo:
+        return None, None
+    total, missing = 0, False
+    for path in paths:
+        hits = migration_cut.matches(repo, path)
+        total += sum(p.stat().st_size for p in hits)
+        missing |= not bool(hits)
+    estimate = FLOOR + total // 4
+    # Known bytes can prove excess even if another future path is unmeasured.
+    return (None if missing and estimate <= CEILING else estimate > CEILING), estimate
+
+
+def _snapshot_holds(sid, text, own, events):
+    """Resolve supplied text against its marker and authoritative newest hold.
+
+    Pass declarations, not spec markers, to the existing reader so its optional
+    live-text projection has nothing to acquire. Release and shipment decisions
+    remain entirely in autodispatch.
+    """
+    import autodispatch
+    import dependency_holds
+    dependency = dependency_holds.from_spec_text(text)
+    marker = max((e for e in own if e.get('type') in ('spec-written', 'spec-amended')),
+                 key=autodispatch._hold_order, default=None)
+    ledger = max((e for e in own if e.get('type') == 'dependency-hold'),
+                 key=autodispatch._hold_order, default=None)
+    declaration = None
+    if dependency and marker:
+        declaration = dict(marker, type='dependency-hold', waits_for=dependency,
+                           _src='spec-text:' + sid)
+    if ledger and (not declaration or fold.ts(ledger.get('ts')) >= fold.ts(declaration.get('ts'))):
+        declaration = ledger
+    if declaration is None:
+        return []
+    supplied = [declaration] + [e for e in own if e.get('type') in ('decision', 'unblocked')]
+    reason = autodispatch.held_by_dependency(supplied, events)
+    if reason and not dependency_holds.valid_dependency(declaration.get('waits_for')):
+        raise ValueError('invalid effective dependency hold')
+    if reason and declaration.get('waits_for') == sid:
+        raise ValueError('self dependency hold')
+    return [declaration['waits_for']] if reason else []
+
+
+def _open_migration_specs(events):
+    import autodispatch
+    import dispatch
+    by_id = {}
+    for event in events:
+        sid = event.get('subject', '')
+        if re.fullmatch(r'L-spec-[0-9]+', sid):
+            by_id.setdefault(sid, []).append(event)
+    specs = []
+    for sid, own in sorted(by_id.items()):
+        if fold.spec_state(own, set()) in autodispatch.TERMINAL_STATES:
+            continue
+        try:
+            path = dispatch.spec_path(sid)
+            root = (fold.ROOT / 'content').resolve()
+            if not path.resolve().is_relative_to(root):
+                raise ValueError('spec path escapes content context')
+            text = path.read_text()
+        except (OSError, UnicodeError):
+            raise ValueError(f'{sid}: live-spec declarations unreadable') from None
+        interface = section(text, 'Interfaces') or ''
+        # Specs use Writes rather than Footprint; fields only needs the two seam
+        # labels here, and retains the existing inline/list signature parser.
+        consumes = fields(interface).get('consumes', [])
+        specs.append(dict(id=sid, consumes=consumes,
+                          waits_for=_snapshot_holds(sid, text, own, events)))
+    return specs
+
+
+def migration_cuts(us, repo, events=None):
+    found, blind = [], []
+    try:
+        # Ordinary units do not need a ledger or migration metadata.
+        candidates = []
+        for unit in us:
+            slot = dict(unit)
+            expanded = []
+            for path in slot['footprint']:
+                migration_cut.safe_path(path)
+                if any(c in path for c in '*?[') and repo:
+                    hits = migration_cut.matches(repo, path)
+                    expanded.extend(p.relative_to(pathlib.Path(repo).resolve()).as_posix() for p in hits)
+                    if not hits:
+                        expanded.append(path)
+                else:
+                    expanded.append(path)
+            slot['footprint'] = expanded
+            # Check unresolved migration grants before deciding absence.
+            if not any(migration_cut.is_version(p) for p in expanded):
+                migration_cut.needs_cut(slot, [])
+                continue
+            candidates.append(slot)
+        if not candidates:
+            return [], None
+        snapshot = list(_event_snapshot(events))
+        consumers = _open_migration_specs(snapshot)
+        for unit in us:
+            consumer = dict(unit)
+            if unit.get('id'):
+                own = [e for e in snapshot if e.get('subject') == unit['id']]
+                consumer['waits_for'] = _snapshot_holds(unit['id'], unit.get('text', ''), own, snapshot)
+                consumer.pop('text', None)
+            consumers.append(consumer)
+        for slot in candidates:
+            try:
+                slot['code_exceeds_size'], estimate = code_measure(slot, repo)
+                advice = migration_cut.needs_cut(slot, consumers)
+                if advice.cut:
+                    detail = (', '.join(advice.consumers) if advice.consumers else
+                              f'code-size estimate={estimate} ceiling={CEILING}')
+                    found.append(f"migration-not-cut: {slot['name']} — {detail}")
+            except (OSError, ValueError) as exc:
+                blind.append(f"{slot['name']}: {exc}" if isinstance(exc, ValueError)
+                             else f"{slot['name']}: footprint unreadable")
+    except (OSError, UnicodeError, ValueError) as exc:
+        blind.append(str(exc) if isinstance(exc, ValueError) else 'ledger/content unreadable')
+    return found, '; '.join(blind) or None
 
 
 # ── the block ────────────────────────────────────────────────────────────────
@@ -372,6 +529,7 @@ def prepass(doc_text, charter_text=None, repo=None, events=None):
     if not us:
         die("the document declares no unit — a unit block carries a `Footprint:` line "
             "(planner.md ①). Undetermined is never clean")
+    events = _prepass_events(events)
     rows = [(OVERLAP_LABEL, *overlap(us)),
             ("undefined seams (a Consumes with no Produces)", *seams(us)),
             ("shared names introduced twice with no owner", *shared(us, doc_text)),
@@ -381,7 +539,7 @@ def prepass(doc_text, charter_text=None, repo=None, events=None):
             ("seam direction (Produces/Consumes vs the unit's own Goal, and the "
              "Plan's Seams where it is the authority)", *seam_direction(us, charter_text, doc_text))]
     return f"units: {len(us)} · waves: {sorted({u['wave'] for u in us if u['wave'] is not None})}\n" \
-           + render("doc", rows)
+           + render("doc", rows + [("migration-cut (SD10)", *migration_cuts(us, repo, events))])
 
 
 def prepass_two_file(stage, cut_text, charter_text=None, plan_text=None, repo=None, events=None):
@@ -391,6 +549,8 @@ def prepass_two_file(stage, cut_text, charter_text=None, plan_text=None, repo=No
     if not us:
         die("the cut file declares no unit — a unit block carries a `Footprint:` line "
             "(planner.md ①). Undetermined is never clean")
+    if plan_text is not None:
+        events = _prepass_events(events)
     rows = [(OVERLAP_LABEL, *overlap(us)),
             ("undefined seams (a Consumes with no Produces)", *seams(us)),
             ("shared names introduced twice with no owner", *shared(us, plan_text)),
@@ -400,7 +560,7 @@ def prepass_two_file(stage, cut_text, charter_text=None, plan_text=None, repo=No
             ("seam direction (Produces/Consumes vs the unit's own Goal, and the "
              "Plan's Seams where it is the authority)", *seam_direction(us, charter_text, plan_text))]
     return f"units: {len(us)} · waves: {sorted({u['wave'] for u in us if u['wave'] is not None})}\n" \
-           + render(stage, rows)
+           + render(stage, rows + [("migration-cut (SD10)", *migration_cuts(us, repo, events))])
 
 
 def main(argv=None):

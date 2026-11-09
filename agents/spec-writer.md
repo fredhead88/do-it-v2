@@ -71,6 +71,25 @@ Run each. Record what it found in `Assumptions[]`, or kill the spec.
    not depend on local repro, and name the observation that will confirm the
    fix. You may skip the repro; you may never skip the proof.
 
+**SD10 — migration unit cut.** When a slot adds an alembic version AND
+(a) another open spec or current-plan slot consumes a created column, table or
+enum through `Consumes:`/Interfaces or an effective dependency hold, OR (b) the
+remaining code footprint alone exceeds the existing §4.3 size ceiling, require a
+migration-only predecessor merged first. Its footprint is only the version file
+under `rechain.VERSIONS` plus `rechain.SHARED` and the isolation test
+`rechain.TEST`; application code belongs in the code unit. Use the read-only
+`migration_cut.needs_cut` advice and the audit's `migration-not-cut` finding;
+undetermined evidence is not clean. A grant already limited to those migration
+paths needs no recursive split. This rule grants no application-code writes.
+
+If pre-flight finds this missed cut, return `status: split-proposed` with named
+`orders-migration` and `orders-code` units in the existing `split` output. For the
+seed above, the migration creates `orders.invoice_id column`, the code consumes
+it, and its real-id dependency hold points at the migration predecessor. The
+Planner re-cuts and rewires any other schema consumer to the migration producer.
+Never shrink the original Goal, allocate ids, write two specs yourself, or modify
+application code; the existing one-spec/content-only restrictions still apply.
+
 ## The eleven slots
 
 Three are conditional and fire on a property of the footprint, never on a

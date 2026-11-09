@@ -113,6 +113,25 @@ between. Why: on 2026-09-24/25, parallel merges with no order forced L-spec-0261
 rebuild-and-regrade rounds, and 0275, 0276 and 0214 into two each. Build in parallel, merge
 in order.
 
+**SD10 — migration unit cut.** When a slot adds an alembic version AND
+(a) another open spec or current-plan slot consumes a created column, table or
+enum through `Consumes:`/Interfaces or an effective dependency hold, OR (b) the
+remaining code footprint alone exceeds the existing §4.3 size ceiling, require a
+migration-only predecessor merged first. Its footprint is only the version file
+under `rechain.VERSIONS` plus `rechain.SHARED` and the isolation test
+`rechain.TEST`; application code belongs in the code unit. Use the read-only
+`migration_cut.needs_cut` advice and the audit's `migration-not-cut` finding;
+undetermined evidence is not clean. A grant already limited to those migration
+paths needs no recursive split. This rule grants no application-code writes.
+
+For a seed that adds `orders.invoice_id column` and application code, with
+another slot consuming that column, carve named `orders-migration` and
+`orders-code` units through the existing allocation/re-carve pipeline. Give the
+code unit a real-id dependency hold on the migration predecessor after allocation,
+and rewire the other schema consumer to the migration producer. Waves are coarse:
+only actual prerequisites impose dependency holds and build-readiness checks;
+nothing else waits. Do not create a second plan document.
+
 **Then the Shared-decisions block**, and the rest of the required sections. A
 missing section is a missing decision, not a short document:
 
