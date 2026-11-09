@@ -230,6 +230,7 @@ EMITS["autodispatch-failed"] = {"tick"}     # R1: the tick's own dispatch-skip r
 EMITS["autodispatch-skipped"] = {"tick"}
 EMITS["dependency-hold"] = {"thinker", "operator", "planner", "tick", "spec-preflight"}
 EMITS["writes-granted"] = {"spec-preflight"}
+EMITS["coupled-files-granted"] = {"spec-preflight"}
 EMITS["build-timeout"] = {"builder"}
 EMITS["supervisor-code"] = {"up"}           # R2: `up.maybe_reexec`'s own version claim
 EMITS["install-synced"] = {"tick"}          # R5: the tick's own once-per-sha install pass
@@ -343,6 +344,7 @@ EMITS["merge-gate-undetermined"] = {"executor", "tick"}
 
 REQUIRED_ROWS = {
     "writes-granted": ("tests", "why", "spec_written_src"),
+    "coupled-files-granted": ("files", "why", "spec_written_src"),
     "build-timeout": ("branch", "last_commit", "wip_commits", "spawn"),
     "precheck-pregrade": ("master", "branch_sha", "verdict"),
     "next-step-held": ("subject", "spec", "reason", "owner", "since"),

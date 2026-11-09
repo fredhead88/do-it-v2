@@ -133,3 +133,4 @@ Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; 
   gate, require unchanged main/branch shas, merge --no-ff, then emit shipped. A moved ref requires
   re-gating; a failed merge is aborted. cli_gate uses doit gate. Queue selection and tick wiring
   belong to the caller.
+- `src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.
