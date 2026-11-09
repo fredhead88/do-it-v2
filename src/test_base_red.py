@@ -1311,7 +1311,9 @@ def test_xfail(): assert False
                 for exception in (RuntimeError("runner"), subprocess.TimeoutExpired("runner", 1)):
                     with patch.object(br, "_run_recheck", side_effect=exception):
                         self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
-                result = br.recheck("demo", sha, ids("red", "green", "fixture", "setup", "teardown", "skip", "xfail") + ["missing.py::test_absent"])
+                with patch.dict(os.environ, DOIT_RECHECK_PYTHON=sys.executable):
+                    result = br.recheck("demo", sha, ids("red", "green", "fixture", "setup", "teardown", "skip", "xfail") + ["missing.py::test_absent"])
+                self.assertIn([sys.executable, "-c", "import pytest"], calls)
                 self.assertEqual(result["red"], ids("red"))
                 self.assertEqual(result["green"], ids("green"))
                 self.assertEqual(result["absent"], ["missing.py::test_absent"])
@@ -1325,9 +1327,14 @@ def test_xfail(): assert False
                         return observed(argv, **kw)
                     with patch.object(br.subprocess, "run", side_effect=aborted):
                         self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
-                for interpreter in [str(root/"missing-python"), "/usr/bin/python3"]:
+                stub = root/"no-pytest-python"
+                stub.write_text("#!/bin/sh\nexit 1\n")
+                stub.chmod(0o755)
+                for interpreter in [str(root/"missing-python"), str(stub)]:
                     with patch.dict(os.environ, DOIT_RECHECK_PYTHON=interpreter):
+                        self.assertEqual(br._recheck_python("demo"), interpreter)
                         self.assertEqual(br.recheck("demo", sha, ids("red"))["undetermined"], ids("red"))
+                self.assertIn([str(stub), "-c", "import pytest"], calls)
                 invalid = ["../test_cases.py::test_red", "-x.py::test_red", "test_cases.py::bad name", "/test_cases.py::test_red", "vitest::test"]
                 runner = unittest.mock.Mock()
                 self.assertEqual(br.recheck("demo", sha, invalid, runner=runner)["undetermined"], invalid)
