@@ -208,6 +208,99 @@ r11 = pr_closeout.run([], [])   # URL1 is fully closed-out in scan_events, but n
 check(r11 == {"closed": [], "commented": []}, f"AC11: return dict: {r11}")
 check(not COMMENT_CALLS and not CLOSE_CALLS, "AC11: an absent url is never acted on")
 
+# ══ L-spec-2355 · covered closeout, authorization, ordering and idempotency ══
+COVERED_URL = "https://github.com/o/r/pull/2355"
+COVERING_SPEC = "L-spec-9235"
+write_event("L-intake-local.jsonl", {"type": "inbound-registered", "source": COVERED_URL})
+write_event("L-executor-local.jsonl", {"type": "carry-failed", "source": COVERED_URL,
+                                      "error": "first carry killed"})
+reset_calls()
+pr_closeout.run([], [{"url": COVERED_URL}])
+check(len(COMMENT_CALLS) == 1 and COMMENT_CALLS[0][2] == "carry-failed",
+      "2355 AC1: fixture starts under an earlier Carry failed comment")
+write_event("L-executor-local.jsonl", {"type": "inbound-covered", "source": COVERED_URL,
+                                      "covered_by": COVERING_SPEC})
+COVERED_WRITTEN_TS = stamp()
+write_event("L-spec-writer-local.jsonl", {"type": "spec-written", "subject": COVERING_SPEC,
+                                         "ts": COVERED_WRITTEN_TS})
+reset_calls()
+covered_result = pr_closeout.run([], [{"url": COVERED_URL}])
+check(covered_result == {"closed": [COVERED_URL], "commented": []},
+      f"2355 AC1: covered PR closes: {covered_result}")
+check(len(COMMENT_CALLS) == 1 and COMMENT_CALLS[0][0] == COVERED_URL
+      and COMMENT_CALLS[0][2] == f"closed:{COVERING_SPEC}",
+      "2355 AC1: one success comment uses covering spec marker")
+covered_body = COMMENT_CALLS[0][1]
+check(COVERING_SPEC in covered_body and COVERED_WRITTEN_TS in covered_body
+      and "Carry failed" in covered_body and "superseded" in covered_body,
+      f"2355 AC1: body names spec, written time and superseded failure: {covered_body}")
+check(CLOSE_CALLS == [COVERED_URL], "2355 AC1: covered PR closes exactly once")
+covered_closed = carry.scan_events(lambda e: e.get("type") == "inbound-closed"
+                                  and e.get("source") == COVERED_URL)
+check(len(covered_closed) == 1 and covered_closed[0]["subject"] == COVERED_URL
+      and covered_closed[0]["project"] == "albert-scott"
+      and covered_closed[0]["spec_id"] == COVERING_SPEC,
+      "2355 AC1: one inbound-closed records the covering spec and original event fields")
+before_repeat = carry.scan_events(lambda e: True)
+reset_calls()
+check(pr_closeout.run([], [{"url": COVERED_URL}]) == {"closed": [], "commented": []},
+      "2355 AC2: repeated closeout has an empty result")
+check(not COMMENT_CALLS and not CLOSE_CALLS and not HAS_MARKER_CALLS,
+      "2355 AC2: repeated closeout makes zero intake calls")
+check(carry.scan_events(lambda e: True) == before_repeat,
+      "2355 AC2: repeated closeout appends no event")
+check(not any(e["source"] == COVERED_URL for e in carry.uncarried(before_repeat)),
+      "2355 AC3: covered-then-closed PR is absent from uncarried")
+check(fake_comment is intake.comment and fake_close is intake.close,
+      "2355: all GitHub effects remain recording fakes")
+
+for suffix, actor, written_spec in (("untrusted", "operator", COVERING_SPEC),
+                                    ("unwritten", "executor", "L-spec-9236")):
+    url = f"https://github.com/o/r/pull/2355-{suffix}"
+    write_event(f"L-{actor}-local.jsonl", {"type": "inbound-covered", "source": url,
+                                          "covered_by": written_spec})
+    snapshot = carry.scan_events(lambda e: True)
+    reset_calls()
+    check(pr_closeout.run([], [{"url": url}]) == {"closed": [], "commented": []},
+          f"2355 AC2: {suffix} coverage leaves PR open")
+    check(not COMMENT_CALLS and not CLOSE_CALLS and not HAS_MARKER_CALLS,
+          f"2355 AC2: {suffix} coverage makes zero intake calls")
+    check(carry.scan_events(lambda e: True) == snapshot,
+          f"2355 AC2: {suffix} coverage appends no event")
+
+# Scan order is filename order, not timestamp order. The newest eligible hit
+# below is in the earlier executor file, and matches subject rather than source.
+ORDER_URL = "https://github.com/o/r/pull/2355-order"
+write_event("L-carry-local.jsonl", {"type": "spec-carried", "source": ORDER_URL,
+                                   "subject": "L-spec-9236"})
+write_event("L-spec-writer-local.jsonl", {"type": "inbound-covered", "source": ORDER_URL,
+                                         "covered_by": SPEC1})
+write_event("L-executor-local.jsonl", {"type": "inbound-covered", "subject": ORDER_URL,
+                                      "covered_by": COVERING_SPEC})
+write_event("L-operator-local.jsonl", {"type": "inbound-covered", "source": ORDER_URL,
+                                      "covered_by": SPEC2})
+write_event("L-executor-local.jsonl", {"type": "inbound-covered", "source": ORDER_URL,
+                                      "covered_by": "L-spec-9236"})
+reset_calls()
+check(pr_closeout.run([], [{"url": ORDER_URL}])["closed"] == [ORDER_URL],
+      "2355 R1: pending carried spec falls back to eligible subject-matched coverage")
+check(COMMENT_CALLS == [(ORDER_URL, covered_body, f"closed:{COVERING_SPEC}")],
+      "2355 R1: newest authorized written coverage wins across files, ignoring ineligible newer hits")
+
+# A written carried spec continues to win over a later covered event.
+PRIORITY_URL = "https://github.com/o/r/pull/2355-priority"
+write_event("L-carry-local.jsonl", {"type": "spec-carried", "source": PRIORITY_URL,
+                                   "subject": SPEC1})
+write_event("L-executor-local.jsonl", {"type": "inbound-covered", "source": PRIORITY_URL,
+                                      "covered_by": COVERING_SPEC})
+reset_calls()
+check(pr_closeout.run([], [{"url": PRIORITY_URL}])["closed"] == [PRIORITY_URL],
+      "2355 AC3: carried-then-written path still closes")
+check(COMMENT_CALLS == [(PRIORITY_URL,
+                        pr_closeout.SUCCESS_TEMPLATE.format(spec_id=SPEC1, written_at=WRITTEN_TS),
+                        f"closed:{SPEC1}")],
+      "2355 AC3: carried path keeps exact SUCCESS_TEMPLATE text")
+
 # ══ AC8 · no literal `ingest_inbound_spec` in the source text ══════════════
 SRC = (pathlib.Path(__file__).parent / "pr_closeout.py").read_text()
 check("ingest_inbound_spec" not in SRC, "AC8: pr_closeout.py names no ingest_inbound_spec")
