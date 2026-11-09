@@ -68,6 +68,12 @@ K = int(os.environ.get("DOIT_K", "0"))
 OWED_TALLY_STATES = ("shipped-owed-evidence", "shipped-owed-expired")
 
 NOW = datetime.now(timezone.utc)
+_IMPORT_NOW = NOW
+
+
+def _append_now():
+    """Writer time; a caller's rebound NOW remains an explicit clock override."""
+    return datetime.now(timezone.utc) if NOW is _IMPORT_NOW else NOW
 
 
 def charter_id(v):
@@ -2349,7 +2355,15 @@ def append(argv: list[str], strict: bool = False) -> dict:
         argv = [a for a in argv if a != "--inbox"]
     path = ledger_path(inbox=inbox)
     ledger_write_guard.check(path)
-    e = {"v": 1, "ts": NOW.isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1]}
+    history = None
+
+    def events():
+        nonlocal history
+        if history is None:
+            history = read_events()
+        return history
+
+    e = {"v": 1, "ts": _append_now().isoformat(timespec="seconds"), "type": argv[0], "subject": argv[1]}
     for kv in argv[2:]:
         k, _, v = kv.partition("=")
         # ★ A BARE VALUE IS A STRING unless it is UNAMBIGUOUSLY JSON. Bare numbers
@@ -2372,15 +2386,16 @@ def append(argv: list[str], strict: bool = False) -> dict:
         else:
             e[k] = v
     if "project" not in e:
-        e["project"] = PROJECT or subject_project(argv[1]) or pathlib.Path.cwd().name
+        e["project"] = (PROJECT or __import__('project_scope').subject_project(events(), argv[1])
+                        or pathlib.Path.cwd().name)
     if e['type'] == 'decision' and e.get('ref'):
-        __import__('window_policy').check_decision(e, read_events())
+        __import__('window_policy').check_decision(e, events())
     if "actor" in e:
         raise SystemExit("refused: actor is derived from the ledger filename, never an actor= field")
     actor = actor_of(path.name)
     prior = None
     if e["type"] == "owed-ac" and actor not in OWED_DECLARERS:
-        prior = fold(read_events())[3].get(e["subject"], [])
+        prior = fold(events())[3].get(e["subject"], [])
     reason = check_append(e, actor, prior)
     if reason and (strict or required_reason(e)):
         raise SystemExit(f"refused: {e['type']} by {actor}: {reason}. Nothing was written. (R3)")
@@ -2401,7 +2416,7 @@ def append(argv: list[str], strict: bool = False) -> dict:
         if "problem" not in e:
             e["problem"] = "unassigned"
         slug = e["problem"]
-        prior = read_events()
+        prior = events()
         if problems.occurrence_count(prior, slug) == 0:      # a mint, whether given or defaulted
             existing = problems.register(prior)               # excludes `unassigned` on its own
             suggestions = problems.suggest_slugs(slug, e.get("statement") or "", existing)
