@@ -188,6 +188,43 @@ def _standing_ruling(spec_evs):
     return hold if hold is not None and not _hold_released(hold, evs) else None
 
 
+def _preflight_hold(spec_evs):
+    """Require determined evidence following the newest canonical revision."""
+    import spec_preflight
+    written = None
+    current = None
+    for event in spec_evs:
+        if event.get('type') == 'spec-written':
+            written, current = event, None
+        elif (event.get('type') == 'spec-preflight' and written is not None
+              and event.get('subject') == written.get('subject')):
+            source = event.get('_src') or event.get('src')
+            actor = fold.actor_of(source.rsplit(':', 1)[0]) if source else event.get('actor')
+            if fold.admits(event, actor) is not None:
+                continue
+            captured = event.get('spec_written_src')
+            if captured is not None and captured != (written.get('_src') or written.get('src')):
+                continue
+            current = event
+    if current is None or 'refused' not in current:
+        return 'held: awaiting spec-preflight'
+    try:
+        spec_preflight._validate({key: current[key] for key in
+                                 ('spec', 'findings', 'red_on_master', 'undetermined', 'refused', 'cpu_s')})
+        if current['spec'] != written.get('subject'):
+            raise ValueError('wrong spec')
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return 'held: spec-preflight undetermined (invalid evidence)'
+    if current['refused']:
+        row = current['refused'][0]
+        return f"held: spec-preflight refused ({row['check']}: {row['id']})"
+    if current['undetermined']:
+        return 'held: spec-preflight undetermined (' + '; '.join(current['undetermined']) + ')'
+    if current['red_on_master']:
+        return 'held: spec-preflight undetermined (red_on_master without refusal)'
+    return None
+
+
 def _automatic_hold(spec_evs, all_evs, *, shipped=None):
     evs = list(spec_evs)
     dependency = held_by_dependency(evs, all_evs, shipped=shipped)
@@ -200,7 +237,7 @@ def _automatic_hold(spec_evs, all_evs, *, shipped=None):
     if len(failures) >= BASE_FAILURE_BUDGET:
         return (f"held: branch-not-descendant x{len(failures)}; "
                 "awaiting newer decision rework=yes or build-done DONE")
-    return None
+    return _preflight_hold(evs)
 
 
 def _standing_autodispatch_failed(evs):

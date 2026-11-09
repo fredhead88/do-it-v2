@@ -23,6 +23,8 @@ def seeded():
 
 
 def selected(rows, **kwargs):
+    from test_nextstep import clean_preflights
+    rows = clean_preflights(rows)
     return nextstep.step_for(rows, {SID: dict(state='written')}, SID, NOW,
                              lane_rules.load(), **kwargs)
 

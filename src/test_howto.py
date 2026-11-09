@@ -146,6 +146,13 @@ class HowtoTests(unittest.TestCase):
                        'emit shipped', 'failed merge is aborted', 'cli_gate'):
             self.assertIn(marker, page)
 
+    def test_preflight_gate_entry(self):
+        page = ' '.join(howto.render(str(REPO)).split())
+        for marker in ('Spec preflight gate', 'newest spec-written', 'Old-schema evidence',
+                       'refusals and undetermined', 'standing ruling holds', '120 seconds',
+                       'cpu_s reports added child CPU'):
+            self.assertIn(marker, page)
+
     def test_ac2_mutation_and_deletion(self):
         before = howto.render(str(self.repo))
         sources = {name: (self.repo / name).read_text()
@@ -194,7 +201,7 @@ class HowtoTests(unittest.TestCase):
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))
-            self.assertLessEqual(len(page.splitlines()), 150)
+            self.assertLessEqual(len(page.splitlines()), 156)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
             self.assertEqual(page.count('\n## '), 6)

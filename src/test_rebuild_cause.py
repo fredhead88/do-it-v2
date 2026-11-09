@@ -35,11 +35,12 @@ def event(kind, minute=-60, **fields):
 
 
 def history():
-    return [event('spec-written', -180, project='project'),
+    from test_nextstep import clean_preflights
+    return clean_preflights([event('spec-written', -180, project='project'),
             event('spawn-done', -179, actor='spec-auditor', bad_cut=False),
             event('build-started', -170, spawn='L-builder-9000'),
             event('build-done', -160, spawn='L-builder-9000', status='DONE'),
-            event('spawn-done', -159, spawn='L-builder-9000', role='builder')]
+            event('spawn-done', -159, spawn='L-builder-9000', role='builder')])
 
 
 def signed(ac, body):
@@ -287,6 +288,8 @@ class RebuildCauseTests(CwdFixture, unittest.TestCase):
             wave_rows = [event('spec-written', -180, subject=sid, charter='L-charter-9955',
                                project='project', footprint=[sid+'.py']) for sid in ('L-spec-9956', SID)]
             wave_rows.append(event('spawn-done', -179, actor='spec-auditor', bad_cut=False))
+            from test_nextstep import clean_preflights
+            wave_rows = clean_preflights(wave_rows)
             wave = self.selected(wave_rows, waves={'L-spec-9956': 1, SID: 2})
             self.assertIsNone(wave.action)
             self.assertIn('L-spec-9956', wave.clears)

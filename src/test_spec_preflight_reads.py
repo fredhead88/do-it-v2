@@ -138,22 +138,22 @@ def cache_mode(mode, root):
         yield calls
 
 
-# Frozen from the unmodified base readers (0eeb8ff, real reference parser).
+# Frozen reader answers with current refusal/CPU schema and backlog eligibility.
 FROZEN = {
     'run:L-spec-9401':
-        '{"spec": "L-spec-9401", "findings": [{"check": 1, "id": "seed-corrected", "line": "L-spec-9401 source snapshot"}], "red_on_master": [], "undetermined": []}',
+        '{"spec": "L-spec-9401", "findings": [{"check": 1, "id": "seed-corrected", "line": "L-spec-9401 source snapshot"}], "red_on_master": [], "undetermined": ["check chain: no nonempty fenced Verification block"], "refused": [], "cpu_s": 0.0}',
     'run:L-spec-9402':
-        '{"spec": "L-spec-9402", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9402 source snapshot"}], "red_on_master": [], "undetermined": []}',
+        '{"spec": "L-spec-9402", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9402 source snapshot"}], "red_on_master": [], "undetermined": ["check chain: no nonempty fenced Verification block"], "refused": [], "cpu_s": 0.0}',
     'run:L-spec-9403':
-        '{"spec": "L-spec-9403", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9403 source snapshot"}], "red_on_master": [], "undetermined": []}',
+        '{"spec": "L-spec-9403", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9403 source snapshot"}], "red_on_master": [], "undetermined": ["check chain: no nonempty fenced Verification block"], "refused": [], "cpu_s": 0.0}',
     'run:L-spec-9404':
-        '{"spec": "L-spec-9404", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9404 source snapshot"}], "red_on_master": [], "undetermined": []}',
+        '{"spec": "L-spec-9404", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9404 source snapshot"}], "red_on_master": [], "undetermined": ["check chain: no nonempty fenced Verification block"], "refused": [], "cpu_s": 0.0}',
     'run:L-spec-9405':
-        '{"spec": "L-spec-9405", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9405 source snapshot"}], "red_on_master": [], "undetermined": []}',
+        '{"spec": "L-spec-9405", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9405 source snapshot"}], "red_on_master": [], "undetermined": ["check chain: no nonempty fenced Verification block"], "refused": [], "cpu_s": 0.0}',
     'tick':
-        '[0, "spec-preflight: processed=2 deferred=0 (tick budget 240s); skipped=3 (requires a valid timestamp under 3 days old, no later build-started, and no closed state); lag_s=L-spec-9401:600.0, L-spec-9404:420.0; deferred specs=none\\n", "", [["{doit}", "append", "spec-preflight", "L-spec-9401", "project=seed-corrected", "spec:=\\"L-spec-9401\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"seed-corrected\\", \\"line\\": \\"L-spec-9401 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"hook _discover_coupled: ValueError\\"]", "lag_s:=600.0"], ["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"do-it-v2\\", \\"line\\": \\"L-spec-9404 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"hook _discover_coupled: ValueError\\"]", "lag_s:=420.0"]]]',
+        '[0, "spec-preflight: processed=3 deferred=0 (tick budget 900s); skipped=2 (requires a valid, non-future timestamp, no later build-started, and no closed state); lag_s=L-spec-9405:345600.0, L-spec-9401:600.0, L-spec-9404:420.0; deferred specs=none\\n", "", [["{doit}", "append", "spec-preflight", "L-spec-9405", "project=do-it-v2", "spec:=\\"L-spec-9405\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"do-it-v2\\", \\"line\\": \\"L-spec-9405 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"check chain: no nonempty fenced Verification block\\", \\"hook _discover_coupled: ValueError\\"]", "refused:=[]", "cpu_s:=0.0", "lag_s:=345600.0", "spec_written_src:=\\"L-spec-writer-seed.jsonl:5\\""], ["{doit}", "append", "spec-preflight", "L-spec-9401", "project=seed-corrected", "spec:=\\"L-spec-9401\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"seed-corrected\\", \\"line\\": \\"L-spec-9401 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"check chain: no nonempty fenced Verification block\\", \\"hook _discover_coupled: ValueError\\"]", "refused:=[]", "cpu_s:=0.0", "lag_s:=600.0", "spec_written_src:=\\"L-spec-writer-seed.jsonl:1\\""], ["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"do-it-v2\\", \\"line\\": \\"L-spec-9404 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"check chain: no nonempty fenced Verification block\\", \\"hook _discover_coupled: ValueError\\"]", "refused:=[]", "cpu_s:=0.0", "lag_s:=420.0", "spec_written_src:=\\"L-spec-writer-seed.jsonl:4\\""]]]',
     'append':
-        '[["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[]", "red_on_master:=[]", "undetermined:=[]"]]',
+        '[["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[]", "red_on_master:=[]", "undetermined:=[]", "refused:=[]", "cpu_s:=0.0", "spec_written_src:=\\"L-spec-writer-seed.jsonl:4\\""]]',
 }
 
 
@@ -174,6 +174,7 @@ class ReadTests(unittest.TestCase):
             "DOIT_SCRATCH": str(self.root / "scratch"),
         }))
         self.stack.enter_context(mock.patch.object(sp, "_process", side_effect=self.process))
+        self.stack.enter_context(mock.patch.object(sp, "_child_cpu", return_value=0.0))
         self.stack.enter_context(mock.patch.object(sp, "_check_interpreter", side_effect=self.check))
         for name in ("_check_shas", "_check_reach", "_check_tests"):
             self.stack.enter_context(mock.patch.object(sp, name))
@@ -205,9 +206,11 @@ class ReadTests(unittest.TestCase):
             self.appends.append(argv[:])
             body = dict(item.split(":=", 1) for item in argv[5:])
             body = {key: json.loads(value) for key, value in body.items()}
+            captured = body.pop("spec_written_src", None)
             sp._validate(body)
             if self.feedback:
-                self.event("spec-preflight", argv[3], project=argv[4].split("=", 1)[1], **body)
+                extra = {} if captured is None else dict(spec_written_src=captured)
+                self.event("spec-preflight", argv[3], project=argv[4].split("=", 1)[1], **body, **extra)
         return subprocess.CompletedProcess(argv, 0, "fixture-head\n", "")
 
     def counted(self, callback, reads=1, folds=None):
@@ -272,7 +275,7 @@ class ReadTests(unittest.TestCase):
             code = phase("tick", 1, lambda: sp.tick(root=self.root, now=NOW))
         out["tick"] = json.dumps([code, stdout.getvalue(), stderr.getvalue(),
                                   [["{doit}" if a == str(sp.DOIT) else a for a in argv] for argv in self.appends]])
-        body = dict(spec="L-spec-9404", findings=[], red_on_master=[], undetermined=[])
+        body = dict(spec="L-spec-9404", findings=[], red_on_master=[], undetermined=[], refused=[], cpu_s=0.0)
         self.appends.clear()
         phase("append", 1, lambda: sp._append(self.root, body))
         out["append"] = json.dumps([["{doit}" if a == str(sp.DOIT) else a for a in argv] for argv in self.appends])
@@ -305,7 +308,7 @@ class ReadTests(unittest.TestCase):
         with cache_mode("busy", self.root) as calls:
             sp.run("L-spec-9404", root=self.root, now=NOW, events=events)
             sp._append(self.root, dict(spec="L-spec-9404", findings=[], red_on_master=[],
-                                       undetermined=[]), spec_written=written)
+                                       undetermined=[], refused=[], cpu_s=0.0), spec_written=written)
             self.assertEqual(calls, [])
 
     def test_one_read_and_order(self):
@@ -330,7 +333,7 @@ class ReadTests(unittest.TestCase):
                 self.assert_appends(expected)
                 self.assertTrue(stdout.startswith(
                     f"spec-preflight: processed={count} deferred=0 "
-                    "(tick budget 240s); skipped=2"), stdout)
+                    "(tick budget 900s); skipped=2"), stdout)
                 self.assertEqual(stderr, "")
 
     def test_midpass_rewrite_and_restamp(self):
@@ -355,7 +358,8 @@ class ReadTests(unittest.TestCase):
         self.assertEqual([e["subject"] for e in events if e["type"] == "spec-preflight"], [first])
         self.inject = lambda sid: None
         self.tick()
-        self.assert_appends([(second, "albert-scott")])
+        # Evidence captured for the older revision of `first` no longer counts.
+        self.assert_appends([(first, "albert-scott"), (second, "albert-scott")])
         self.tick()
         self.assert_appends([])
 
@@ -410,12 +414,15 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         self.inject = lambda _: None
         self.tick()
+        # The restamp is a new revision: the first append captured the older one.
+        self.assert_appends([(sid, "albert-scott")])
+        self.tick()
         self.assert_appends([])
 
     def test_empty_pass(self):
         stdout, stderr = self.tick()
         self.assert_appends([])
-        self.assertTrue(stdout.startswith("spec-preflight: processed=0 deferred=0 (tick budget 240s); skipped=0"))
+        self.assertTrue(stdout.startswith("spec-preflight: processed=0 deferred=0 (tick budget 900s); skipped=0"))
         self.assertEqual(stderr, "")
 
     def test_direct_call_fallbacks_and_supplied_events(self):
@@ -564,9 +571,11 @@ class ReadTests(unittest.TestCase):
         write_rows(self.root, {
             "L-spec-writer-x.jsonl": [json.loads(l) for l in
                                       (self.root / "events" / "L-spec-writer-x.jsonl").read_text().splitlines()],
-            "L-spec-preflight-x.jsonl": [rows("L-spec-9805", "spec-preflight", iso(-minute(48)), project="do-it-v2"),
+            "L-spec-preflight-x.jsonl": [rows("L-spec-9805", "spec-preflight", iso(-minute(48)), project="do-it-v2",
+                                              spec="L-spec-9805", findings=[], red_on_master=[],
+                                              undetermined=[], refused=[], cpu_s=0.0),
                                          rows("L-spec-9802", "writes-granted", iso(-minute(29)), project="do-it-v2",
-                                              spec_written_src="L-spec-writer-x.jsonl:2")],
+                                              spec_written_src="L-spec-writer-x.jsonl:2", tests=[])],
             "L-builder-x.jsonl": [rows("L-spec-9806", "build-started", iso(-minute(40)))],
             "L-executor-x.jsonl": [rows("L-spec-9807", "shipped", iso(-minute(35))),
                                    rows("L-spec-9809", "spec-killed", iso(-minute(35))),
@@ -590,6 +599,8 @@ class ReadTests(unittest.TestCase):
                      json.dumps(k.get("spec_written"), default=str)])
 
             with ExitStack() as stack:
+                # Compare complete payloads under identical deterministic CPU samples.
+                stack.enter_context(mock.patch.object(sp, "_child_cpu", return_value=0.0))
                 if reference:
                     stack.enter_context(mock.patch.object(sp, "_project", side_effect=lambda events: events))
                 stack.enter_context(mock.patch.object(sp, "time", SimpleNamespace(monotonic=lambda: clock["t"])))
@@ -608,22 +619,26 @@ class ReadTests(unittest.TestCase):
                         stdout=out.getvalue(), stderr=err.getvalue(), appended=captured)
 
         results = {}
-        for mode, step in (("within-budget", 10.0), ("crossing-budget", 200.0)):
+        for mode, step in (("within-budget", 10.0), ("crossing-budget", 300.0)):
             reference, projected = one_pass(True, step), one_pass(False, step)
             self.assertEqual(projected, reference, mode)
             results[mode] = projected
         within, crossing = results["within-budget"], results["crossing-budget"]
-        self.assertEqual(within["eligible"], ["L-spec-9801", "L-spec-9802", "L-spec-9803", "L-spec-9804"])
-        self.assertIn("processed=4 deferred=0", within["stdout"])
-        self.assertIn("processed=2 deferred=2", crossing["stdout"])
+        self.assertEqual(within["eligible"], ["L-spec-9810", "L-spec-9801", "L-spec-9802", "L-spec-9803", "L-spec-9804"])
+        self.assertIn("processed=5 deferred=0", within["stdout"])
+        self.assertIn("processed=3 deferred=2", crossing["stdout"])
         self.assertIn("deferred specs=L-spec-9803, L-spec-9804", crossing["stdout"])
         self.assertEqual(sorted(sp.pending(sp._events(self.root))), sorted(
             ["L-spec-9801", "L-spec-9802", "L-spec-9803", "L-spec-9804", "L-spec-9806", "L-spec-9807",
              "L-spec-9808", "L-spec-9809", "L-spec-9810", "L-spec-9811", "L-spec-9812"]))
         bodies = [json.loads(r[1])[0] for r in within["appended"] if r[0] == "append"]
-        self.assertEqual(len(bodies), 4)
+        self.assertEqual(len(bodies), 5)
         self.assertTrue(all(b["findings"] for b in bodies))
-        self.assertEqual(bodies[0]["lag_s"], 2400.0)
+        self.assertEqual(bodies[0]["lag_s"], 345600.0)
+        for body in bodies:
+            sp._validate(body)
+            self.assertEqual(body["cpu_s"], 0.0)
+            self.assertEqual(body["refused"][0]["check"], "verification-red")
         self.assertEqual(json.loads(within["direct"])["red_on_master"], ["src/test_a.py"])
         # Grant dedupe reads the full authorized list: no second grant for 9802.
         self.assertNotIn("L-spec-9802", " ".join(r[1] for r in within["appended"] if r[0] == "grant"))
@@ -644,6 +659,9 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(len(committed), 1)
         self.assertEqual((committed[0]["subject"], committed[0]["project"]), ("L-spec-9901", "do-it-v2"))
         self.assertEqual(committed[0]["red_on_master"], ["src/test_a.py"])
+        self.assertEqual(committed[0]["refused"][0]["check"], "verification-red")
+        self.assertIs(type(committed[0]["cpu_s"]), float)
+        self.assertGreaterEqual(committed[0]["cpu_s"], 0.0)
         self.assertTrue(committed[0]["findings"])
         self.assertEqual(committed[0]["lag_s"], 300.0)
         kinds = ["eligible-nonempty-findings", "already-preflighted", "later-build-started", "shipped",
@@ -654,7 +672,7 @@ class ReadTests(unittest.TestCase):
                ["pending/eligibility/direct run/tick stdout+stderr/append payloads equal, unnormalized",
                 "boundary crossed on deterministic clock", "fresh-process read-back"], "pass",
                active_limit="TICK_BUDGET_S=%s" % sp.TICK_BUDGET_S,
-               clock_sequence={"within-budget": "+10s per run", "crossing-budget": "+200s per run"},
+               clock_sequence={"within-budget": "+10s per run", "crossing-budget": "+300s per run"},
                comparison={m: dict(stdout=r["stdout"], stderr=r["stderr"], pending=r["pending"],
                                    eligible=r["eligible"], appended=r["appended"])
                            for m, r in results.items()},
@@ -682,7 +700,7 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(body["spec"], "L-spec-1")
         counts["direct-run"] = [reads.call_count, projected.call_count]
         with spy() as projected, mock.patch.object(fold, "read_events", wraps=fold.read_events) as reads:
-            sp._append(self.root, dict(spec="L-spec-1", findings=[], red_on_master=[], undetermined=[]))
+            sp._append(self.root, dict(spec="L-spec-1", findings=[], red_on_master=[], undetermined=[], refused=[], cpu_s=0.0))
         self.assertEqual((reads.call_count, projected.call_count), (1, 1))
         self.assertEqual(self.appends[-1][4], "project=p1c")
         counts["append-absent-written"] = [reads.call_count, projected.call_count]
@@ -690,7 +708,7 @@ class ReadTests(unittest.TestCase):
         # Supplied events/spec_written bypass reads.
         with spy() as projected, mock.patch.object(fold, "read_events") as reads:
             sp.run("L-spec-1", root=self.root, now=NOW, events=retained)
-            sp._append(self.root, dict(spec="L-spec-1", findings=[], red_on_master=[], undetermined=[]),
+            sp._append(self.root, dict(spec="L-spec-1", findings=[], red_on_master=[], undetermined=[], refused=[], cpu_s=0.0),
                        spec_written=retained[0])
         self.assertEqual((reads.call_count, projected.call_count), (0, 0))
         counts["supplied"] = [0, 0]

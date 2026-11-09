@@ -38,6 +38,9 @@ assert all(p.resolve().is_relative_to(_IMPORT_ROOT)
            for p in (fold.ROOT, dispatch.ROOT, fold.EVENTS))
 
 
+from test_nextstep import clean_preflights, write_clean_preflights
+
+
 class Fixture:
     sid = 'L-spec-9001'
     branch = sid.lower()
@@ -96,6 +99,8 @@ class Fixture:
         with (self.root / 'events/L-operator-fixture.jsonl').open('a') as out:
             out.write(json.dumps(dict(v=1, subject=self.sid, type=kind,
                                       ts=stamp.isoformat(), **fields)) + '\n')
+        if kind == 'spec-written':
+            write_clean_preflights(self.root)
 
     def events(self):
         return fold.read_events(use_cache=False)

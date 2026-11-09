@@ -33,6 +33,9 @@ NOW = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
 SID = 'L-spec-9901'
 
 
+from test_nextstep import clean_preflights, write_clean_preflights
+
+
 class HeldWithoutRunTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix='tick-held-')
@@ -61,6 +64,8 @@ class HeldWithoutRunTests(unittest.TestCase):
             error = dispatch.emit(self.root / 'events' / ('L-' + actor + '-local.jsonl'),
                                   {'subject': sid}, kind, **fields)
         self.assertIsNone(error)
+        if kind == 'spec-written':
+            write_clean_preflights(self.root)
 
     def seed(self, seconds=-1800, sid=SID, status='BLOCKED'):
         self.emit('spec-written', seconds - 120, sid, project='fixture')

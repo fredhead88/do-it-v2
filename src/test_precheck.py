@@ -21,6 +21,9 @@ import tick
 NOW = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
 
 
+from test_nextstep import clean_preflights, write_clean_preflights
+
+
 class PrecheckTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='precheck-test-')
@@ -251,6 +254,8 @@ class PrecheckTests(unittest.TestCase):
                         ts=(NOW-timedelta(hours=1)).isoformat(), actor='builder'),
                    dict(type=kind, subject='L-spec-9001', actor='tick',
                         ts=(NOW-timedelta(minutes=1)).isoformat(), _src='L-tick-local.jsonl:1')]
+            evs = clean_preflights([dict(type='spec-written', subject='L-spec-9001',
+                                         ts=(NOW-timedelta(hours=2)).isoformat(), actor='operator')] + evs)
             steps = nextstep.next_steps(evs, {'L-spec-9001': {'state': 'graded'}}, NOW, lane_rules.load())
             step = next(s for s in steps if s.item == 'L-spec-9001')
             self.assertEqual((step.action, step.owner), ('rebuild', 'tick'))

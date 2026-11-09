@@ -382,6 +382,16 @@ def _steps_fixture(scenario, mode='steps', temperature='cold'):
                     role='grader', waiter_host=socket.gethostname(), waiter_pid=99999999,
                     ts=(now-timedelta(minutes=20)).isoformat())) + '\n')
 
+        # Dispatch scenarios start after the current revision's preflight.
+        written = [json.loads(line) for line in
+                   (case.events / 'L-operator-local.jsonl').read_text().splitlines()
+                   if json.loads(line).get('type') == 'spec-written']
+        (case.events / 'L-spec-preflight-fixture.jsonl').write_text(''.join(
+            json.dumps(dict(v=1, type='spec-preflight', subject=row['subject'],
+                            spec=row['subject'], project='scratch',
+                            ts='2026-11-09T11:01:00+00:00', findings=[],
+                            red_on_master=[], undetermined=[], refused=[], cpu_s=0.0)) + '\n'
+            for row in written))
         selected = []
 
         def evaluate(events, specs, clock, *args):
