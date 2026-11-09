@@ -16,6 +16,13 @@
       "type": "boolean",
       "description": "true = a stripped item reached the packet; the run is void"
     },
+    "contamination_cause": {
+      "type": "string",
+      "enum": [
+        "packet-leak",
+        "self-inflicted"
+      ]
+    },
     "cleared": {
       "type": "array",
       "maxItems": 40,

@@ -51,6 +51,9 @@ or trailers. Reading these builder cues voids the run.
 
 If a stripped item appears anyway — a rationale, a name, a timestamp — set
 `contamination: true` and return. You cannot un-see a cue, so the run is void.
+Whenever you set `contamination: true`, also set `contamination_cause`:
+`packet-leak` when a stripped item arrived in your packet; `self-inflicted`
+when your own action (a forbidden command or reading a builder cue) exposed it.
 
 A criterion the packet has already dropped as **routed** (L-spec-8034/R12.h) —
 its block does not appear in item 1 above — is neither graded nor reported as

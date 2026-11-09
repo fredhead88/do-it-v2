@@ -47,6 +47,11 @@ def _failure_detail(text) -> str:
         text = re.sub(pattern, replacement, text, flags=flags)
     return text[-600:]
 
+def contamination_reason(out):
+    """Name a contamination void's cause, including legacy role outputs."""
+    cause = out.get("contamination_cause")
+    return "contamination:" + (cause if cause in ("packet-leak", "self-inflicted") else "unstated")
+
 def frontmatter(role):
     text = (AGENTS / f"{role}.md").read_text().split("---")[1]
     return {k.strip(): v.strip() for k, v in
@@ -1656,7 +1661,8 @@ def _main(a):
         if error:
             fail("structured_output violates grader evidence: " + error)
     if out.get("contamination"):
-        fail("contamination: the packet carried what Blindness strips; the run is void")
+        fail("contamination: the packet carried what Blindness strips; the run is void",
+             reason=contamination_reason(out))
     if kind and not (a.role == "spec-writer" and out["status"] != "written"):
         p = pathlib.Path(a.path) if a.path else fail("a writing role needs --path")
         # A run directory is named with a trailing slash by its own contract, and
