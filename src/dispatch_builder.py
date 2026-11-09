@@ -39,6 +39,7 @@ def worktree_preflight(runtime, a, cwd, ledger, base, fail):
         fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
     if dispatched:
         runtime.builder_branch_preflight(a, cwd, __import__("fold").read_events(), fail)
+        a.start_head = __import__("wip_resume").head_of(worktree)   # this attempt's start, for WIP scoping
     __import__("builder_deps").prepare(worktree, runtime.ROOT, runtime.ROOT / "repos" / (a.project or ""), subject=a.subject)
 
 
@@ -100,7 +101,11 @@ def branch_preflight(runtime, a, cwd, events, fail):
                               text=True, timeout=30)
 
     reason = 'branch-not-descendant'
+    saved = __import__('wip_resume').applicable_timeout(events, a.subject)
     try:
+        if saved and (saved.get('branch') != a.subject.lower()
+                      or git('cat-file', '-e', str(saved.get('last_commit')) + '^{commit}').returncode):
+            fail(reason + ': timeout-resume checkpoint is missing or not on this spec branch', reason=reason)
         ancestor = git('merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD')
         if ancestor.returncode == 0:
             return
@@ -125,8 +130,9 @@ def branch_preflight(runtime, a, cwd, events, fail):
             rebased = git('rebase', '--no-autostash', '--no-update-refs', '--rebase-merges', a.effective_base_sha)
             if rebased.returncode:
                 git('rebase', '--abort')
-                fail(reason + ': rebase conflict/command failure; Executor uses the existing subject-authorized '
-                     'conflict-rework packet to dispatch the builder on its own branch', reason=reason)
+                fail(reason + ': ' + (__import__('wip_resume').TIMEOUT_CONFLICT if saved else
+                     'rebase conflict/command failure; Executor uses the existing subject-authorized '
+                     'conflict-rework packet to dispatch the builder on its own branch'), reason=reason)
         except (OSError, subprocess.SubprocessError):
             git('rebase', '--abort')
             raise

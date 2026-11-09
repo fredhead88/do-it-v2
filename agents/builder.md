@@ -56,8 +56,21 @@ equivalent and record the count in the card. A failed check is
 
 ## How you work
 
-- One spec, one commit, on your branch. Direct writes to main and `--no-verify`
-  are outside your grant; a guard you could disable would be advisory.
+- One spec, one commit at hand-in, on your branch. Direct writes to main and
+  `--no-verify` are outside your grant; a guard you could disable would be
+  advisory.
+- Checkpoint: while changes exist, make a progress commit at least every 20
+  minutes with the subject `wip(L-spec-N): <what>`. A clean interval needs no
+  empty commit. Before hand-in, squash this spec's interim commits (including a
+  `wip(L-spec-N): timeout` commit) into one commit; the one-commit and
+  effective-grant hand-in checks are unchanged.
+- Never disable hooks: no `--no-verify`, no `git commit -n`, no
+  `core.hooksPath` override. The hooks-off permission of D11 belongs solely to
+  the timeout wrapper's own preservation commit, never to you.
+- A resume packet reads `Resume from <last_commit> on <branch>: N WIP commits
+  from the timed-out build` and may list saved paths outside the effective
+  grant. Those are already committed: remove each from the branch, or justify
+  it in the card. The warning does not relax any hand-in grant check.
 - An unknown dependency API mid-build goes in `unknowns`; you do not guess.
 - A dependency the Plan did not ratify is an escalation with a default. You
   never install.
