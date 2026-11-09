@@ -85,7 +85,7 @@ def render(repo: str) -> str:
 
     lines = ['# How DO-IT works', '',
              'Generated from repository code and config by `doit howto`; regenerate when sources change.',
-             '', '## Roles', '', f'Source: `agents/*.md` and `{model_source}`.']
+             '', '## Roles', f'Source: `agents/*.md` and `{model_source}`.']
     lines.extend('- ' + backend for backend in backends)
     lines.extend(['', 'SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.',
                   'Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.',
@@ -94,7 +94,7 @@ def render(repo: str) -> str:
                   'Authors: Codex; judges: Claude seats. Executor: claude-sonnet-5-5; judgment: claude-opus-5-5 seat.',
                   'Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;',
                   'record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.'])
-    lines.extend(['', '## Lane rules', '', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
+    lines.extend(['', '## Lane rules', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     # Keep each lane tuple intact while leaving room for new cron rows within
     # the page's existing line budget.
     current = ''
@@ -125,9 +125,11 @@ def render(repo: str) -> str:
             else:
                 current += separator + chunk
     lines.append(current)
-    lines.extend(['', '## Tick event types',
+    lines.extend(['## Tick event types',
                   'Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.'])
     lines.extend(_wrap('; '.join(sorted(events))))
+    lines.extend(['`src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.',
+                  '`bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.'])
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:

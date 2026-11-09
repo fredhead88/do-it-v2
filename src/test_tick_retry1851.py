@@ -64,10 +64,22 @@ def runner(argv):
         f.write(json.dumps(argv) + '\n')
     return dict(code=0, stdout=json.dumps(dict(detached=os.getpid())), stderr='')
 
-def ordinary(dry_run=False, legacy=True):
+def ordinary(dry_run=False, legacy=True, late_refusal=False):
     evs, specs = snapshot()
-    selected = tick._steps(evs, specs, clock)
-    with patch.object(dispatch, 'now', return_value=clock.isoformat()):
+    # Explicit already-prechecked Steps model evidence changing between the
+    # read-only precheck and the authoritative dispatch refusal.
+    selected = (nextstep.next_steps(evs, specs, clock, lane_rules.load())
+                if late_refusal else tick._steps(evs, specs, clock))
+    real_popen = subprocess.Popen
+    def checker(argv, **kw):
+        if 'run-checks' not in argv:
+            return real_popen(argv, **kw)
+        with (root / 'tick-checker-argv.jsonl').open('a') as f:
+            f.write(json.dumps(argv) + '\n')
+        child = real_popen([sys.executable, '-c', 'pass'], **kw)
+        assert child.wait(timeout=10) == 0
+        return child
+    with patch.object(subprocess, 'Popen', side_effect=checker), patch.object(dispatch, 'now', return_value=clock.isoformat()):
         out = tick.run_steps(evs, specs, clock, dispatcher=runner, dry_run=dry_run, steps=selected)
     if legacy:
         out += autodispatch.redispatch_dead(evs, specs, clock, runner=runner,
@@ -216,10 +228,10 @@ class RetryRoundTripTests(unittest.TestCase):
                 if before_refusal:
                     self.setUp()
                     self.session("emit('decision', at=(clock-timedelta(seconds=1)).isoformat(), regrade='yes'); result=True")
-                self.session('result=ordinary()')
+                self.session('result=ordinary(late_refusal=True)')
                 if before_refusal:
                     published = self.session('result=publish()')
-                    self.at(datetime.now(timezone.utc))
+                    self.at(max(datetime.fromisoformat(self.meta['clock']), datetime.now(timezone.utc)))
                 self.assertEqual(self.session('result=deferred()'), 'bundle-pending')
                 self.assertEqual(len(self.rows('paid-entries.jsonl')), 0)
                 events = self.session('result=snapshot()[0]')
@@ -233,7 +245,7 @@ class RetryRoundTripTests(unittest.TestCase):
                     self.assertLess(datetime.fromisoformat(evidence['ts']),
                                     datetime.fromisoformat(refusal['ts']))
                 if not before_refusal:
-                    self.assertIn('grade-wait: bundle-pending', self.session('result=ordinary()')[0])
+                    self.assertIn('not-ready:bundle-pending', self.session('result=ordinary()')[0])
                     self.assertEqual(len(self.rows('checker-argv.jsonl')), 1)
                     published = self.session('result=publish()')
                 count = len(self.session("result=[e for e in snapshot()[0] if e['type']=='evidence-bundle']"))
@@ -241,7 +253,7 @@ class RetryRoundTripTests(unittest.TestCase):
                 self.assertEqual(len(self.session("result=[e for e in snapshot()[0] if e['type']=='evidence-bundle']")), count)
                 digest = self.session("b=grader_packet.bundle_for(snapshot()[0], sid, m['sha']); "
                                       "assert b is not None; result=b['event']['bundle_sha256']")
-                self.at(datetime.now(timezone.utc))
+                self.at(max(datetime.fromisoformat(self.meta['clock']), datetime.now(timezone.utc)))
                 self.session('result=ordinary()')
                 packet_path = self.rows('deferred.jsonl')[-1]
                 packet = Path(packet_path[packet_path.index('--packet') + 1]).read_text()
@@ -259,7 +271,7 @@ class RetryRoundTripTests(unittest.TestCase):
                     packet_argv=len(self.rows('packet-argv.jsonl')), reopened_digest=True, existing_path_no_event=True))
 
     def test_retry1851_AC3_real_flock_and_silent_checker(self):
-        self.session('result=ordinary()')
+        self.session('result=ordinary(late_refusal=True)')
         import sys as _sys
         _sys.path.insert(0, str(SRC))
         import spawns
@@ -271,7 +283,8 @@ class RetryRoundTripTests(unittest.TestCase):
                 self.assertEqual(self.session('result=deferred()'), 'dispatch-in-progress')
                 self.at(self.clock + timedelta(seconds=attempt + 1))
                 if attempt == 0:
-                    self.session('result=ordinary()')
+                    result = self.session('result=ordinary()')
+                    self.assertIn('not-ready:dispatch-in-progress', result[0])
             self.assertEqual(self.rows('checker-argv.jsonl'), [])
         finally:
             lock.close()
@@ -280,19 +293,21 @@ class RetryRoundTripTests(unittest.TestCase):
         self.assertEqual(len(self.session('result=snapshot()[0]')), before + 1)
         self.assertEqual(self.session('result=deferred()'), 'bundle-pending')
         self.assertEqual(len(self.rows('checker-argv.jsonl')), 1)
+        self.assertEqual(len(self.rows('tick-checker-argv.jsonl')), 1)
         latest_refusal = self.clock + timedelta(seconds=2, microseconds=1)
         self.at(latest_refusal + timedelta(minutes=5, microseconds=-1))
-        self.assertIn('grade-wait: bundle-pending', self.session('result=ordinary()')[0])
+        self.assertIn('not-ready:bundle-pending', self.session('result=ordinary()')[0])
         self.at(latest_refusal + timedelta(minutes=5))
-        self.session('result=ordinary()')
-        self.assertEqual(self.session('result=deferred()'), 'bundle-pending')
-        self.assertEqual(len(self.rows('checker-argv.jsonl')), 2)
+        result = self.session('result=ordinary()')
+        self.assertIn('not-ready:bundle-pending', result[0])
+        self.assertEqual(len(self.rows('tick-checker-argv.jsonl')), 1)
+        self.assertEqual(len(self.rows('checker-argv.jsonl')), 1)
         self.assertEqual(self.rows('paid-entries.jsonl'), [])
-        self.signed('AC3-flock-silent', dict(lock_refusals=2, checker_requests=2, paid_entries=0,
+        self.signed('AC3-flock-silent', dict(lock_refusals=2, tick_checker_requests=1, gate_checker_requests=1, paid_entries=0,
                                            boundary_seconds=300, release_event=False))
 
     def test_retry1851_AC3_actual_dispatch_cannot_open_paths(self):
-        self.session('result=ordinary()')
+        self.session('result=ordinary(late_refusal=True)')
         for number, message, code in ((13, 'Permission denied', 1), (28, 'No space left on device', 2)):
             self.at(self.clock + timedelta(seconds=number))
             body = """
@@ -348,6 +363,11 @@ result=ordinary()
                              "card=str(root/'content/card-fixture.md')); result=True")
                 before = len(self.rows('deferred.jsonl'))
                 result = self.session(body)
+                self.assertEqual(len(self.rows('deferred.jsonl')), before, result)
+                self.assertIn('not-ready:bundle-pending', result[0])
+                self.session('result=publish()')
+                self.at(max(datetime.fromisoformat(self.meta['clock']), datetime.now(timezone.utc)))
+                result = self.session('result=ordinary()')
                 self.assertEqual(len(self.rows('deferred.jsonl')), before + 1, result)
                 self.assertIn(' ' + action + ' ', result[0])
                 # Close the successful transport marker with a genuine verdict,
@@ -364,6 +384,11 @@ result=ordinary()
         self.session("emit('spawn-done', 'builder', spawn='L-builder-7801'); result=True")
         self.session('result=ordinary(dry_run=True)')
         self.assertEqual(self.rows('deferred.jsonl'), [])
+        result = self.session('result=ordinary()')
+        self.assertIn('not-ready:bundle-pending', result[0])
+        self.assertEqual(len(self.rows('deferred.jsonl')), 0)
+        self.session('result=publish()')
+        self.at(max(datetime.fromisoformat(self.meta['clock']), datetime.now(timezone.utc)))
         self.session('result=ordinary()')
         self.assertEqual(len(self.rows('deferred.jsonl')), 1)
         self.signed('AC4-conflict', dict(open_launches=0, dry_run_launches=0, terminal_launches=1))
@@ -382,12 +407,17 @@ result=ordinary()
                                  "base_sha=m['base'], card=str(root/'content/card-fixture.md')); result=True")
                 else:
                     self.at(self.clock + timedelta(minutes=1))
+                result = self.session('result=ordinary()')
+                self.assertIn('not-ready:bundle-pending', result[0])
+                self.assertEqual(len(self.rows('deferred.jsonl')), 0)
+                self.session('result=publish()')
+                self.at(max(datetime.fromisoformat(self.meta['clock']), datetime.now(timezone.utc)))
                 self.session('result=ordinary()')
                 self.assertEqual(len(self.rows('deferred.jsonl')), 1)
-                self.assertEqual(self.session('result=deferred()'), 'bundle-pending')
-                self.assertEqual(self.rows('paid-entries.jsonl'), [])
+                self.assertEqual(self.session('result=deferred()'), 'entered')
+                self.assertEqual(len(self.rows('paid-entries.jsonl')), 1)
         self.signed('AC4-preparation', dict(early_launches=0, due_launches=1,
-                    new_build_launches=1, paid_entries=0))
+                    new_build_launches=1, paid_entries=1))
 
 
 if __name__ == '__main__':

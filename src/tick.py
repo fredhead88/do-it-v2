@@ -500,7 +500,9 @@ def _steps(events, specs, now):
             usable.pop(sid, None)
             own = [e for e in events if e.get('subject') == sid]
             failed.append(nextstep._spec_exception(sid, own, exc))
-    planned = nextstep.next_steps(events, usable, now, lane_rules.load(), waves)
+    import bundle_wait
+    mains = bundle_wait.project_mains(events, usable, root=fold.ROOT)
+    planned = nextstep.next_steps(events, usable, now, lane_rules.load(), waves, mains)
     return sorted(planned + failed, key=lambda step: (step.item_kind, step.item))
 
 
@@ -633,6 +635,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                 if hold and step.action in ('build', 'rebuild'):
                     out.append(f'hold {step.item}: {hold}')
                     continue
+                if not dry_run:
+                    __import__('bundle_wait').run(step, events, now, root=fold.ROOT, dst=tick_path())
                 if step.reason.startswith('undetermined:') or step.state == 'hold':
                     out.append(f"{'undetermined' if step.reason.startswith('undetermined:') else 'hold'} {step.item}: {step.reason}")
                     continue
