@@ -1137,6 +1137,11 @@ class RetryRegressionTests(unittest.TestCase):
                     fixture.calls.clear();tick.tick_path().unlink(missing_ok=True)
                     evs,hold=RetryRegressions1857Tests().fixture(role);hold.update(kind=kind,dead_spawn=f'L-{role}-9902')
                     evs[0]['project']='proj'
+                    if role == 'grader':
+                        build = next(e for e in evs if e['type'] == 'build-done')
+                        build['ready_sha'] = 'a' * 40
+                        evs.append(event('evidence-bundle-failed', -19, actor='build-runner',
+                                         sha='a' * 40, reason='fixture runner failure'))
                     specs={SID:dict(state='written' if role=='builder' else 'building')}
                     held=tick._steps(evs,specs,NOW)
                     tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=held)

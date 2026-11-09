@@ -264,6 +264,17 @@ def _grader_retry(c, trigger):
     if h.next_retry_at and c['now'] < h.next_retry_at:
         return _result(trigger, f'retry-wait: {h.n_failed} failed attempts; next_retry_at=' + h.next_retry_at.isoformat(), retry_hold=True,
                        retry_owner='tick', clears='retry instant ' + h.next_retry_at.isoformat())
+    if c.get('mains') is not None:
+        import bundle_wait
+        import project_scope
+        import start_check
+        main = c['mains'].get(project_scope.subject_project(c['events'], c['sid']))
+        refusal = start_check.refusal('grader', c['sid'], c['events'], now=c['now'], root=fold.ROOT, main_sha=main)
+        if refusal:
+            return _result(trigger, 'not-ready:' + refusal.reason, retry_hold=True,
+                           retry_owner='tick', clears=bundle_wait.clears(
+                               c['events'], c['sid'], main, refusal.clears))
+        return _result(trigger, 'retry due: ' + '; '.join(h.reasons) if h.n_failed else 'condition met')
     build = _latest(evs, {'build-done'}) or {}
     cutoff = max(_time(trigger['ts']), _time(build.get('ts', trigger['ts'])))
     pending = [e for e in receipts if str(e.get('reason') or '').startswith('bundle-pending')
@@ -1081,7 +1092,7 @@ def _invalid_dependency_step(sid, evs, reason, all_evs=None):
                  'repair invalid spec text before re-evaluating')
 
 
-def next_steps(events, specs, now, rules, waves=None):
+def next_steps(events, specs, now, rules, waves=None, mains=None):
     """Pure snapshot evaluation; waves is caller-built spec_id -> wave context."""
     raw_events = list(events)
     events, by, bad = _snapshot(events, specs)
@@ -1173,7 +1184,7 @@ def next_steps(events, specs, now, rules, waves=None):
                 continue
             c = dict(sid=sid, spec=spec, specs=specs, events=events, evs=evs,
                      by_subject=by, now=now, table=rules, busy=busy, live=busy,
-                     capabilities=capabilities, memo={}, acting_rows=rows)
+                     capabilities=capabilities, memo={}, acting_rows=rows, mains=mains)
             c['dependency'] = autodispatch.held_by_dependency(evs, events, shipped=shipped)
             hold = _dependency_hold(evs, events)
             if c['dependency'] and hold is not None and '_dependency_error' in hold:
@@ -1227,6 +1238,13 @@ def next_steps(events, specs, now, rules, waves=None):
                               else 'spec-auditor spawn-done')
                     steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
                                        'executor' if exhausted else 'tick', audit['since']))
+                continue
+            import bundle_wait
+            base_pending = bundle_wait.base_hold(events, sid, mains)
+            if base_pending and not c['dependency'] and sid not in busy:
+                block, view, main = base_pending
+                steps.append(_hold(sid, 'spec', 'checking', block, 'not-ready:bundle-pending',
+                                   bundle_wait.clears(view, sid, main, 'Fresh base-only evidence'), 'tick'))
                 continue
             tooling = _gate_tooling(c)
             if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):
@@ -1345,8 +1363,8 @@ def next_steps(events, specs, now, rules, waves=None):
     return sorted(steps, key=lambda s: (s.item_kind, s.item))
 
 
-def step_for(events, specs, item, now, rules, waves=None):
-    matches = [s for s in next_steps(events, specs, now, rules, waves) if s.item == item]
+def step_for(events, specs, item, now, rules, waves=None, mains=None):
+    matches = [s for s in next_steps(events, specs, now, rules, waves, mains) if s.item == item]
     if len(matches) != 1:
         raise KeyError(item)
     return matches[0]
@@ -1386,7 +1404,9 @@ def main(argv=None):
             charter = dispatch.resolve_charter(evs, sid, None)
             if written and charter:
                 waves[sid] = dispatch.spec_wave(charter, written['footprint'])
-        steps = [step_for(events, specs, args.item, now, rules, waves)] if args.item else next_steps(events, specs, now, rules, waves)
+        import bundle_wait
+        mains = bundle_wait.project_mains(events, specs, root=fold.ROOT)
+        steps = [step_for(events, specs, args.item, now, rules, waves, mains)] if args.item else next_steps(events, specs, now, rules, waves, mains)
         result = dict(counts=flow_counts(events, specs, now, rules, waves), steps=[asdict(s) for s in steps])
         for row in result['steps']:
             refresh = __import__('branch_refresh').refresh_note(events, row['item'])

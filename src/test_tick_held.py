@@ -64,7 +64,11 @@ class HeldWithoutRunTests(unittest.TestCase):
 
     def seed(self, seconds=-1800, sid=SID, status='BLOCKED'):
         self.emit('spec-written', seconds - 120, sid, project='fixture')
-        self.emit('build-done', seconds, sid, actor='builder', status=status)
+        self.emit('build-done', seconds, sid, actor='builder', status=status,
+                  ready_sha='a' * 40)
+        if status == 'DONE':
+            self.emit('evidence-bundle-failed', seconds + 1, sid, actor='build-runner',
+                      sha='a' * 40, reason='fixture runner failure')
 
     def read(self):
         return fold.read_events(use_cache=False)

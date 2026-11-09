@@ -3,7 +3,6 @@
 Generated from repository code and config by `doit howto`; regenerate when sources change.
 
 ## Roles
-
 Source: `agents/*.md` and `machine/models.toml`.
 - builder: codex
 - charter-reviewer: seat
@@ -31,7 +30,6 @@ Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start an
 record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.
 
 ## Lane rules
-
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
 - build | dispatch-builder | tick | 30; - grade | dispatch-grader | tick | 15
 - review | dispatch-reviewer | tick | 15; - gate | doit-gate | tick | 30
@@ -111,13 +109,14 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   thinker-inbox -- /usr/bin/python3 {repo}/src/thinker_inbox.py
   auto-carry | 7 * * * * | user | {repo}/scripts/auto-carry.sh  {doit} cron-run auto-carry --
   {repo}/scripts/auto-carry.sh >> {root}/logs/auto-carry.log 2>&1
-
 ## Tick event types
 Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.
 - autodispatch-failed; autodispatch-skipped; autodispatched; charter-closed; charter-proving;
   charter-reopened; cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate;
   escalation-blocking; look-stale; next-step-held; none; proving-check-failed; proving-overdue;
   queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped
+`src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.
+`bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.
 
 ## Member verdicts
 Source: `look.toml` `[merge_queue]` and `src/window_members.py`.

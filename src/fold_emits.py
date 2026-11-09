@@ -276,6 +276,7 @@ EMITS["worktree-reaped"] = {"tick"}
 EMITS["origin-pushed"] = {"tick"}
 
 # L-spec-1104: admit the charter-0053 services before their emitters land.
+EMITS["bundle-requested"] = {"tick"}
 EMITS["evidence-bundle"] = {"build-runner"}
 EMITS["evidence-bundle-failed"] = {"build-runner"}
 EMITS["base-red"] = {"base-red"}
