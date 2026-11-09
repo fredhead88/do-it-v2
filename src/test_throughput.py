@@ -16,6 +16,16 @@ import throughput
 NOW = datetime(2026, 10, 18, 12, tzinfo=timezone.utc)
 REPO = Path(__file__).resolve().parent.parent
 KEYS = set('queue_depth in_flight median_wait_min p90_wait_min merged_per_hour busy_hours shipped stale_merges unproven_merges minutes_per_spec selfhosted_minutes_per_spec reason'.split())
+NEW_EMPTY = dict(repeat_rate=None, one_build_share=None, median_builds=None,
+                 gate_sendbacks_per_merged=None,
+                 repeats_by_cause={key: dict(count=0, share=None) for key in
+                                   ('merge-gate', 'rejected-criterion', 'conflict', 'stale-branch',
+                                    'launch-failure', 'other', 'unrecorded')},
+                 failed_starts_by_reason_per_day={day: dict.fromkeys(
+                     ('bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress', 'wave-order'), 0)
+                     for day in ('2026-10-17', '2026-10-18')},
+                 handin_cpu_s_per_day={'2026-10-17': 0, '2026-10-18': 0})
+KEYS.update(NEW_EMPTY)
 
 
 def event(kind, subject='L-spec-1', minutes=-60, **fields):
@@ -37,7 +47,9 @@ def check_summary():
     assert empty == dict(queue_depth=None, in_flight=[], median_wait_min=None, p90_wait_min=None,
                          merged_per_hour=None, busy_hours=0, shipped=0, stale_merges=None,
                          unproven_merges=0, minutes_per_spec=None, selfhosted_minutes_per_spec=None,
-                         reason='no events')
+                         reason='no events', **NEW_EMPTY)
+    unrelated = answer([event('unrelated')])
+    assert {key: unrelated[key] for key in NEW_EMPTY} == NEW_EMPTY
     ok(1, 'empty')
     import ast
     tree = ast.parse(Path(throughput.__file__).read_text())
@@ -245,6 +257,7 @@ print(json.dumps(throughput.summary([e for e in events if id(e) not in ignored],
 
 def check_board():
     # This import happens only inside an isolated root, never on the live ledger.
+    assert {key: answer([])[key] for key in NEW_EMPTY} == NEW_EMPTY
     import fold
     from types import SimpleNamespace
     with tempfile.TemporaryDirectory(prefix='throughput-board-') as scratch:
