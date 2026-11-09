@@ -57,6 +57,12 @@ class DriverTests(unittest.TestCase):
         config_patch = patch.object(look, 'load_toml', return_value=config)
         config_patch.start()
         self.addCleanup(config_patch.stop)
+        # The launch's fresh ledger read sees no evidence bundle in this scratch root;
+        # these subtests exercise transport, not the evidence gate.
+        import grader_packet, types
+        gp = patch.object(grader_packet, 'evidence_state', return_value=types.SimpleNamespace(state='ready'))
+        gp.start()
+        self.addCleanup(gp.stop)
         self.sid = 'L-spec-1001'
         self.calls = []
         self.events = [self.event('spec-written', 40, project='proj', charter='L-charter-0052'),
@@ -250,6 +256,7 @@ class DriverTests(unittest.TestCase):
                 original = self.events[:]
                 self.events.extend(extra)
                 self.calls.clear()
+                tick.tick_path().unlink(missing_ok=True)
                 self.run_steps([self.step()])
                 self.assertEqual(self.calls[0][-4:], ['--depth', depth, '--round', round_n])
                 self.events = original
