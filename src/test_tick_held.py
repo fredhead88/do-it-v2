@@ -227,6 +227,15 @@ tick._record_next_step_held(events, specs, steps, now)
         import lane_driver
         import loadgate
         mocks = self.isolate_record()
+        # L-spec-2176: request the bounded fresh observer view with a real
+        # dispatch-only append, rather than requiring a read on no-write passes.
+        def dispatch_append(*args, **kwargs):
+            refusal = tick._committed(dispatch.emit(tick.tick_path(), {'subject': SID},
+                                 'autodispatch-skipped', strict=True,
+                                 reason='scratch queue observation'))
+            self.assertIsNone(refusal)
+            return []
+        mocks['merge_queue.enqueue_due'].side_effect = dispatch_append
         # The sole tail refresh must follow the whole pass and hold the lock.
         reader = ledger_cache.tail_refresh
         refreshes = []

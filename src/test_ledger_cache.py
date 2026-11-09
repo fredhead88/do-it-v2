@@ -99,21 +99,27 @@ class CacheTests(unittest.TestCase):
         print('L-spec-2049 AC1 fresh_tail=true parsed_lines=1 caller_isolation=true')
 
     def test_look_ledger_cache_and_nonledger_input(self):
+        import ledger_files
         import look
         name = 'L-operator-01.jsonl'
         self.write(name, [dict(ts='1', type='observed', subject='old')])
-        with patch.object(ledger_cache, 'read', wraps=ledger_cache.read) as reader:
+        with patch.object(ledger_cache, 'read', wraps=ledger_cache.read) as reader, \
+             patch.object(ledger_files, 'read_text', wraps=ledger_files.read_text) as own_file:
             self.assertEqual(look._read_jsonl(self.events / name),
                              [dict(ts='1', type='observed', subject='old')])
-            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(reader.call_count, 0)
+            own_file.assert_called_once_with(self.events, name)
             self.write(name, [dict(ts='2', type='observed', subject='new')], 'a')
             self.assertEqual([r['subject'] for r in look._read_jsonl(self.events / name)], ['old', 'new'])
+            self.assertEqual(reader.call_count, 0)
+            self.assertEqual(own_file.call_count, 2)
+            own_file.assert_called_with(self.events, name)
         transcript = self.root / 'transcript.jsonl'
         transcript.write_text('{"type":"assistant","message":{"content":[]}}\n')
         with patch.object(ledger_cache, 'read', side_effect=AssertionError('non-ledger cache')):
             self.assertEqual(look._read_jsonl(transcript), [dict(type='assistant', message=dict(content=[]))])
             self.assertEqual(look._read_jsonl(self.root / 'absent' / 'events' / name), [])
-        print('L-spec-2049 AC1 look_ledger_cached=true transcript_unchanged=true')
+        print('L-spec-2176 AC4 look_ledger_cache_reads=0 own_file_reads=2 fresh_append=true transcript_unchanged=true')
 
     def test_unchanged_cache_reuses_chunk_validation_but_corruption_revalidates(self):
         self.write('L-operator-01.jsonl', [dict(ts='1', type='observed', subject='fixture')])
@@ -890,7 +896,13 @@ print(json.dumps(fold.read_events()))
                     mock(pr_closeout, 'run')
                     mock(install_sync, 'run', return_value=[])
                     mock(push_origin, 'run')
-                    if site == 'record-second': read.side_effect = [[], timeout]
+                    if site == 'record-second':
+                        read.side_effect = [[], timeout]
+                        # 2176 refreshes only after the fixture generation advances.
+                        def advance_generation(*args):
+                            (self.root / 'events' / 'L-operator-refresh.jsonl').write_text('\n')
+                            return {}
+                        intake.side_effect = advance_generation
                     self.assertIsNone(tick._record())
                     self.assertEqual(read.call_count, 2 if site == 'record-second' else 1)
                     if site == 'record-first': intake.assert_not_called()

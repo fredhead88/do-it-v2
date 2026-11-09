@@ -1086,7 +1086,7 @@ class QueueTests(unittest.TestCase):
             tick._record()
             self.assertEqual(sequence, ['driver', 'replay', 'queue'])
             self.assertEqual(call.call_count, 1)
-            self.assertEqual(steps.call_count, 2)
+            self.assertEqual(steps.call_count, 1)
             logged.assert_any_call(['driver line', 'queue line'], self.now)
             self.assertNotIn('autodispatch_error', self.landed()[-1])
             call.reset_mock(side_effect=True)

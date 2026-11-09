@@ -200,7 +200,7 @@ class LauncherTests(unittest.TestCase):
              patch.object(tick, 'run_steps', return_value=['failed L-spec-9001 review: packet refused']), \
              patch.object(tick, '_log_lane_driver') as logged:
             tick._record()
-        self.assertEqual(steps.call_count, 2)
+        self.assertEqual(steps.call_count, 1)
         self.assertEqual(steps.call_args.args[2], self.now)
         self.assertTrue(logged.called)
         event = next(e for e in reversed(self.rows()) if e['type'] == 'tick')
@@ -2407,7 +2407,7 @@ look_period1960 = _manifest_crons1960.interval_s(next(
     row['schedule'] for row in _manifest_crons1960.rows() if row['name'] == 'look'))
 margin_message1960 = "legacy look-stale policy is unchanged; look now runs hourly"
 threshold1960 = int(re.search(r'total_seconds\(\) > (\d+) \* 60',
-                              _inspect1960.getsource(tick._record)).group(1)) * 60
+                              _inspect1960.getsource(tick._record_pass)).group(1)) * 60
 assert threshold1960 == 40 * 60 and look_period1960 == 3600, margin_message1960
 for age1960, expected1960 in ((31 * 60, []), (40 * 60, []), (None, [("look-stale", "look-stale", "thinker")]),
                               (look_period1960 + 300, [("look-stale", "look-stale", "thinker")])):

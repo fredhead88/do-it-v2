@@ -27,7 +27,7 @@ never raises out of its caller. A failed fetch or push is retried by the
 next tick, silently — nothing here is urgent enough to wake anyone by
 itself (that is `look`'s `origin-behind` alarm's job).
 """
-import pathlib, re, subprocess, sys
+import itertools, pathlib, re, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, look  # noqa: E402
 
@@ -88,20 +88,24 @@ def checkout(cfg, name):
     return look.push_checkout(cfg, name)
 
 
-def _record_diverged(project, main, sha, origin_sha):
+def _record_diverged(project, main, sha, origin_sha, *, events=None, observed=None):
     """An unreadable ledger is undetermined, never permission to append."""
-    try:
-        events = fold.read_events()
-    except Exception:
-        return
+    if events is None:
+        try:
+            events = fold.read_events()
+        except Exception:
+            return
     if any(e.get("type") == "origin-diverged" and e.get("subject") == project
-           and e.get("sha") == sha and e.get("origin_sha") == origin_sha for e in events):
+           and e.get("sha") == sha and e.get("origin_sha") == origin_sha
+           for e in itertools.chain(events, observed or ())):
         return
-    dispatch.emit(fold.EVENTS / EVENT_NAME, {}, "origin-diverged",
-                  subject=project, sha=sha, branch=main, origin_sha=origin_sha)
+    row = dict(subject=project, sha=sha, branch=main, origin_sha=origin_sha)
+    if dispatch.emit(fold.EVENTS / EVENT_NAME, {}, "origin-diverged", **row) is None:
+        if observed is not None:
+            observed.append(dict(type="origin-diverged", **row))
 
 
-def _push_one(project, main, cfg, runner):
+def _push_one(project, main, cfg, runner, *, events=None, observed=None):
     """One project's ref-only state machine. Returns whether
     `origin-pushed` landed."""
     repo = checkout(cfg, project)
@@ -133,7 +137,7 @@ def _push_one(project, main, cfg, runner):
     rc_origin, _ = _call(runner, ["merge-base", "--is-ancestor", origin_sha, sha], repo, 10)
     if rc_origin != 0:
         if rc_origin == 1 and behind > 0:
-            _record_diverged(project, main, sha, origin_sha)
+            _record_diverged(project, main, sha, origin_sha, events=events, observed=observed)
         return False   # divergence, or undetermined ancestry: never push
     if behind != 0:
         return False
@@ -150,9 +154,10 @@ def run(events, *, runner=None):
     runner = runner or Runner()
     cfg = look.load_toml()
     pushed = []
+    observed = []  # Successfully committed observations, private to this call.
     for project, main in targets(cfg):
         try:
-            if _push_one(project, main, cfg, runner):
+            if _push_one(project, main, cfg, runner, events=events, observed=observed):
                 pushed.append(project)
         except Exception:
             continue
