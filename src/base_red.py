@@ -721,7 +721,7 @@ def _run_recheck(repo, sha, ids):
             [python, "-c", "import pytest"], env=env, capture_output=True, timeout=30).returncode):
         return dict(result, undetermined=list(ids))
     with tempfile.TemporaryDirectory(prefix="doit-recheck-") as temp:
-        directory = pathlib.Path(temp)
+        directory = pathlib.Path(temp).resolve()
         checkout = directory / "archive"
         checkout.mkdir()
         archive = subprocess.run(["git", "-C", str(repo), "archive", "--format=zip", sha],
