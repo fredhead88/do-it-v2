@@ -318,12 +318,139 @@ def usage_view():
             assert seat_usage.usage_view(root, NOW)['claude']['used'] is None
 
 
+def nullable_windows():
+    """Strict production append and independent cold-reader proof of unknowns."""
+    root = TMP / 'nullable'
+    cases = {
+        'null-block': None,
+        'null-members': dict(used_percentage=None, resets_at=None),
+        'null-percentage': dict(used_percentage=None, resets_at=1800000000),
+        'null-reset': dict(used_percentage=37.5, resets_at=None),
+    }
+    for name, block in cases.items():
+        state(root, five_hour=block)
+        reading = seat_usage.latest(root, NOW)
+        assert reading is not None, name
+        assert reading['five_hour_pct'] is reading['five_hour_resets_at'] is None
+        assert reading['seven_day_pct'] == 62
+        print('2179-AC1', name, 'weekly=62 five-hour=null')
+    for name, change in {
+        'null-weekly': dict(seven_day=None),
+        'null-weekly-member': dict(seven_day=dict(used_percentage=None, resets_at=1800000000)),
+        'bool': dict(five_hour=dict(used_percentage=True, resets_at=1800000000)),
+        'infinite': dict(five_hour=dict(used_percentage=float('inf'), resets_at=1800000000)),
+        'nan': dict(seven_day=dict(used_percentage=float('nan'), resets_at=1800000000)),
+        'partial-null-malformed': dict(five_hour=dict(used_percentage=None, resets_at='bad')),
+        'partial-null-missing': dict(five_hour=dict(used_percentage=None)),
+    }.items():
+        state(root, **change)
+        assert seat_usage.latest(root, NOW) is None, name
+        print('2179-AC1 rejected', name)
+    state(root, five_hour=None)
+    assert json.loads(cli(root, '--dry-run', '--json'))['event']['five_hour_pct'] == 'unknown'
+    assert not (root / 'events').exists()
+    result = json.loads(cli(root, '--json'))
+    assert result['action'] == 'appended', result
+    code = "import fold,json; print(json.dumps(fold.read_events(use_cache=False)))"
+    rows = json.loads(subprocess.check_output(['/usr/bin/python3', '-c', code],
+        cwd=REPO/'src', env={**os.environ, 'DOIT_ROOT': str(root)}, text=True))
+    event, = rows
+    assert event['actor'] == 'seat-usage' and event['subject'] == 'seat-claude'
+    assert event['five_hour_pct'] == event['five_hour_resets_at'] == 'unknown'
+    assert event['seven_day_pct'] == '62'
+    before = (root / 'events' / seat_usage.LEDGER).read_bytes()
+    assert json.loads(cli(root, '--json'))['reason'] == 'unchanged'
+    assert (root / 'events' / seat_usage.LEDGER).read_bytes() == before
+    state(root)
+    assert json.loads(cli(root, '--json'))['reason'] == 'changed'
+    state(root, five_hour=None)
+    assert json.loads(cli(root, '--json'))['reason'] == 'changed'
+    with mock.patch.dict(os.environ, DOIT_ROOT=str(root)), mock.patch.object(fold, 'ROOT', root), \
+            mock.patch.object(fold, 'EVENTS', root/'events'):
+        prior = seat_usage._prior_event()
+        at = seat_usage._time(prior['ts'])
+        state(root, five_hour=None, observed_at=seat_usage._iso(at))
+        assert seat_usage.record(now=at+dt.timedelta(seconds=839))['reason'] == 'unchanged'
+        with mock.patch.object(fold, 'NOW', at+dt.timedelta(seconds=840)):
+            assert seat_usage.record(now=at+dt.timedelta(seconds=840))['reason'] == 'heartbeat'
+    print('2179-AC1 strict CLI append; cold read-back; transitions; dedupe; 839/840 heartbeat; dry-run')
+
+
+def prior_event_equality():
+    import hashlib
+    import ledger_files
+    import ledger_cache
+    base = dict(type='seat-usage', subject='seat-claude', project='do-it-v2',
+                ts=STAMP, five_hour_pct='37.5', seven_day_pct='62',
+                five_hour_resets_at='2027-01-15T08:00:00Z',
+                seven_day_resets_at='2027-01-17T15:33:20Z')
+    cases = {
+        'missing': None, 'empty': '',
+        'timestamp-order': [base, dict(base, ts=seat_usage._iso(NOW-dt.timedelta(seconds=100)), seven_day_pct='10')],
+        'equal-timestamps-forged-actor': [base, dict(base, actor='forged', seven_day_pct='61')],
+        'unrelated-type-subject': [base, dict(base, type='other'), dict(base, subject='other')],
+        'unknown': [dict(base, five_hour_pct='unknown', five_hour_resets_at='unknown')],
+        'projected-and-malformed': [dict(base, type='tick', recorded_reap=['x']),
+                                    dict(base, type='tree-reaped', retained=['x']), base],
+        'archived-virtual': [base],
+    }
+    for name, seed in cases.items():
+        root = TMP / ('prior-' + name)
+        events = root / 'events'
+        events.mkdir(parents=True)
+        text = '' if not seed else '\n'.join(json.dumps(row) for row in seed)+'\n'
+        if name == 'projected-and-malformed':
+            text = '{broken\n\n' + text + '{torn'
+        if name == 'archived-virtual':
+            data = text.encode()
+            segments = events/'segments'
+            segments.mkdir()
+            (segments/'seed.jsonl').write_bytes(data)
+            digest = hashlib.sha256(data).hexdigest()
+            (segments/'seed.idx.json').write_text(json.dumps(dict(version=1, segment='seed.jsonl',
+                bytes=len(data), sha256=digest, members=[dict(name=seat_usage.LEDGER, offset=0,
+                length=len(data), lines=1, sha256=digest, ends_nl=True)])))
+        elif seed is not None:
+            (events/seat_usage.LEDGER).write_text(text)
+        # A different filename cannot impersonate this actor, even with a forged payload.
+        (events/'L-builder-fixture.jsonl').write_text(json.dumps(dict(base, actor='seat-usage',
+            ts=seat_usage._iso(NOW+dt.timedelta(seconds=1))))+'\n')
+        with mock.patch.object(fold, 'ROOT', root), mock.patch.object(fold, 'EVENTS', events), \
+                mock.patch.dict(os.environ, DOIT_ROOT=str(root)):
+            oracle = next((e for e in reversed(fold.read_events(use_cache=False))
+                if e.get('type') == 'seat-usage' and e.get('subject') == 'seat-claude'
+                and e.get('actor') == 'seat-usage'), None)
+            with mock.patch.object(ledger_files, 'read_text', wraps=ledger_files.read_text) as reads, \
+                    mock.patch.object(fold, 'read_events', side_effect=AssertionError('whole-ledger lookup')), \
+                    mock.patch.object(ledger_cache, 'read', side_effect=AssertionError('cache lookup')), \
+                    mock.patch.object(ledger_cache, 'tail_refresh', side_effect=AssertionError('tail lookup')):
+                assert seat_usage._prior_event() == oracle, name
+                assert reads.call_count == 1
+                assert reads.call_args.args == (events, seat_usage.LEDGER)
+                for block in (None, PAYLOAD['rate_limits']['five_hour']):
+                    for elapsed in (839, 840):
+                        at = NOW + dt.timedelta(seconds=elapsed)
+                        state(root, five_hour=block, observed_at=seat_usage._iso(at))
+                        reading = seat_usage.latest(root, at)
+                        expected_fields = {k: 'unknown' if reading[k] is None else str(reading[k])
+                                           for k in seat_usage.READING_FIELDS}
+                        changed = oracle is None or any(expected_fields[k] != oracle.get(k)
+                                                       for k in seat_usage.READING_FIELDS)
+                        reason = 'changed' if changed else ('heartbeat' if
+                            (at-seat_usage._time(oracle['ts'])).total_seconds() >= 840 else 'unchanged')
+                        result = seat_usage.record(dry_run=True, now=at)
+                        assert result['reason'] == ('unchanged' if reason == 'unchanged' else 'dry-run: '+reason), (name, result)
+                print('2179-AC2', name, 'prior/content/actor/_src equal; own-file reads=', reads.call_count,
+                      'full/cache/tail lookup=0; numeric/unknown decisions 839/840 equal')
+
+
 def run_groups():
     import argparse, hashlib
     parser = argparse.ArgumentParser()
     parser.add_argument('-k')
     args = parser.parse_args()
-    groups = dict(legacy=test_seat_usage, usage_view=usage_view)
+    groups = dict(legacy=test_seat_usage, usage_view=usage_view,
+                  nullable_windows=nullable_windows, prior_event_equality=prior_event_equality)
     selected = [name for name in groups if args.k is None or args.k in name]
     if not selected:
         parser.exit(1, 'no group matches: ' + args.k + '\n')

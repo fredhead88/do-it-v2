@@ -68,7 +68,7 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   health-alarms | 6,36 * * * * | user | {doit}  {doit} cron-run health-alarms -- {doit}
   health-alarms >> {root}/logs/health-alarms.log 2>&1; ci-shadow | */10 * * * * | user | {doit}
   {doit} cron-run ci-shadow -- {doit} ci-shadow >> {root}/logs/ci-shadow.log 2>&1
-  balance | 8 * * * * | user | {doit}  {doit} cron-run balance -- {doit} balance >>
+  balance | 8 * * * * | user | {doit} (paused)  {doit} cron-run balance -- {doit} balance >>
   {root}/logs/balance.log 2>&1; stuck-digest | 15 6 * * * | user | {doit}  {doit} cron-run
   stuck-digest -- {doit} stuck-digest --send >> {root}/logs/stuck-digest.log 2>&1
   gh-bill | 15 6 * * * | user | {doit}  {doit} cron-run gh-bill -- {doit} gh-bill >>
@@ -92,8 +92,8 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   /usr/bin/python3 {repo}/src/stall_sample.py sample >> {root}/logs/stall-sample.log 2>&1
   spec-preflight | 4,9,14,19,24,29,34,39,44,49,54,59 * * * * | user | /usr/bin/python3  {doit}
   cron-run spec-preflight -- /usr/bin/python3 {repo}/src/spec_preflight.py tick >>
-  {root}/logs/spec-preflight.log 2>&1; ledger-rollup | 20 4 * * * | user | {doit}  {doit} cron-run
-  ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1
+  {root}/logs/spec-preflight.log 2>&1; ledger-rollup | 20 4 * * * | user | {doit} (paused)  {doit}
+  cron-run ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1
   flow-health-daily | 30 0 * * * | user | /usr/bin/python3  {doit} cron-run flow-health-daily --
   /usr/bin/python3 {repo}/src/flow_health.py >> {root}/logs/flow-health.log 2>&1
   scratch-db-reaper | 17 * * * * | user | {doit}  {doit} cron-run scratch-db-reaper -- {doit}
