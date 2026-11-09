@@ -26,8 +26,9 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 sys.path.insert(0, sys.argv[1])
-import attempts, autodispatch, build_runner, dispatch, fold, grader_packet, lane_rules, nextstep, spawns, start_check, tick
+import attempts, autodispatch, build_runner, dispatch, fold, grader_packet, lane_rules, look, nextstep, spawns, start_check, tick
 root = pathlib.Path(os.environ['DOIT_ROOT'])
+look.DEFAULT_TOML_PATH = root / 'look.toml'
 m = json.loads((root / 'fixture.json').read_text())
 sid, wt = m['sid'], root / 'worktrees/demo' / m['sid'].lower()
 clock = datetime.fromisoformat(m['clock'])
@@ -170,6 +171,7 @@ class RetryRoundTripTests(unittest.TestCase):
                         DOIT_LEDGER_FILE='L-operator-local.jsonl',
                         DOIT_GRADING_TOML=str(self.root / 'grading.toml'))
         (self.root / 'grading.toml').write_text('[project.demo]\nrunner_wall_cap_s = 20\n')
+        (self.root / 'look.toml').write_text('[push.main]\ndemo = "fixture"\n')
         self.git('init', '-q', '-b', 'fixture')
         self.git('config', 'user.name', 'fixture')
         self.git('config', 'user.email', 'fixture@localhost')
@@ -181,6 +183,7 @@ class RetryRoundTripTests(unittest.TestCase):
         self.git('add', '.')
         self.git('commit', '-qm', 'fixture build')
         sha = self.git('rev-parse', 'HEAD')
+        self.git('branch', SID.lower(), sha)
         self.clock = datetime.now(timezone.utc).replace(microsecond=0)
         self.meta = dict(sid=SID, base=base, sha=sha, clock=self.clock.isoformat())
         self.save()

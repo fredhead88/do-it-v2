@@ -370,7 +370,7 @@ def verify_base_sha(c):
             return _builder_pin(c)
         except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError):
             die(f"{c.a.subject}: stale-base — effective base unresolved; Executor checks project/ref")
-    pinned = c.a.base_sha or base_refresh.refresh_tip(c)
+    pinned = grader_packet.refreshed_base(c) or c.a.base_sha or base_refresh.refresh_tip(c)
     if pinned:
         return pinned
     bds = c.all_of("build-done")

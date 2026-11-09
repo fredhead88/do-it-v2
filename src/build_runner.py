@@ -562,6 +562,14 @@ def _bundle_base(repo, project, done, sha, env, deadline):
     return _resolve(repo, base, env, deadline), _resolve(repo, master, env, deadline), local_master
 
 
+def _refreshed_done(events, spec, sha, done):
+    # Publish refreshed-base evidence as a new record. Historical build-done
+    # remains the builder's immutable assertion about its original commit.
+    import grader_packet
+    refreshed = grader_packet.grading_build(events, spec, pending=True)
+    return refreshed if refreshed.get('_refresh') and refreshed.get('ready_sha') == sha else done
+
+
 def run(spec, requested_sha=None, criteria=None, *, fresh=False):
     sweep_short_tmpdirs()
     invocation_id = evidence_revision.new_invocation_id()
@@ -603,6 +611,7 @@ def run(spec, requested_sha=None, criteria=None, *, fresh=False):
         # Another runner may have published while we waited on the subject lock.
         events = fold.fold(fold.read_events())[3].get(spec, [])
         done = next((e for e in reversed(events) if e['type'] == 'build-done'), {})
+        done = _refreshed_done(events, spec, sha, done)
         text = (fold.ROOT / 'content' / f'{spec}.md').read_text()
         base_sha, master_sha, local_master_sha = _bundle_base(repo, project, done, sha, env, deadline)
         revision = evidence_revision.bundle_key(text, events, spec, sha, base_sha)
