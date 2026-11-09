@@ -272,6 +272,10 @@ def main(argv=None):
             data["updated_at"] = stamp
             _atomic(path, json.dumps(data, sort_keys=True) + "\n")
             print("held" if args.action == "hold" else "resumed")
+            if args.action == "resume":
+                import crons
+                if "balance" in crons.paused_names():
+                    print("balance: cron row is paused and must be restored to schedule balance runs")
             return 0
         if data["held"]:
             print(f"held: manual {data['held_at']}")

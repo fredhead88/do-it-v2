@@ -195,6 +195,8 @@ project = "do-it-v2"
 
 [[row]]
 name = "balance"
+# Operator hold since 2026-10-12; ledger-dependent _operator_hold cannot decide cheaply.
+paused = true
 where = "user"
 schedule = "8 * * * *"
 command = "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1"
@@ -321,6 +323,8 @@ max_runtime_s = 3300
 
 [[row]]
 name = "ledger-rollup"
+# Inert/not-approved: exits before reading the ledger; no ledger read to remove.
+paused = true
 where = "user"
 schedule = "20 4 * * *"
 command = "{doit} cron-run ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1"

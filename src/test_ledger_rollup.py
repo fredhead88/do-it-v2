@@ -357,7 +357,7 @@ class RollupTests(unittest.TestCase):
         row = next(r for r in manifest['row'] if r['name'] == 'ledger-rollup')
         self.assertEqual(row, dict(name='ledger-rollup', where='user', schedule='20 4 * * *',
             command='{doit} cron-run ledger-rollup -- nice -n 19 {doit} ledger-rollup >> {root}/logs/ledger-rollup.log 2>&1',
-            path='{doit}', sig=r'\bdoit ledger-rollup\b', owner='thinker', project='do-it-v2'))
+            path='{doit}', sig=r'\bdoit ledger-rollup\b', owner='thinker', project='do-it-v2', paused=True))
         result = subprocess.run([str(path / 'doit'), 'ledger-rollup', '--dry-run'],
                                 text=True, capture_output=True, check=True)
         self.assertIn('ledger-rollup: rolled 0 files', result.stdout)

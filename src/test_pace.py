@@ -190,6 +190,64 @@ class PaceTests(unittest.TestCase):
         self.assertIsNone(rows[1]['ram_used_pct'])
         self.assertIsNone(rows[1]['disk_used_pct'])
         self.assertEqual(set(rows[1]), FIELDS)
+        # Frozen numeric-history output, independent of the production converters.
+        common = dict(claude_5h_pct=14., claude_5h_reset='2026-10-28T14:00:00Z',
+                      claude_7d_pct=36., claude_7d_reset='2026-10-31T12:00:00Z')
+        expected = [dict.fromkeys(FIELDS), dict.fromkeys(FIELDS)]
+        expected[0].update(common, ts='2026-10-28T10:00:00Z', disk_used_pct=82.8/.959,
+            ram_used_pct=60., swap_used_pct=25., codex_7d_pct=31.,
+            codex_7d_reset='2026-11-01T12:00:00Z',
+            source='backfill:admission+codex-rollout+realm-history+seat-usage')
+        expected[1].update(common, ts='2026-10-28T10:20:00Z', source='backfill:seat-usage')
+        self.assertEqual(json.dumps(rows, sort_keys=True), json.dumps(expected, sort_keys=True))
+        print('2179-AC3 numeric-history frozen serialized equality; latest-per-origin; bucketing; retention')
+
+    def test_nullable_live_and_backfill(self):
+        usage = self.root/'state/claude-usage.json'
+        data = json.loads(usage.read_text())
+        data['five_hour'] = None
+        usage.write_text(json.dumps(data))
+        live = pace.record(NOW, root=self.root)
+        expected_live = dict(ts='2026-10-28T12:00:00Z', source='live',
+            disk_used_pct=100*828/959, disk_total_gb=1000., ram_used_pct=60., swap_used_pct=25.,
+            claude_5h_pct=None, claude_5h_reset=None, claude_7d_pct=36.,
+            claude_7d_reset='2026-10-31T12:00:00Z', codex_7d_pct=None, codex_7d_reset=None)
+        self.assertEqual(json.dumps(live, sort_keys=True), json.dumps(expected_live, sort_keys=True))
+        at = NOW-timedelta(hours=2)
+        rows = [dict(type='seat-usage', observed_at=pace._iso(at+timedelta(minutes=m)),
+                     five_hour_pct=value, five_hour_resets_at=value,
+                     seven_day_pct='36', seven_day_resets_at='2026-10-31T12:00:00Z')
+                for m, value in ((0, None), (20, 'unknown'))]
+        self.ledger(rows)
+        expected = []
+        for stamp in ('2026-10-28T10:00:00Z', '2026-10-28T10:20:00Z'):
+            row = dict.fromkeys(FIELDS)
+            row.update(ts=stamp, source='backfill:seat-usage', claude_7d_pct=36.,
+                       claude_7d_reset='2026-10-31T12:00:00Z')
+            expected.append(row)
+        self.assertEqual(pace.backfill(now=NOW)['rows_added'], 2)
+        code = "import pace,json; print(json.dumps(pace.samples('2000-01-01T00:00:00Z')))"
+        def cold_read():
+            return json.loads(subprocess.check_output(['/usr/bin/python3', '-c', code],
+                                                      cwd=REPO/'src', text=True))
+        self.assertEqual(cold_read(), expected+[expected_live])
+        self.assertEqual(pace.backfill(now=NOW)['rows_added'], 0)
+        self.assertEqual(cold_read(), expected+[expected_live])
+        # First sample invokes real automatic backfill with controlled clock/host inputs.
+        (self.root/'state/pace-samples.jsonl').unlink()
+        (self.root/'state/pace-backfill.json').unlink()
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW
+        with patch.object(pace, 'datetime', Clock):
+            self.assertEqual(pace.main(['sample']), 0)
+        self.assertEqual(cold_read(), expected+[expected_live])
+        self.assertTrue((self.root/'state/pace-backfill.json').exists())
+        print('2179-AC3 null/unknown historical; null live; explicit/automatic backfill; cold samples; serialized equality')
+        body = 'null live; None/unknown backfill; automatic/explicit writes; cold samples; frozen serialized equality: passed'
+        print(json.dumps(dict(url='cli://pace/2179-AC3', status=0,
+            body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 
     def test_backfill_safe(self):
         self.backfill_fixture()

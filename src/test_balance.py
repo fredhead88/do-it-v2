@@ -116,6 +116,10 @@ def run_checks(root, balance, dispatch, fold, models):
     assert balance.read_inputs([seat(now), seat("bad")], now, dispatch.codex_quota) == (80, None)
     assert balance.read_inputs([seat(now, "bad")], now, dispatch.codex_quota) == (80, None)
     assert balance.read_inputs([], now, dispatch.codex_quota) == (80, None)
+    for unknown in (None, 'unknown'):
+        assert balance.read_inputs([dict(seat(now), five_hour_pct=unknown,
+            five_hour_resets_at=unknown)], now, dispatch.codex_quota) == (80, 72)
+    print('2179-AC4 weekly-input: null/unknown five-hour preserves weekly=72')
     print("1130-AC3 no-event")
     quota(None)
     assert balance.read_inputs([], now, dispatch.codex_quota) == (None, None)
@@ -246,9 +250,30 @@ def run_checks(root, balance, dispatch, fold, models):
     assert snapshot() == before and not state_path.exists()
     operator_file.unlink()
     assert run(["hold"])[0] == 0
+    def cold_state():
+        return json.loads(subprocess.check_output(['/usr/bin/python3', '-c',
+            'import json,os,pathlib; print((pathlib.Path(os.environ["DOIT_ROOT"])/"state/balance.json").read_text())'],
+            text=True))
+    assert cold_state()['held'] is True
     before = snapshot()
     assert 'held: manual ' in run()[1] and snapshot() == before
-    assert run(["resume"])[0] == 0
+    import crons
+    paused_manifest = root/'paused.toml'
+    unpaused_manifest = root/'unpaused.toml'
+    paused_manifest.write_text('[[row]]\nname="balance"\npaused=true\n')
+    unpaused_manifest.write_text('[[row]]\nname="balance"\n')
+    with patch.object(crons, 'MANIFEST', paused_manifest), \
+            patch.object(crons, 'install', side_effect=AssertionError('resume installed cron')):
+        rc, output = run(['resume'])
+        assert rc == 0 and 'balance: cron row is paused' in output and 'must be restored' in output
+        assert not cold_state()['held'] and cold_state()['resumed_at']
+    print('2179-AC4 paused-warning; committed hold/resume cold state read-back; no cron installation')
+    with patch.object(crons, 'MANIFEST', unpaused_manifest):
+        rc, output = run(['resume'])
+        assert rc == 0 and output == 'resumed\n'
+    print('2179-AC4 unpaused-warning absent')
+    response('2179-AC4', dict(weekly=72, held_readback=True, resumed_readback=True,
+                             paused_warning=True, unpaused_warning=False, installed=False))
     data = json.loads(state_path.read_text())
     assert data["state"] == "default" and not data["held"] and data["resumed_at"]
     state_path.unlink()
@@ -346,7 +371,7 @@ print('1130-AC7 kept')
     row, = [r for r in rows if r["name"] == "balance"]
     assert row == {"name": "balance", "where": "user", "schedule": "8 * * * *",
                    "command": "{doit} cron-run balance -- {doit} balance >> {root}/logs/balance.log 2>&1",
-                   "path": "{doit}", "sig": r"\bdoit balance\b", "owner": "thinker", "project": "do-it-v2"}
+                   "path": "{doit}", "sig": r"\bdoit balance\b", "owner": "thinker", "project": "do-it-v2", "paused": True}
     assert [r["name"] for r in rows if re.search(row["sig"], r["command"].replace("{doit}", "/repo/doit"))] == ["balance"]
     command = row["command"].replace("{doit}", "/repo/doit")
     assert [r["name"] for r in rows if re.search(r["sig"], command)] == ["balance"]

@@ -815,4 +815,52 @@ check(not any(not line.lstrip().startswith("#") and re.search(rows1967["ci-shado
               for line in paused_lines1967), "L1967-AC3: ci-shadow remains paused")
 print("L1967-AC3: paused ci-shadow preserved")
 
+# L2179: real pause metadata, repository snapshot, and scratch-only activation/install.
+from unittest.mock import patch
+from types import SimpleNamespace
+import install_sync
+raw2179 = tomllib.loads(REAL_MANIFEST.read_text())['row']
+targets2179 = {'balance', 'ledger-rollup'}
+check(targets2179 <= crons.paused_names(), '2179: both idle rows paused')
+snapshot2179 = (REAL_MANIFEST.parent/'machine/crontab.txt').read_text()
+for name, schedule, reason in (
+        ('balance', '8 * * * *', 'ledger-dependent _operator_hold'),
+        ('ledger-rollup', '20 4 * * *', 'no ledger read to remove')):
+    raw = next(r for r in raw2179 if r['name'] == name)
+    projected = next(r for r in crons.rows() if r['name'] == name)
+    check(raw['paused'] is True and raw['schedule'] == schedule, '2179: retained '+name+' schedule')
+    check(set(projected) == set(crons.FIELDS) | {'max_runtime_s'}, '2179: rows schema unchanged')
+    block = REAL_MANIFEST.read_text().split('name = "'+name+'"', 1)[1].split('[[row]]', 1)[0]
+    check(reason in block, '2179: documented '+name+' reason')
+    if name == 'balance':
+        check('2026-10-12' in block and 'operator hold' in block.lower(), '2179: dated operator hold')
+    else:
+        check('inert/not-approved' in block.lower(), '2179: inert rollup reason')
+    tagged = [line for line in snapshot2179.splitlines() if line.endswith('# doit-cron:'+name)]
+    check(len(tagged) == 1 and tagged[0].startswith('# '+schedule+' '), '2179: snapshot commented '+name)
+    check(crons._find_line(snapshot2179, projected['sig']) is None, '2179: commented row inactive '+name)
+    dest = TMP/('paused-2179-'+name)
+    dest.write_text('# unrelated schedule\n')
+    try:
+        crons.install(name, crontab_path=str(dest))
+        raise AssertionError('2179: installed paused '+name)
+    except ValueError as error:
+        check('paused' in str(error), '2179: installation refuses '+name)
+    check(dest.read_text() == '# unrelated schedule\n', '2179: refused install leaves scratch bytes')
+check(next(r for r in crons.rows() if r['name'] == 'seat-usage')['schedule'] ==
+      '12,27,42,57 * * * *', '2179: seat-usage cadence retained')
+scratch2179 = TMP/'pauses-2179.toml'
+scratch2179.write_text(REAL_MANIFEST.read_text())
+missing2179 = crons.check(manifest=scratch2179, crontab_text='', crond_dir=crond5_empty)
+check(not targets2179 & {r['name'] for r in missing2179}, '2179: activation omits both paused rows')
+check('seat-usage' in {r['name'] for r in missing2179}, '2179: active row still checked')
+# Exercise install_sync's git-show projection with a scratch manifest as the git input.
+with patch.object(install_sync.subprocess, 'run', return_value=SimpleNamespace(stdout=scratch2179.read_text())):
+    selected2179 = install_sync._crons_toml_at(TMP, 'HEAD')
+check(not crons.paused_names(scratch2179) & selected2179.keys(), '2179: install_sync skips all paused rows')
+check('seat-usage' in selected2179 and 'auto-carry' in selected2179,
+      '2179: install_sync retains active seat-usage and inbound auto-carry')
+body2179 = 'pause flags/reasons; retained schedules; commented snapshot; activation/install refusal; install_sync selection: passed'
+print(json.dumps(dict(url='cli://crons/2179-AC5', status=0,
+                     body_sha256=hashlib.sha256(body2179.encode()).hexdigest(), body_excerpt=body2179)))
 print(f"crons: {N} checks pass")

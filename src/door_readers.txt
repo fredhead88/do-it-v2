@@ -48,7 +48,6 @@ src/reap_scratch_db.py 1
 src/reap_tmp.py 1
 src/reap_worktrees.py 1
 src/scorecard.py 1
-src/seat_usage.py 1
 src/spawns.py 1
 src/spec_preflight.py 1
 src/stall_sample.py 1

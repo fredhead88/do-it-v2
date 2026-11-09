@@ -102,6 +102,7 @@ VIRTUAL = {
     'src/realm.py': {'read_text': 2},
     'src/realm_ledger.py': {'_members': 1, '_read_bytes': 1, '_read_range': 1},
     'src/realm_omens.py': {'_members': 1, '_read_bytes': 1},
+    'src/seat_usage.py': {'read_text': 1},  # L-spec-2179: fixed own-file prior lookup.
     'src/tg_check.py': {'iter_sources': 1, 'read_text': 1},
     'src/tick.py': {'read_text': 3},
     'src/up.py': {'read_text': 2},
@@ -755,6 +756,17 @@ class BoundaryTests(ScratchTree):
         self.assertIn('virtual iter_sources: 1 > 0', '\n'.join(check_tree(self.root, {})))
         self.put('src/tick.py', '')
         self.assertEqual(check_tree(self.root, {}), [])
+
+    def test_seat_usage_own_file_reader_ceiling(self):
+        self.put('src/seat_usage.py',
+                 'ledger_files.read_text(fold.EVENTS, "L-seat-usage-local.jsonl")')
+        self.assertEqual(check_tree(self.root, {}), [])
+        self.put('src/seat_usage.py', 'ledger_files.read_text()\n' * 2)
+        self.assertIn('seat_usage.py: virtual read_text: 2 > 1',
+                      '\n'.join(check_tree(self.root, {})))
+        self.put('src/seat_usage.py', 'ledger_files.iter_sources()')
+        self.assertIn('seat_usage.py: virtual iter_sources: 1 > 0',
+                      '\n'.join(check_tree(self.root, {})))
 
     def test_infrastructure_is_exact(self):
         self.put('src/door.py', 'def content():\n    EVENTS.glob("*")\n    ledger_files.read_text()')

@@ -70,7 +70,8 @@
 40 5 * * * /home/albert/do-it-v2/doit cron-run suite-daily -- /usr/bin/python3 /home/albert/do-it-v2/src/suite_run.py >> /home/albert/.do-it/logs/suite-daily.log 2>&1  # doit-cron:suite-daily
 6,36 * * * * /home/albert/do-it-v2/doit cron-run health-alarms -- /home/albert/do-it-v2/doit health-alarms >> /home/albert/.do-it/logs/health-alarms.log 2>&1  # doit-cron:health-alarms
 # PAUSED by Thinker 2026-10-19 00:2xZ (shadows on master shas break the predeploy gate; disk): */10 * * * * /home/albert/do-it-v2/doit cron-run ci-shadow -- /home/albert/do-it-v2/doit ci-shadow >> /home/albert/.do-it/logs/ci-shadow.log 2>&1  # doit-cron:ci-shadow
-8 * * * * /home/albert/do-it-v2/doit cron-run balance -- /home/albert/do-it-v2/doit balance >> /home/albert/.do-it/logs/balance.log 2>&1  # doit-cron:balance
+# PAUSED: operator hold since 2026-10-12; ledger-dependent _operator_hold.
+# 8 * * * * /home/albert/do-it-v2/doit cron-run balance -- /home/albert/do-it-v2/doit balance >> /home/albert/.do-it/logs/balance.log 2>&1  # doit-cron:balance
 15 6 * * * /home/albert/do-it-v2/doit cron-run stuck-digest -- /home/albert/do-it-v2/doit stuck-digest --send >> /home/albert/.do-it/logs/stuck-digest.log 2>&1  # doit-cron:stuck-digest
 15 6 * * * /home/albert/do-it-v2/doit cron-run gh-bill -- /home/albert/do-it-v2/doit gh-bill >> /home/albert/.do-it/logs/gh-bill.log 2>&1  # doit-cron:gh-bill
 12,27,42,57 * * * * /home/albert/do-it-v2/doit cron-run seat-usage -- /home/albert/do-it-v2/doit seat-usage >> /home/albert/.do-it/logs/seat-usage.log 2>&1  # doit-cron:seat-usage
@@ -89,7 +90,8 @@
 3 * * * * /home/albert/do-it-v2/doit cron-run stall-sample -- /usr/bin/python3 /home/albert/do-it-v2/src/stall_sample.py sample >> /home/albert/.do-it/logs/stall-sample.log 2>&1  # doit-cron:stall-sample
 */5 * * * * DOIT_ROOT=/home/albert/.do-it /home/albert/do-it-v2/doit cron-run pane-watchdog -- /home/albert/do-it-v2/src/pane_watchdog.py  # doit-cron:pane-watchdog
 7,22,37,52 * * * * /home/albert/do-it-v2/doit cron-run spec-preflight -- /usr/bin/python3 /home/albert/do-it-v2/src/spec_preflight.py tick >> /home/albert/.do-it/logs/spec-preflight.log 2>&1  # doit-cron:spec-preflight  # Thinker 2026-11-04 12:35Z: 5-min -> 15-min during the merge push; restore 2026-11-05
-20 4 * * * /home/albert/do-it-v2/doit cron-run ledger-rollup -- nice -n 19 /home/albert/do-it-v2/doit ledger-rollup >> /home/albert/.do-it/logs/ledger-rollup.log 2>&1  # doit-cron:ledger-rollup
+# PAUSED: inert/not-approved; exits before any ledger read, so no ledger read to remove.
+# 20 4 * * * /home/albert/do-it-v2/doit cron-run ledger-rollup -- nice -n 19 /home/albert/do-it-v2/doit ledger-rollup >> /home/albert/.do-it/logs/ledger-rollup.log 2>&1  # doit-cron:ledger-rollup
 # factory-status graphs feed (operator request 2026-10-29; durable feature, review 2026-11-29). Owner: Thinker. Remove with the /status/ page.
 2,17,32,47 * * * * flock -n /tmp/factory-metrics.lock nice -n 10 timeout 600 python3 /var/tmp/push/factory-metrics/sample.py >> /var/tmp/push/factory-metrics/cron.log 2>&1
 30 0 * * * /home/albert/do-it-v2/doit cron-run flow-health-daily -- /usr/bin/python3 /home/albert/do-it-v2/src/flow_health.py >> /home/albert/.do-it/logs/flow-health.log 2>&1  # doit-cron:flow-health-daily

@@ -353,6 +353,18 @@ def health():
         assert text.returncode == 0 and len(text.stdout.splitlines()) == 5 and 'unknown' in text.stdout
         for key in got:
             assert key + ': ' in text.stdout
+        import seat_usage
+        import dispatch
+        (root/'state').mkdir()
+        (root/'state/claude-usage.json').write_text(json.dumps(dict(
+            observed_at=NOW.isoformat(), session_id='weekly-health', five_hour=None,
+            seven_day=dict(used_percentage=62, resets_at=(NOW+timedelta(days=2)).timestamp()))))
+        with patch.object(dispatch, 'codex_quota', return_value=None):
+            usage = seat_usage.usage_view(root, NOW)
+        assert usage == dict(codex=dict(used=None, limit=100), claude=dict(used=62, limit=100))
+        assert throughput.health_view(rows, NOW, usage=usage, disk_used_fraction=None)['usage'] == usage
+        assert json.loads(cli('--json').stdout)['usage']['claude']['used'] == 62
+        print('2179-AC4 health/usage_view weekly=62 with null five-hour, real health CLI')
         missing = cli('--json', DOIT_ROOT=str(root / 'missing'))
         assert missing.returncode == 2 and missing.stdout == ''
         before = subprocess.run([str(REPO / 'doit'), 'throughput', '--json'], env=env, capture_output=True)

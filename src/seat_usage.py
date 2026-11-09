@@ -50,9 +50,18 @@ def _reading(root=None, now=None, max_age_s=900):
             raise ValueError("session_id missing")
         for window in ("five_hour", "seven_day"):
             block = data[window]
-            reading[window + "_pct"] = _number(block["used_percentage"])
-            reading[window + "_resets_at"] = _iso(dt.datetime.fromtimestamp(
-                _number(block["resets_at"]), UTC))
+            if window == "five_hour" and block is None:
+                pct, reset = None, None
+            else:
+                pct, reset = block["used_percentage"], block["resets_at"]
+                # Validate every reported member, even when its partner is null.
+                pct = None if window == "five_hour" and pct is None else _number(pct)
+                reset = None if window == "five_hour" and reset is None else _iso(
+                    dt.datetime.fromtimestamp(_number(reset), UTC))
+                if window == "five_hour" and (pct is None or reset is None):
+                    pct, reset = None, None
+            reading[window + "_pct"] = pct
+            reading[window + "_resets_at"] = reset
         age = ((now if now is not None else dt.datetime.now(UTC)) - observed).total_seconds()
         if age >= max_age_s or age < -60:
             return None, "stale"
@@ -75,6 +84,30 @@ def usage_view(root: str | None, now: dt.datetime) -> dict:
                 claude=dict(used=claude["seven_day_pct"] if claude else None, limit=100))
 
 
+def _prior_event():
+    """Select the prior reading from this actor's virtual file, oldest-first."""
+    import fold
+    import ledger_compact
+    import ledger_files
+    try:
+        text = ledger_files.read_text(fold.EVENTS, LEDGER)
+    except FileNotFoundError:
+        return None
+    rows = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            event = ledger_compact.compact(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+        event['actor'], event['_src'] = fold.actor_of(LEDGER), f'{LEDGER}:{number}'
+        rows.append(event)
+    return next((event for event in reversed(fold.finish_events(rows, owned=True))
+                 if event.get('type') == 'seat-usage' and event.get('subject') == 'seat-claude'
+                 and event.get('actor') == 'seat-usage'), None)
+
+
 def record(dry_run=False, now=None):
     """Append changes immediately, or an unchanged reading after 14 minutes."""
     now = now if now is not None else dt.datetime.now(UTC)
@@ -82,11 +115,10 @@ def record(dry_run=False, now=None):
     if reading is None:
         return {"action": "none", "reason": reason, "event": None}
     import fold
-    prior = next((event for event in reversed(fold.read_events())
-                  if event.get("type") == "seat-usage" and event.get("subject") == "seat-claude"
-                  and event.get("actor") == "seat-usage"), None)
+    prior = _prior_event()
+    fields = {key: 'unknown' if value is None else str(value) for key, value in reading.items()}
     event = {"type": "seat-usage", "subject": "seat-claude",
-             **{key: str(value) for key, value in reading.items()}}
+             **fields}
     changed = prior is None or any(event[key] != prior.get(key) for key in READING_FIELDS)
     if not changed:
         try:
@@ -102,7 +134,7 @@ def record(dry_run=False, now=None):
     os.environ["DOIT_LEDGER_FILE"] = LEDGER
     try:
         stored = fold.append(["seat-usage", "seat-claude", "project=do-it-v2",
-                              *[f"{key}={json.dumps(str(value))}" for key, value in reading.items()]], strict=True)
+                              *[f"{key}={json.dumps(value)}" for key, value in fields.items()]], strict=True)
     except (SystemExit, OSError, AssertionError) as error:
         return {"action": "none", "reason": f"append failed: {error}", "event": None}
     finally:
