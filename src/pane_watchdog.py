@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One bounded, local scan of verified role sessions for the Stay dialog."""
+"""One bounded scan: resolve Stay dialogs and report persistent unknown dialogs."""
 import fcntl
 import json
 import os
@@ -19,6 +19,7 @@ TARGET = re.compile(r"[A-Za-z0-9_.:@%\-]+")
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*?(?:\x07|\x1b\\))")
 OPTION = re.compile(r"^(?:❯\s*)?(\d+)\.\s*(.+)$")
 PROMPT = re.compile(r"^(?:❯(?!\s*\d+\.)|›|[$#])")
+UNKNOWN_DWELL_S = 120
 
 
 def _stamp(now=None):
@@ -66,6 +67,20 @@ def _dialog(text, cfg):
                 return ("3" if match[1] == "3" else "Escape"), "dialog"
         return None, "unresolved"
     return None, "not-dialog"
+
+
+def _unknown_dialog(text, cfg):
+    """Return a bounded, safe prompt for an unanswered numbered-option dialog."""
+    if _dialog(text, cfg)[0] is not None:
+        return None
+    lines = [s.strip() for s in ANSI.sub("", text).splitlines()[-cfg["capture_lines"]:] if s.strip()]
+    options = [index for index, line in enumerate(lines) if OPTION.fullmatch(line)]
+    if len(options) < 2 or options[0] == 0:
+        return None
+    if any(PROMPT.match(line) for line in lines[options[0] + 1:]):
+        return None
+    prompt = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", lines[options[0] - 1]).strip()[:200]
+    return prompt or None
 
 
 def scan(panes, capture):
@@ -165,6 +180,7 @@ def main(argv=None, *, root=None, now=None, capture=None, send=None, sessions_di
     if send is None:
         send = lambda target, key: tmux("send-keys", "-t", target, key)
     heartbeat, cap_path = state / "pane-watchdog.json", state / "pane-watchdog-sends.json"
+    unknown_path = state / "pane-watchdog-unknown.json"
     marker = state / "pane-watchdog-sends.initialized"
     # Serialize concurrent direct/cron runs, including the pre-send reservation.
     with (state / "pane-watchdog.lock").open("a") as lock:
@@ -186,20 +202,52 @@ def main(argv=None, *, root=None, now=None, capture=None, send=None, sessions_di
             caps = None if marker.exists() else {}
         except (OSError, ValueError, TypeError, AttributeError):
             caps = None
+        try:
+            unknown = _read(unknown_path)
+            if not isinstance(unknown, dict):
+                raise ValueError("invalid unknown-dialog state")
+            for entry in unknown.values():
+                if not isinstance(entry["prompt"], str) or type(entry["raised"]) is not bool:
+                    raise ValueError("invalid unknown-dialog entry")
+                _date(entry["first_seen_at"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            unknown = {}
         scanned, dialogs, unreadable, rc = 0, 0, 0, 0
         try:
             roster, unreadable = _roster(Path(sessions_dir) if sessions_dir is not None else Path.home() / ".claude/sessions", log)
+            unknown = {name: entry for name, entry in unknown.items()
+                       if name in {pane["name"] for pane in roster}}
             log(None, None, "scan", f"roster={len(roster)}")
             for pane in roster:
                 name, role, target = pane["name"], pane["role"], pane["target"]
                 try:
-                    key, result = _dialog(capture(target), cfg)
+                    text = capture(target)
+                    key, result = _dialog(text, cfg)
                 except (OSError, subprocess.SubprocessError):
                     unreadable += 1
                     log(name, role, "unreadable", "failed")
                     continue
                 scanned += 1
                 seen_at = _stamp(now)
+                prompt = _unknown_dialog(text, cfg) if key is None else None
+                if prompt is None:
+                    unknown.pop(name, None)
+                else:
+                    if name not in unknown or unknown[name]["prompt"] != prompt:
+                        unknown[name] = {"prompt": prompt, "first_seen_at": seen_at, "raised": False}
+                    entry = unknown[name]
+                    if (not entry["raised"] and
+                            (_date(seen_at) - _date(entry["first_seen_at"])).total_seconds() >= UNKNOWN_DWELL_S):
+                        try:
+                            _append(root, "pane-dialog-unknown", name,
+                                    {"pane": name, "role": role, "prompt": prompt,
+                                     "first_seen_at": entry["first_seen_at"], "seen_at": seen_at})
+                            entry["raised"] = True
+                            _atomic(unknown_path, unknown)
+                            log(name, role, "unknown-raised", "ok")
+                        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                            log(name, role, "unreadable", "unknown-append-failed")
+                            rc = 1
                 if key is None:
                     log(name, role, result, "ok")
                     continue
@@ -245,6 +293,7 @@ def main(argv=None, *, root=None, now=None, capture=None, send=None, sessions_di
                     log(name, role, "unreadable", "resolve-failed")
                     rc = 1
         finally:
+            _atomic(unknown_path, unknown)
             _atomic(heartbeat, {"ts": ts, "panes_scanned": scanned, "dialogs": dialogs, "unreadable": unreadable})
     return rc
 
