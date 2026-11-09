@@ -92,19 +92,23 @@ case "${1:-board}" in
            for doit_test_git_var in "${!GIT_@}"; do unset "$doit_test_git_var"; done
            DOIT_TEST_MACHINE_ROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${DOIT_ROOT:-$HOME/.do-it}")
            export DOIT_TEST_MACHINE_ROOT DOIT_TEST_PROCESS=1
-           if [ "$#" -eq 1 ]; then
-             if [ "$1" != --live ]; then
-               echo 'usage: doit test [--live]' >&2
-               exit 2
+           doit_test_live=0
+           doit_test_quiet=0
+           for doit_test_option in "$@"; do
+             if [ "$doit_test_option" = --live ]; then
+               if [ "$doit_test_live" -eq 0 ]; then doit_test_live=1; continue; fi
+             elif [ "$doit_test_option" = --failures-only ]; then
+               if [ "$doit_test_quiet" -eq 0 ]; then doit_test_quiet=1; continue; fi
              fi
+             echo 'usage: doit test [--live] [--failures-only]' >&2
+             exit 2
+           done
+           if [ "$doit_test_live" -eq 1 ]; then
              # Capture the caller's root before replacing HOME/DOIT_ROOT.
              export DOIT_TEST_LIVE_ROOT
              DOIT_TEST_LIVE_ROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "${DOIT_ROOT:-$HOME/.do-it}")
-           elif [ "$#" -eq 0 ]; then
-             unset DOIT_TEST_LIVE_ROOT
            else
-             echo 'usage: doit test [--live]' >&2
-             exit 2
+             unset DOIT_TEST_LIVE_ROOT
            fi
            cd "$SRC"
            DOIT_TEST_ISO=$(mktemp -d)
@@ -117,6 +121,7 @@ case "${1:-board}" in
            unset DOIT_LEDGER_FILE
            export DOIT_LIVE_REPO="$HERE"
            rc=0
+           doit_test_passed=0
            if [ -n "${DOIT_TEST_LIVE_ROOT:-}" ]; then
              # No ledger or an unreadable ledger is undetermined, never green.
              if ! python3 - "$DOIT_TEST_LIVE_ROOT" <<'PY'
@@ -134,6 +139,7 @@ except OSError:
 PY
              then
                echo 'live: not run'
+               if [ "$doit_test_quiet" -eq 1 ]; then echo 'Passed: 0 checks'; fi
                exit 3
              fi
              for f in test_harvest.py test_problem_backfill.py; do
@@ -142,11 +148,19 @@ PY
                else
                  live_check=test_real_ledger_ac3_help_and_ac7
                fi
-               printf 'live-check %s:%s\n' "$f" "$live_check"
-               if python3 "$f" --live; then
-                 :
+               s=0
+               if [ "$doit_test_quiet" -eq 1 ]; then
+                 if out=$(python3 "$f" --live 2>&1); then
+                   doit_test_passed=$((doit_test_passed + 1))
+                 else
+                   s=$?
+                   printf 'FAIL %s:%s (exit %s)\n%s\n' "$f" "$live_check" "$s" "$out"
+                 fi
                else
-                 s=$?
+                 printf 'live-check %s:%s\n' "$f" "$live_check"
+                 if python3 "$f" --live; then :; else s=$?; fi
+               fi
+               if [ "$s" -ne 0 ]; then
                  if [ "$s" -eq 3 ]; then
                    if [ "$rc" -eq 0 ]; then rc=3; fi
                  else
@@ -155,12 +169,13 @@ PY
                fi
              done
              if [ "$rc" -eq 0 ]; then
-               echo 'live: pass'
+               if [ "$doit_test_quiet" -eq 0 ]; then echo 'live: pass'; fi
              elif [ "$rc" -eq 3 ]; then
                echo 'live: not run'
              else
                echo 'live: fail'
              fi
+             if [ "$doit_test_quiet" -eq 1 ]; then printf 'Passed: %s checks\n' "$doit_test_passed"; fi
              exit "$rc"
            fi
            # grader_view checks archives/diffs against a local main/master.
@@ -183,7 +198,7 @@ PY
            fi
            for f in test_*.py test_*.mjs; do
              [ -e "$f" ] || continue
-             printf '· %s\n' "$f"
+             if [ "$doit_test_quiet" -eq 0 ]; then printf '· %s\n' "$f"; fi
              runner=python3
              if [ "${f%.mjs}" != "$f" ]; then runner=node; fi
              test_file="$f"
@@ -191,28 +206,41 @@ PY
                test_file="$DOIT_TEST_GRADER_REPO/src/$f"
              fi
              if out=$("$runner" "$test_file" 2>&1); then
-               echo "PASS $f"
+               doit_test_passed=$((doit_test_passed + 1))
+               if [ "$doit_test_quiet" -eq 0 ]; then printf 'PASS %s\n%s\n' "$f" "$out"; fi
              else
                s=$?
                echo "FAIL $f (exit $s)"
+               printf '%s\n' "$out"
                rc=1
              fi
-             printf '%s\n' "$out"
            done
            if out=$(python3 "$SRC/retired.py" check --root "$HERE/retired.d" --repo "$HERE" 2>&1); then
-             echo "PASS retired check"
+             doit_test_passed=$((doit_test_passed + 1))
+             if [ "$doit_test_quiet" -eq 0 ]; then printf 'PASS retired check\n%s\n' "$out"; fi
            else
              s=$?
              echo "FAIL retired check (exit $s)"
+             printf '%s\n' "$out"
              rc=1
            fi
-           printf '%s\n' "$out"
-           if DOIT_ROOT="$DOIT_TEST_MACHINE_ROOT" python3 "$SRC/machine.py" check --gate; then
-             echo "PASS machine check"
+           if [ "$doit_test_quiet" -eq 1 ]; then
+             if out=$(DOIT_ROOT="$DOIT_TEST_MACHINE_ROOT" python3 "$SRC/machine.py" check --gate 2>&1); then
+               doit_test_passed=$((doit_test_passed + 1))
+             else
+               s=$?
+               printf 'FAIL machine check (exit %s)\n%s\n' "$s" "$out"
+               rc=1
+             fi
            else
-             echo "FAIL machine check"
-             rc=1
+             if DOIT_ROOT="$DOIT_TEST_MACHINE_ROOT" python3 "$SRC/machine.py" check --gate; then
+               echo "PASS machine check"
+             else
+               echo "FAIL machine check"
+               rc=1
+             fi
            fi
+           if [ "$doit_test_quiet" -eq 1 ]; then printf 'Passed: %s checks\n' "$doit_test_passed"; fi
            exit "$rc" ;;
   help|-h|--help) cat <<'USAGE'
 doit — a ledger that derives state, and the guards that read it
@@ -295,7 +323,8 @@ doit — a ledger that derives state, and the guards that read it
   doit verify-owed [--dry-run|--preflight|--check S/C]
                                           verify owed checks or surface a plain-English operator ask
   doit ledger-rollup [--dry-run] [--max-segment-mib N] [--min-age-hours H]  pack finished spawns
-  doit test [--live]                      run hermetic checks, or only read-only live-ledger checks
+  doit test [--live] [--failures-only]     run hermetic checks, or only read-only live-ledger checks;
+                                           --failures-only shows failures and one pass count (either option order)
   doit help
 
 Environment

@@ -106,7 +106,7 @@ is yours to fix, not a pre-existing failure. Inside `api/tests/`, import a sibli
 `from api.tests.<pkg>.<module> import ...`, never as `from tests.<pkg>...`.
 This collection rule is for albert-scott only. In do-it-v2 the tests are stdlib `unittest`
 scripts, not pytest: run each `src/test_*.py` your commit adds or changes with
-`/usr/bin/python3 src/test_<name>.py`, then `./doit test`, and put both results in the card.
+`/usr/bin/python3 src/test_<name>.py`, then `./doit test --failures-only`, and put both results in the card.
 
 Claims that do not survive the grader: "the tests pass so it works", "I checked
 a similar case", "it worked earlier in the session", "the change is too small
