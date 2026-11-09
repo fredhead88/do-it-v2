@@ -311,7 +311,7 @@ class R7Fixture(unittest.TestCase):
 
 class R7PacketTests(R7Fixture):
     def wrapper(self, context, block, declaration=""):
-        self.spec.write_text(declaration + "\n# scratch\n## Verification\n```bash\n" + block + "```\n")
+        self.spec.write_text(declaration + "\n# scratch\nWrites: src/scratch.py\n## Verification\n```bash\n" + block + "```\n")
         path = packet.write_verify_script(context)
         self.assertTrue(path.is_file())
         self.assertTrue(path.read_bytes().endswith(block.encode()))

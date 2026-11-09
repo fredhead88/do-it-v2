@@ -111,6 +111,15 @@ def run(worktree, subject, *, main=None, root=None):
                     else:
                         failed, findings = _outcome(merge_gate.secret_scan(
                             merge_gate._TOP, base, sha, wrap=cpu_share.niced, wall_cap=left))
+                        # Preserve scanner failures; grant safety is an additional
+                        # check and cannot replace a secret finding with clean.
+                        if failed is None:
+                            try:
+                                findings = merge_gate.coupled_test_safety(
+                                    subject, base, sha, check_permissions=True)
+                                failed = "coupled-test-safety" if findings else None
+                            except merge_gate.Undetermined as exc:
+                                failed, findings = "coupled-test-safety", [str(exc)]
             except (Exception, SystemExit):
                 failed = "undetermined"
                 findings = ["deadline" if time.monotonic() >= started + ATTEMPT_SECONDS
@@ -120,8 +129,8 @@ def run(worktree, subject, *, main=None, root=None):
                 merge_gate._SCAN_WALL_END.reset(token)
         result = HandinResult(failed is None, failed, findings,
                               max(0.0, _cpu() - cpu_before), max(0.0, time.monotonic() - started))
-        fields = dict(sha=sha, checks=["secret-scan"],
-                      result="clean" if result.ok else "rework" if failed == "secret-scan" else "undetermined",
+        fields = dict(sha=sha, checks=["secret-scan", "coupled-test-safety"],
+                      result="clean" if result.ok else "rework" if failed in {"secret-scan", "coupled-test-safety"} else "undetermined",
                       failed_check=failed, cpu_s=result.cpu_s, wall_s=result.wall_s,
                       cpu_accounting=CPU_ACCOUNTING)
         try:
@@ -142,7 +151,7 @@ def main(argv=None):
     print("handin-check: " + ("clean" if result.ok else result.failed_check))
     for finding in result.findings:
         print(finding)
-    return 0 if result.ok else 1 if result.failed_check == "secret-scan" else 2
+    return 0 if result.ok else 1 if result.failed_check in {"secret-scan", "coupled-test-safety"} else 2
 
 
 if __name__ == "__main__":

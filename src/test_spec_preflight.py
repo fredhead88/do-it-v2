@@ -347,8 +347,10 @@ def AC8():
     proc(argv, env=env)
     stored = f.root / "events/L-spec-preflight-local.jsonl"
     original = stored.read_bytes()
-    line = json.loads(original)
+    lines = [json.loads(line) for line in original.splitlines()]
+    line = next(line for line in lines if line["type"] == "spec-preflight")
     assert "actor" not in line and line["subject"] == "L-spec-9001"
+    assert [line["type"] for line in lines] == ["writes-granted", "spec-preflight"]
     read = ["/usr/bin/python3", "-c", "import json, fold; print(json.dumps(fold.fold(fold.read_events())[3]['L-spec-9001']))"]
     events = json.loads(proc(read, env={**env, "PYTHONPATH": str(SOURCE)}))
     event = next(e for e in events if e["type"] == "spec-preflight")

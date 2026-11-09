@@ -73,7 +73,8 @@ AC1 [backend]: the board renders a spend column per project.
   SPEND line appears / failed if it does not.
 """)
 SIB = TMP / "content" / "L-spec-0002.md"
-SIB.write_text("# L-spec-0002\nA sibling slot's internals, which no other role may ever be handed.\n")
+SIB.write_text("# L-spec-0002\nA sibling slot's internals, which no other role may ever be handed.\n"
+               "Writes: src/fold.py\n")
 
 
 def ev(actor, type_, subject, **kv):
@@ -945,6 +946,7 @@ review_path: go / worked if the build still succeeds
 ev("operator", "charter-filed", "L-charter-0007", path=str(CH7))
 SPEC70 = TMP / "content" / "L-spec-0070.md"
 SPEC70.write_text("""# L-spec-0070
+Writes: src/fold.py
 ## 8. Verification
 ```
 cd src && /usr/bin/python3 test_fold.py
@@ -993,6 +995,7 @@ review_path: go to the board / worked if the override reaches every packet
     ev("operator", "charter-filed", cid, path=str(CH))
     SPEC = TMP / "content" / f"{sid}.md"
     SPEC.write_text(f"""# {sid}
+Writes: src/fold.py
 ## 8. Verification
 ```
 cd src && /usr/bin/python3 test_fold.py
@@ -1110,6 +1113,7 @@ assert packet.criteria(BOLD.read_text()) and isinstance(packet.criteria(BOLD.rea
 # later round's own base_sha and never the live worktree HEAD.
 SPEC80 = TMP / "content" / "L-spec-0080.md"
 SPEC80.write_text("""# L-spec-0080
+Writes: src/fold.py
 ## 8. Verification
 ```
 echo $BASE && cd src && /usr/bin/python3 test_fold.py
@@ -1162,6 +1166,7 @@ assert "PINNED_BASE_SHA_EXPLICIT: true" in t_rw80, \
 #    unresolvable-repo reason this half of AC10 means to prove ────────────
 SPEC83 = TMP / "content" / "L-spec-0083.md"
 SPEC83.write_text("""# L-spec-0083
+Writes: src/fold.py
 ## 8. Verification
 ```
 cd src && /usr/bin/python3 test_fold.py
@@ -1286,6 +1291,7 @@ assert fold.EMITS["verify-waiver"] == {"executor", "operator"}, fold.EMITS["veri
 # ── AC7 · per-role scripts; grader's and reviewer's are waived, builder's is not
 SPEC0090 = TMP / "content" / "L-spec-0090.md"
 SPEC0090.write_text("""# L-spec-0090
+Writes: src/fold.py
 ## 8. Verification
 ```
 false && true

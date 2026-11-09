@@ -2,6 +2,7 @@
 """Read-only spec checks, plus a bounded tick that records their evidence."""
 import argparse
 import ast
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -31,6 +32,8 @@ TEST_TOKEN = re.compile(r"(?<![\w/])(?:[\w./-]+/)?test_[\w.-]+\.py(?:::[\w.\[\]/
 SAFE_TEST = re.compile(r"(?:[A-Za-z0-9_-]+/)*test_[A-Za-z0-9_.-]+\.py(?:::[A-Za-z0-9_.\[\]/:-]+)?\Z")
 after_run: list[Callable[[str, dict, dict, Path | None], None]] = []
 _DEFERRED = "_defer_append"
+_GRANT = "_coupled_grant"
+_DISCOVERY = ContextVar("coupled_grant_discovery", default=None)
 
 
 def _process(argv, *, timeout=30, **kwargs):
@@ -169,6 +172,43 @@ def _check_shas(body, text, checkout, env):
                     _finding(body, 2, cid, line)
 
 
+def _reach_rows(writes, checkout):
+    """Inspect original text Writes only; never recurse through discovered tests."""
+    import coupled_tests
+
+    rows = set()
+    expanded = {str(p.relative_to(checkout)) for grant in writes for p in checkout.glob(grant)}
+    tests = []
+    for test in sorted(checkout.rglob("*.py")):
+        test_id = str(test.relative_to(checkout))
+        if test_id in expanded or not coupled_tests.is_test(test_id):
+            continue
+        if not test.resolve().is_relative_to(checkout.resolve()):
+            raise ValueError("unsafe test path " + test_id)
+        try:
+            text = test.read_text()
+            imports = _imports(text)
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            raise ValueError("cannot inspect " + test_id) from exc
+        tests.append((test_id, text, imports))
+    for grant in writes:
+        if not grant.endswith(".py"):
+            continue
+        for target in checkout.glob(grant):
+            if not target.resolve().is_relative_to(checkout.resolve()):
+                raise ValueError("unsafe Writes path " + grant)
+            if not target.is_file():
+                continue
+            relative = str(target.relative_to(checkout))
+            module = relative[:-3].replace("/", ".")
+            for test_id, text, imports in tests:
+                if any(m == module or m == target.stem or module.endswith("." + m) for m in imports):
+                    rows.add((test_id, relative, "import"))
+                if re.search(r"(?<![\w/.-])" + re.escape(relative) + r"(?![\w/.-])", text):
+                    rows.add((test_id, relative, "read"))
+    return rows
+
+
 def _check_reach(body, writes, checkout):
     for path in writes:
         if not path.endswith(".py"):
@@ -176,28 +216,41 @@ def _check_reach(body, writes, checkout):
     if checkout is None:
         _reason(body, 3, "repository checkout unavailable")
         return
-    expanded = {str(p.relative_to(checkout)) for grant in writes for p in checkout.glob(grant)}
-    for grant in writes:
-        if not grant.endswith(".py"):
-            continue
-        for target in checkout.glob(grant):
-            if not target.is_file():
-                continue
-            relative = str(target.relative_to(checkout))
-            module = relative[:-3].replace("/", ".")
-            for test in sorted(checkout.rglob("test_*.py")):
-                test_id = str(test.relative_to(checkout))
-                if test_id in expanded or not test.resolve().is_relative_to(checkout.resolve()):
-                    continue
-                try:
-                    text = test.read_text()
-                    imports = _imports(text)
-                except (OSError, SyntaxError, UnicodeError):
-                    _reason(body, 3, "cannot inspect " + test_id)
-                    continue
-                if relative in text or any(m == module or m == target.stem or
-                                           module.endswith("." + m) for m in imports):
-                    _finding(body, 3, test_id, "reaches Writes file " + relative)
+    for test, source, _ in sorted(_reach_rows(writes, checkout)):
+        _finding(body, 3, test, "reaches Writes file " + source)
+
+
+def _discover_coupled(spec_id, body, written, checkout):
+    """Stage complete rows; tick appends only after all hooks succeed."""
+    import build_readiness
+    import coupled_tests
+
+    if checkout is None or _grant_blocked(body):
+        return
+    text, writes = _DISCOVERY.get()
+    rows = _reach_rows(writes, checkout)
+    tree = coupled_tests.git(checkout, "ls-tree", "-r", "--name-only", "-z", "HEAD", "--").split("\0")
+    for match in build_readiness.companion_matches(text, writes, checkout, "HEAD", tree):
+        test = match["test"]
+        if (test.endswith(".py") and coupled_tests.is_test(test)
+                and not coupled_tests.fenced(text, test)):
+            if not (checkout / test).resolve().is_relative_to(checkout.resolve()):
+                raise ValueError("unsafe test path " + test)
+            rows.add((test, match["source"], match["kind"]))
+    protected = (verification.block(text) or "") + "\n" + "\n".join(
+        line for _, block in _ac_blocks(text) for line in block.splitlines()
+        if re.match(r"\s*review_path:", line))
+    ac_tests = {m.group().split("::", 1)[0] for m in TEST_TOKEN.finditer(protected)}
+    body[_GRANT] = [dict(test=test, source=source, kind=kind, ac_bound=test in ac_tests)
+                    for test, source, kind in sorted(rows)
+                    if not coupled_tests.fenced(text, test)]
+
+
+after_run.append(_discover_coupled)
+
+
+def _grant_blocked(body):
+    return any(reason.startswith(("check 3:", "spec:", "hook ")) for reason in body["undetermined"])
 
 
 def _test_ids(body, text):
@@ -358,19 +411,23 @@ def run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_ident
             # Validate the original schema before extensions, while the checkout
             # is alive. Hook-added fields belong to the consuming units.
             _validate(body)
-            for hook in hooks or ():
-                try:
-                    identity = _text_identity(root, written)
-                except OSError:
-                    identity = None
-                if identity is None or identity != expected_identity:
-                    body[_DEFERRED] = True
-                    break
-                try:
-                    hook(spec_id, body, written, checkout)
-                except Exception as exc:
-                    name = getattr(hook, "__qualname__", type(hook).__qualname__)
-                    body["undetermined"].append(f"hook {name}: {type(exc).__name__}")
+            token = _DISCOVERY.set((text, writes))
+            try:
+                for hook in hooks or ():
+                    try:
+                        identity = _text_identity(root, written)
+                    except OSError:
+                        identity = None
+                    if identity is None or identity != expected_identity:
+                        body[_DEFERRED] = True
+                        break
+                    try:
+                        hook(spec_id, body, written, checkout)
+                    except Exception as exc:
+                        name = getattr(hook, "__qualname__", type(hook).__qualname__)
+                        body["undetermined"].append(f"hook {name}: {type(exc).__name__}")
+            finally:
+                _DISCOVERY.reset(token)
             return body
     except (OSError, ValueError, StopIteration, scratch.ScratchRootError) as exc:
         body["undetermined"].append("spec: " + (str(exc) or "spec file unavailable"))
@@ -409,6 +466,19 @@ def _append(root, body, *, spec_written=None):
         raise ValueError("preflight append failed")
 
 
+def _append_grant(root, sid, tests, written):
+    if not written.get("_src"):
+        raise ValueError("coupled grant has no canonical spec-written revision")
+    fields = dict(tests=tests, why="Existing coupled tests: fixture and assertion updates only; do not weaken checks.",
+                  spec_written_src=written["_src"])
+    argv = [str(DOIT), "append", "writes-granted", sid, "project=" + written["project"]]
+    argv.extend(key + ":=" + json.dumps(value) for key, value in fields.items())
+    result = _process(argv, env={**os.environ, "DOIT_ROOT": str(root),
+                               "DOIT_LEDGER_FILE": "L-spec-preflight-local.jsonl"}, timeout=30)
+    if result.returncode:
+        raise ValueError("coupled grant append failed")
+
+
 def tick(*, root=None, now=None):
     root = Path(root) if root is not None else fold.ROOT
     now = now or datetime.now(timezone.utc)
@@ -440,6 +510,7 @@ def tick(*, root=None, now=None):
             body = run(sid, root=root, now=now, events=events,
                        hooks=after_run, expected_identity=identities[sid])
             deferred = body.pop(_DEFERRED, False)
+            tests = body.pop(_GRANT, None)
             try:
                 unchanged = _text_identity(root, written[sid]) == identities[sid]
             except OSError:
@@ -447,6 +518,10 @@ def tick(*, root=None, now=None):
             if deferred or not unchanged:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
+            already_granted = any(e.get("type") == "writes-granted" and e.get("subject") == sid
+                                  and e.get("spec_written_src") == written[sid].get("_src") for e in events)
+            if tests is not None and not _grant_blocked(body) and not already_granted:
+                _append_grant(root, sid, tests, written[sid])
             stamp = datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00"))
             body["lag_s"] = (now - stamp).total_seconds()
             _append(root, body, spec_written=written[sid])

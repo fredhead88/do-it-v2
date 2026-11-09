@@ -90,7 +90,7 @@ class HandinContractTests(unittest.TestCase):
         event = [r for r in rows if r["type"] == "handin-checked"][-1]
         self.assertEqual(event["subject"], "L-spec-fixture")
         self.assertEqual(event["sha"], self.git("rev-parse", "HEAD") if sha else None)
-        self.assertEqual(event["checks"], ["secret-scan"])
+        self.assertEqual(event["checks"], ["secret-scan", "coupled-test-safety"])
         self.assertEqual(event["failed_check"], result.failed_check)
         self.assertEqual(event["result"], "clean" if result.ok else
                          "rework" if result.failed_check == "secret-scan" else "undetermined")

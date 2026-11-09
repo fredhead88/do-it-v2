@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 import coupled_tests
+import effective_writes
 import fold
 import grading_env
 import merge_gate
@@ -114,7 +115,7 @@ def _expand_citations(line, sources):
     return re.sub(r'\b([A-Z][A-Za-z0-9]*)/([\w]+(?:\.[\w]+)+)', expand, line)
 
 
-def missing_inputs(text, repo, base, tree):
+def missing_inputs(text, repo, base, tree, *, grant=None):
     missing = []
     tree_set = set(tree)
     top_directories = {path.split('/', 1)[0] for path in tree if '/' in path}
@@ -122,12 +123,13 @@ def missing_inputs(text, repo, base, tree):
     registrations = Path(repo).parent
     projects = {p.name for p in registrations.iterdir() if p.is_dir()}
     sources = _sources(text)
-    try:
-        grant = merge_gate.grant_from_text(text)
-    except merge_gate.Undetermined as exc:
-        if 'states no writes:' not in str(exc):
-            raise
-        grant = []
+    if grant is None:
+        try:
+            grant = merge_gate.grant_from_text(text)
+        except merge_gate.Undetermined as exc:
+            if 'states no writes:' not in str(exc):
+                raise
+            grant = []
     created = _created(text, grant)
     packages = set()
     for path in tree:
@@ -391,12 +393,12 @@ def check(subject, project, base, events, *, root=None, dry_run=True):
             raise NotReady('invalid spec or project')
         written = next(e for e in reversed(own) if e.get('type') == 'spec-written')
         text = _text(root, written)
-        grant = merge_gate.grant_from_text(text)
+        grant = effective_writes.effective_grant(subject, text, events)
         repo = root / 'repos' / project
         if not re.fullmatch(r'[0-9a-f]{40}', base):
             raise NotReady('dispatch base must be a full commit SHA')
         tree = git(repo, 'ls-tree', '-r', '--name-only', base, '--').splitlines()
-        missing = missing_inputs(text, repo, base, tree)
+        missing = missing_inputs(text, repo, base, tree, grant=grant)
         if missing:
             produced = producers(missing, events, root, subject, project)
             if all(len(ids) == 1 for ids in produced.values()):
