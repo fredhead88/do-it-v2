@@ -57,6 +57,7 @@ case "${1:-board}" in
   health) shift; exec python3 "$SRC/throughput.py" health "$@" ;;
   throughput) shift; exec python3 "$SRC/throughput.py" "$@" ;;
   rehearsal-replay) shift; exec python3 "$SRC/rehearsal_replay.py" "$@" ;;
+  speed-report) shift; exec python3 "$SRC/speed_report.py" "$@" ;;
   problems) shift; exec python3 "$SRC/problems.py" "$@" ;;
   balance) shift; exec python3 "$SRC/balance.py" "$@" ;;
   models)  shift; exec python3 "$SRC/models.py" "$@" ;;
@@ -280,6 +281,8 @@ doit — a ledger that derives state, and the guards that read it
                                            verify a merge window's candidate tip before master moves (exit 0/1/2/3/4)
   doit throughput [--hours N] [--json]    read-only merge queue, wait, rate and verification metrics
   doit rehearsal-replay --csv FILE         offline old-vs-new flow replay of a rehearsal CSV (exit 0/1/2)
+  doit speed-report --project <p> --since <date> --until <date> [--rloop-log PATH]
+                                           six measured lane values; UTC [since,until); --help for units and exit codes
   doit problems [--open] [--json] [--needs-statement] [--health] [--config PATH]
                                            the ledger folded into recurring problems (L-charter-0034)
   doit packet <role> <subject> [...]      build that role's packet from the ledger (-h for flags)

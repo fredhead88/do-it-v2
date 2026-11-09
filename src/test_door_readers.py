@@ -104,6 +104,7 @@ VIRTUAL = {
     'src/realm_ledger.py': {'_members': 1, '_read_bytes': 1, '_read_range': 1},
     'src/realm_omens.py': {'_members': 1, '_read_bytes': 1},
     'src/seat_usage.py': {'read_text': 1},  # L-spec-2179: fixed own-file prior lookup.
+    'src/speed_report.py': {'read_text': 1},  # L-spec-2153: census virtual sources before cached admission.
     'src/tg_check.py': {'iter_sources': 1, 'read_text': 1},
     'src/tick.py': {'read_text': 3},
     'src/up.py': {'read_text': 2},
