@@ -39,6 +39,11 @@ import ast, collections, fcntl, json, math, os, pathlib, re, shutil, signal, sub
 from datetime import timedelta
 import uuid
 
+# The pure effective reader imports this module. CLI and imported callers must
+# share its exception class, so malformed grants reach the same refusal channel.
+if __name__ == "__main__":
+    sys.modules["merge_gate"] = sys.modules[__name__]
+
 import fold
 import freeze
 import scratch
@@ -709,6 +714,7 @@ def _remove_worktree(path):
 # The gate caller supplies its subject without changing secret_scan's seam.
 from contextvars import ContextVar
 _SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
+_GRANT_EVENTS = ContextVar("merge_gate_grant_events", default=None)
 _DECLINE_RULE = ContextVar("gate_rechain_decline_rule", default=None)
 _SCAN_WALL_END = ContextVar("secret_scan_wall_end", default=None)  # independent of configuration
 
@@ -1078,17 +1084,26 @@ def grant_from_text(text):
     raise Undetermined("states no writes: grant — nothing to filter against", reason="grant", retryable=False, guard=True)
 
 
-def writes_grant(spec):
+def writes_grant(spec, *, events=None):
     """The spec's `writes:` grant. Deny loudly rather than guess: a named spec with
     no usable grant is could-not-determine, because an empty grant makes every
-    legitimate removal look like a violation. A thin reader now (R3f): resolve
-    `content/<spec>.md`'s text, call `grant_from_text`."""
+    legitimate removal look like a violation. Standalone callers retain the
+    text-only reader; spec-aware callers supply their admitted snapshot."""
     if not re.fullmatch(r"[A-Za-z0-9._-]+", spec):
         raise Undetermined(f"{spec!r} is not a spec id", reason="grant", retryable=False, guard=True)
     p = fold.ROOT / "content" / f"{spec}.md"
     if not p.exists():
         raise Undetermined(f"no content file for {spec} — cannot read its writes: grant", reason="grant", retryable=False, guard=True)
-    return grant_from_text(p.read_text())
+    text = p.read_text()
+    if events is None:
+        return grant_from_text(text)
+    import effective_writes
+    try:
+        return effective_writes.effective_grant(spec, text, events)
+    except Undetermined as exc:
+        paths = [row.get("test") for row in effective_writes.granted_tests(spec, events)]
+        raise Undetermined(f"{exc}; recorded test paths: {paths!r}", reason="grant",
+                           retryable=False, guard=True) from exc
 
 
 def parse(rest):
@@ -1115,13 +1130,19 @@ def parse(rest):
     return main, spec, grant
 
 
-def grant_for(spec, cli):
+def _grant_events():
+    """Canonical snapshot shared by permission and safety consumers."""
+    snapshot = _GRANT_EVENTS.get()
+    return fold.read_events() if snapshot is None else snapshot
+
+
+def grant_for(spec, cli, *, events=None):
     """The spec's writes: grant plus the CLI's. A spec file that states no grant is
     could-not-determine on its own, but an explicit --writes IS a grant — the spec
     template carries no Writes: line, which blocked the first real merge. A missing
     content file or a bad id stays could-not-determine whatever the CLI says."""
     import rulings
-    events = fold.read_events()
+    events = _grant_events() if events is None else events
     project = fold.subject_project(spec)
     extension = [path for _, ruling in rulings.decisions(events, project)
                  if ruling['kind'] == 'grant-extend' and ruling['spec'] == spec for path in ruling['paths']]
@@ -1129,11 +1150,117 @@ def grant_for(spec, cli):
         check_grant(extension, 'ruling grant-extend')
     cli = list(cli) + extension
     try:
-        return cli + writes_grant(spec)
+        return cli + writes_grant(spec, events=events)
     except Undetermined as e:
         if cli and "states no writes: grant" in str(e):
             return cli
         raise
+
+
+def coupled_test_safety(spec, base, target, *, events=None, check_permissions=False):
+    """Classify committed objects, never execute test code or follow a tree link.
+
+    Only persisted coupled grants gain these restrictions. The optional hand-in
+    permission check also catches edits whose previous revision no longer grants
+    them. Legacy hand-ins without a written spec retain their scanner contract.
+    """
+    import coupled_tests
+    import effective_writes
+    events = _grant_events() if events is None else events
+    written = any(e.get("subject") == spec and e.get("type") == "spec-written" for e in events)
+    rows = effective_writes.granted_tests(spec, events)
+    if not rows and not (check_permissions and written):
+        return []
+    grant = grant_for(spec, [], events=events) if check_permissions else writes_grant(spec, events=events)
+    paths = list(dict.fromkeys(row["test"] for row in rows))
+    checkout = pathlib.Path(_TOP).resolve()
+
+    def refuse(path, reason):
+        raise Undetermined(f"{path}: coupled-test safety {reason}", reason="coupled-test-safety",
+                           retryable=False, guard=True)
+
+    for path in paths:
+        if (not coupled_tests.is_test(path) or not path.endswith(".py")
+                or not (checkout / path).resolve().is_relative_to(checkout)):
+            refuse(path, "requires a repository-relative Python test without a symlink escape")
+    changes = diff_names(base, target)
+    findings = []
+    if check_permissions:
+        for status, path, dest in changes:
+            for name in (path, dest) if dest else (path,):
+                if coupled_tests.is_test(name) and not granted(name, grant):
+                    findings.append(f"{name}: test edit outside effective Writes")
+
+    def source(ref, path):
+        entry = git("ls-tree", "-z", ref, "--", path).split(b"\0")
+        entry = [line for line in entry if line and line.split(b"\t", 1)[-1].decode() == path]
+        if len(entry) != 1 or not entry[0].startswith((b"100644 blob ", b"100755 blob ")):
+            refuse(path, "cannot classify a missing, renamed or non-regular test")
+        try:
+            return ast.parse(git("show", f"{ref}:{path}"), filename=path)
+        except (SyntaxError, ValueError, UnicodeError):
+            refuse(path, "cannot parse changed Python")
+
+    def functions(tree, prefix=()):
+        found = set()
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = (*prefix, node.name)
+                if not isinstance(node, ast.ClassDef) and node.name.startswith("test"):
+                    found.add(scope)
+                found.update(functions(node, scope))
+            else:
+                found.update(functions(node, prefix))
+        return found
+
+    def suppressions(tree):
+        # Count syntax by qualified scope: moving an existing skip to a different
+        # test must not conceal a newly skipped test. Include imported aliases.
+        aliases = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = (node.module or "") + "." + alias.name
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    aliases[alias.asname or alias.name] = alias.name
+
+        def name(node):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                return name(node.value) + "." + node.attr
+            if isinstance(node, ast.Call):
+                return name(node.func)
+            return ""
+
+        counts = collections.Counter()
+        blocked = {"skip", "skipif", "skipIf", "skipUnless", "skipTest", "SkipTest",
+                   "xfail", "expectedFailure", "__unittest_skip__", "__unittest_expecting_failure__"}
+
+        def visit(node, scope=()):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = (*scope, node.name)
+            if isinstance(node, (ast.Name, ast.Attribute)):
+                symbol = name(node)
+                if symbol.split(".")[-1] in blocked:
+                    counts[(scope, symbol)] += 1
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+        visit(tree)
+        return counts
+
+    changed = {path for _, path, _ in changes}
+    changed.update(dest for _, _, dest in changes if dest)
+    for path in paths:
+        if path not in changed:
+            continue
+        before, after = source(base, path), source(target, path)
+        if functions(before) - functions(after):
+            findings.append(f"{path}: coupled test function or method removed")
+        if suppressions(after) - suppressions(before):
+            findings.append(f"{path}: coupled test skip/xfail added")
+    return findings
 
 
 def conflict_event(branch, main, spec):
@@ -1275,10 +1402,12 @@ def main_(argv):
     subject = spec or branch
     gate_started = False
     import nextstep
-    history = [e for e in fold.read_events() if e.get('subject') == subject
+    events = fold.read_events()
+    history = [e for e in events if e.get('subject') == subject
                and nextstep._admitted_actor(e) is not None]
     review = nextstep._clean_review({'evs': history})
     main_sha = branch_sha = ""
+    grant_token = _GRANT_EVENTS.set(events)
     try:
         if grant:
             check_grant(grant, "--writes")     # the CLI was never checked at all
@@ -1306,6 +1435,8 @@ def main_(argv):
             tree = git('rev-parse', resolved_commit + '^{tree}').decode().strip()
             r = _check_tree(main_sha, branch_sha, tree, grant)
         removed, reverts, main_sha, branch_sha, tree = r
+        if spec:
+            removed += coupled_test_safety(spec, main_sha, tree, events=events)
         status = "rework" if (removed or reverts) else "clean"
         # R4/gate-secret-scan: only on a run that would OTHERWISE record clean
         # — never when gate() itself already found a grant violation (AC9).
@@ -1374,6 +1505,7 @@ def main_(argv):
             _print_append_only()
         return 1
     finally:
+        _GRANT_EVENTS.reset(grant_token)
         _RUN_ACTIVE = False
 
 

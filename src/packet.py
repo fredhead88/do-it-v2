@@ -6,7 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
-import verification, base_refresh, coupled_tests
+import verification, base_refresh, coupled_tests, effective_writes
 from packet_base import current_tip, _effective_base, builder_pin, pinned_baseline
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -157,7 +157,8 @@ class Ctx:
         return resolve(e.get("card") or die(f"{self.a.subject}'s build-done carries no card"))
 
     def footprint(self):
-        return (self.last("spec-written") or {}).get("footprint") or []
+        return (effective_writes.effective_grant(self.a.subject, self.spec_file().read_text(), self.evs)
+                if getattr(self.a, "role", None) == "builder" else (self.last("spec-written") or {}).get("footprint") or [])
 
     def project(self):
         return self.a.project or next((e["project"] for e in reversed(self.evs) if e.get("project")), "unknown")
@@ -978,6 +979,9 @@ def p_builder(c):
          f"8. ADRs binding your footprint: {', '.join(adrs) or 'none'}. "
          f"Conventions file: {c.a.conventions or 'none'}.",
          f"   Writes (the merge grant, = the spec's footprint): {', '.join(c.footprint()) or 'none stated'}."]
+    if tests := effective_writes.granted_tests(c.a.subject, c.evs):
+        L += ["", "Granted coupled tests (fixture and assertion updates only)", *[
+            f"- {r['test']} — source: {r['source']}; kind: {r['kind']}{'; do not weaken' if r.get('ac_bound') else ''}" for r in tests]]
     if rej or fix:
         L += ["", "This is a rework on the same worktree and branch. Standing and blocking:",
               *[f"   rejected — {x}" for x in rej], *[f"   must-fix — {x}" for x in fix]]
@@ -991,20 +995,16 @@ def p_builder(c):
             L += ["These also failed but were not attributed to this spec: " + ", ".join(drop["unattributed_nodes"])]
     # Two independent sections: a standing grader rejection and a hint may both be on
     # one packet, and neither is dropped when the other is present.
-    if hint:
-        L += ["", *hint]
-    for d in c.all_of("decision"):
-        L.append(f"   decided, and binding: {d.get('why', '')}")
+    L += (["", *hint] if hint else []) + [f"   decided, and binding: {d.get('why', '')}" for d in c.all_of("decision")]
     # L-spec-0273: three known local-box footguns, informational only — the
     # fixes are L-charter-0028's, not this builder's to make.
     L += ["## STOP",
           "- DSN missing in a worktree can silently skip a live_db criterion instead of failing it (L-charter-0028).",
           "- the stale test baseline cloned per builder fills /tmp across many builds (L-charter-0028).",
-          "- a gate-clean merge sometimes leaves master red (L-charter-0028)."]
-    L += ["", f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
+          "- a gate-clean merge sometimes leaves master red (L-charter-0028).", "",
+          f"Your cwd is your worktree, on branch `{c.a.subject.lower()}`. "
               f"The repository is `{repo}`. One spec, one commit, on that branch."]
-    return (L + coupled_tests.builder_lines(c.evs, spec, repo, c.worktree(), base_sha)
-            + preflight_lines(c))
+    return L + coupled_tests.builder_lines(c.evs, spec, repo, c.worktree(), base_sha) + preflight_lines(c)
 
 def _drop_owed_blocks(lines, owed):
     """Drop whole physical-line blocks, including fenced criterion examples."""

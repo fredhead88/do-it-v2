@@ -346,7 +346,7 @@ class R7Fixture:
                       'main': {**original_config.get('push', {}).get('main', {}), 'proj': default}})
         stack.enter_context(patch.object(look, 'load_toml', return_value=config))
         self.git('init', '-q', '-b', default)
-        self.commit(self.repo, 'seed')
+        self.commit(self.repo, 'seed.txt')
         self.old = self.git('rev-parse', 'HEAD')
         if case == 'realm':
             self.git('branch', 'realm')
@@ -356,12 +356,12 @@ class R7Fixture:
             self.commit(self.repo, 'other')
         self.spec.write_text('# Goal\nCaller fixture.\n' +
             ('Base: realm\n' if case == 'realm' else '') +
-            'Writes:\n- seed\n## Acceptance criteria\nAC1 [backend]: caller pin.\n'
+            'Writes:\n- seed.txt\n## Acceptance criteria\nAC1 [backend]: caller pin.\n'
             'review_path: run the fixture / worked if pinned / failed otherwise.\n'
             '## Verification\n```bash\ntrue\n```\n')
         self.event('L-spec-writer-9001.jsonl', 'spec-written',
                    ts=(self.now - dt.timedelta(hours=2)).isoformat(), project='proj',
-                   path=str(self.spec), footprint=['seed'], base_sha=self.old)
+                   path=str(self.spec), footprint=['seed.txt'], base_sha=self.old)
         self.event('L-builder-8000.jsonl', 'build-done',
                    ts=(self.now - dt.timedelta(hours=1)).isoformat(), project='proj',
                    status='DONE', base_sha=self.old, ready_sha=self.old,
