@@ -49,50 +49,5 @@ def main(argv=None):
     return 0
 
 
-def restart_pane(pane_name: str) -> bool | None:
-    """Only a freshly persisted, wrapper-owned successor confirms a restart."""
-    if panes.ledger_role(pane_name) != "planner":
-        return False
-    ledger_files.assert_readable(fold.EVENTS)
-    try:
-        text = ledger_files.read_text(fold.EVENTS, f"{pane_name}.jsonl")
-    except FileNotFoundError:
-        return False
-    own = [json.loads(line) for line in text.splitlines() if line.strip()]
-    end = next((e for e in reversed(own) if e.get("type") == "planner-ended"
-                and (e.get("planner") or e.get("spawn") or pane_name) == pane_name), None)
-    if not end or end.get("reason") not in ("ctx", "held") or not end.get("subject"):
-        return False
-    ended_at = panes._ts(end.get("ts"))
-    if ended_at is None:
-        return False
-    events = fold.read_events()
-    if any(e.get("type") == "planner-started" and e.get("subject") == end["subject"]
-           and (panes._ts(e.get("ts")) is None or panes._ts(e["ts"]) >= ended_at) for e in events):
-        return False
-    before = {str(e.get("_src")) for e in events if e.get("type") == "planner-started"}
-    result = up.launch_planner(end["subject"], "ctx-restart", 1)
-    if result in ("alive", "starting"):
-        return False
-    if result != "started":
-        raise RuntimeError("Planner restart admission undetermined")
-    deadline = time.monotonic() + min(5.0, up.RESTART_CONFIRM_SECONDS)
-    while True:
-        ledger_files.assert_readable(fold.EVENTS)
-        for event in fold.read_events():
-            source = str(event.get("_src"))
-            stem = pathlib.Path(source.split(":")[0]).stem
-            if (event.get("type") == "planner-started" and source not in before
-                    and event.get("subject") == end["subject"] and event.get("mode") == "ctx-restart"
-                    and event.get("attempt") == 1 and type(event.get("wrapper_pid")) is int
-                    and event["wrapper_pid"] > 0 and panes.ledger_role(stem) == "planner"
-                    and event.get("planner") == event.get("spawn") == stem):
-                return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        time.sleep(min(.05, remaining))
-
-
 if __name__ == '__main__':
     raise SystemExit(main())

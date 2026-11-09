@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""pane_resume — a stalled pane says why, and the tick restarts what can be
-restarted (L-charter-0033 R3).
+"""pane_resume — a stalled pane says why, and the tick resumes what can be
+resumed (L-charter-0033 R3). A ended Planner is never restarted here: the tick's
+ensure_planner owns every Planner launch (L-spec-2310).
 
   pane_resume.run(events, *, now=None, sessions_dir=None, projects_dir=None,
-                  send=None, capture=None, restart=None) -> dict
+                  send=None, capture=None) -> dict
 
 Called from `tick._record()` as `pane_resume.run(ev)`, on the SAME re-read
 `ev` `carry.sync_v4` already consumed. Every live Claude pane with
@@ -215,83 +216,7 @@ def _live_join(sessions_dir, idle_names):
     return {name: metas[0] for name, metas in by_name.items() if len(metas) == 1}
 
 
-def _ended_pane(event):
-    return event.get("planner") or event.get("spawn") or pathlib.Path(
-        str(event.get("_src") or "").split(":")[0]).stem
-
-
-def ctx_ended_without_successor(events, now) -> list[dict]:
-    """Latest ctx/held end per charter, excluding any later start or measured restart."""
-    latest = {}
-    for event in events:
-        if event.get("type") == "planner-ended":
-            key = event.get("subject")
-            previous = latest.get(key)
-            if previous is None or (panes._ts(event.get("ts")) or now) >= (panes._ts(previous.get("ts")) or now):
-                latest[key] = event
-    result = []
-    for charter, end in latest.items():
-        ended = panes._ts(end.get("ts"))
-        pane = _ended_pane(end)
-        if end.get("reason") not in ("ctx", "held") or ended is None or ended > now or panes.ledger_role(pane) != "planner":
-            continue
-        if any((e.get("type") == "planner-started" and e.get("subject") == charter
-                and (panes._ts(e.get("ts")) is None or panes._ts(e.get("ts")) >= ended))
-               or (e.get("type") == "pane-resumed" and e.get("pane") == pane
-                   and e.get("reason_class") == "ctx-ended" and e.get("ended_at") == end["ts"])
-               for e in events):
-            continue
-        result.append(dict(pane=pane, ended_at=end["ts"], lag_s=(now - ended).total_seconds()))
-    return result
-
-
-def _resume_rows(dst):
-    try:
-        text = ledger_files.read_text(dst.parent, dst.name)
-    except FileNotFoundError:
-        return []
-    return [json.loads(line) for line in text.splitlines() if line.strip()]
-
-
-def _restart_ctx(events, live, now, dst, restart):
-    restarted, skipped = [], []
-    # Re-read our own writes even when the caller reuses a stale event snapshot.
-    candidates = ctx_ended_without_successor([*events, *_resume_rows(dst)], now)
-    names = {p.get("name") for p in live}
-    for candidate in candidates:
-        pane = candidate["pane"]
-        charter = next((e.get("subject") for e in events
-                        if e.get("type") == "planner-ended" and _ended_pane(e) == pane
-                        and e.get("ts") == candidate["ended_at"]), None)
-        live_planners = {name for name in names if panes.ledger_role(name) == "planner"}
-        known = {e.get("planner") or e.get("spawn"): e.get("subject")
-                 for e in events if e.get("type") == "planner-started"}
-        if pane in names or any(known.get(name) in (None, charter) for name in live_planners):
-            continue
-        try:
-            launched = restart(pane)
-            success = launched is True
-            reason = "no-restart-entry" if launched is False else "restart-unconfirmed"
-        except Exception:
-            success, reason = False, "restart-undetermined"
-        if success:
-            refusal = dispatch.emit(dst, {}, "pane-resumed", strict=True, reason_class="ctx-ended", **candidate)
-            if refusal:
-                raise ValueError(refusal)
-            restarted.append(pane)
-        else:
-            if not any(e.get("type") == "pane-resume-skipped" and e.get("pane") == pane
-                       and e.get("ended_at") == candidate["ended_at"] and e.get("reason") == reason
-                       for e in _resume_rows(dst)):
-                dispatch.emit(dst, {}, "pane-resume-skipped", **candidate, reason=reason)
-            skipped.append(pane)
-    return restarted, skipped
-
-
-def run(events, *, now=None, sessions_dir=None, projects_dir=None, send=None, capture=None, restart=None):
-    if restart is None:
-        from up import restart_pane
-        restart = restart_pane
+def run(events, *, now=None, sessions_dir=None, projects_dir=None, send=None, capture=None):
     now = now or fold.NOW
     send, capture = send or _default_send, capture or _default_capture
     events = list(events or ())
@@ -300,24 +225,9 @@ def run(events, *, now=None, sessions_dir=None, projects_dir=None, send=None, ca
     fold.EVENTS.mkdir(parents=True, exist_ok=True)
     dst = fold.EVENTS / LEDGER_NAME
     try:
-        if ctx_ended_without_successor(events, now):
-            # live_panes intentionally tolerates unreadable metadata for board display;
-            # a restart needs a positive read of every possible successor instead.
-            directory = pathlib.Path(sessions_dir) if sessions_dir is not None else panes.SESSIONS
-            for path in directory.iterdir():
-                if path.suffix == ".json" and path.stem.isdigit():
-                    meta = json.loads(path.read_text())
-                    if not isinstance(meta, dict) or not meta.get("name"):
-                        raise ValueError("session identity undetermined")
-                    panes._is_live(int(path.stem), meta)
         live = panes.live_panes(sessions_dir=sessions_dir, events=events, now=now)
     except Exception:
-        candidates = ctx_ended_without_successor(events, now)
-        for candidate in candidates:
-            dispatch.emit(dst, {}, "pane-resume-skipped", **candidate, reason="liveness-undetermined")
-        return {"resumed": [], "escalated": [], "skipped": [c["pane"] for c in candidates], "restarted": []}
-    restarted, ctx_skipped = _restart_ctx(events, live, now, dst, restart)
-    skipped.extend(ctx_skipped)
+        return {"resumed": [], "escalated": [], "skipped": [], "restarted": []}
     idle_names = {p.get("name") for p in live
                   if p.get("status") == "idle" and panes.ledger_role(p.get("name"))}
     joined = _live_join(sessions_dir, idle_names)
@@ -373,4 +283,4 @@ def run(events, *, now=None, sessions_dir=None, projects_dir=None, send=None, ca
                       attempt=attempt + 1, command="continue", stop_uuid=stop_uuid)
         resumed.append(name)
 
-    return {"resumed": resumed, "escalated": escalated, "skipped": skipped, "restarted": restarted}
+    return {"resumed": resumed, "escalated": escalated, "skipped": skipped, "restarted": []}

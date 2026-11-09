@@ -473,7 +473,7 @@ class RepeatFailureAlarmTests(Scratch):
                 (carry, 'uncarried', []), (carry, 'sync_v4', []),
                 (pane_resume, 'run', None), (crons, 'check', []),
                 (look, 'heartbeat_missed', None), (look, 'emit_once', None),
-                (up, 'ensure_relay', None), (merge_queue, 'enqueue_due', []),
+                (up, 'ensure_relay', None), (up, 'ensure_planner', 'idle'), (merge_queue, 'enqueue_due', []),
                 (ad, 'redispatch_dead', []), (resources, 'manifest_counts', {}),
                 (resources, 'not_reapable_counts', {}), (reap_tmp, '_reap_recorded', []),
                 (tree_cleanup, 'reap_worktrees', ([], [])), (loadgate, 'begin', None),

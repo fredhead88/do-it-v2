@@ -204,7 +204,7 @@ tick._record_next_step_held(events, specs, steps, now)
             'carry.sync_v4': [], 'pane_resume.run': [], 'crons.check': [],
             'look._read_state': {'last_pass': NOW.isoformat()}, 'look.heartbeat_missed': None,
             'look.emit_once': None,
-            'up.ensure_relay': 'healthy', 'resources.manifest_counts': {},
+            'up.ensure_relay': 'healthy', 'up.ensure_planner': 'idle', 'resources.manifest_counts': {},
             'resources.not_reapable_counts': {}, 'reap_tmp._reap_recorded': [],
             'tree_cleanup.reap_worktrees': ([], []), 'loadgate.begin': None,
             'autodispatch.redispatch_dead': [], 'merge_queue.enqueue_due': [],

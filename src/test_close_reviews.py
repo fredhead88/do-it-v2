@@ -437,7 +437,7 @@ class RoundTripTests(Fixtures):
             for mod, attr, value in ((intake, 'run', {}), (notes, 'run', None),
                     (pr_closeout, 'run', None), (install_sync, 'run', []),
                     (push_origin, 'run', None), (carry, 'uncarried', []), (carry, 'sync_v4', []),
-                    (pane_resume, 'run', None), (up, 'ensure_relay', 'fixture'),
+                    (pane_resume, 'run', None), (up, 'ensure_relay', 'fixture'), (up, 'ensure_planner', 'idle'),
                     (look, 'emit_once', None), (look, 'heartbeat_missed', None),
                     (tick, 'run_steps', []), (tick, 'launch_precheck', None),
                     (autodispatch, 'redispatch_dead', []), (merge_queue, 'enqueue_due', []),

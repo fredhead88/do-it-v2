@@ -177,48 +177,20 @@ class RelayRestartTests(unittest.TestCase):
                 self.assertEqual(calls[1], ["tmux", "new-session", "-d", "-s", "do-it-relay"])
 
     def test_2045_targeted_context_restart(self):
+        """L-spec-2310: the targeted restart is retired; a ctx end recovers through ensure_planner."""
+        self.assertFalse(hasattr(up, "restart_pane"))
+        self.assertFalse(hasattr(up, "RESTART_CONFIRM_SECONDS"))
         end = {"type": "planner-ended", "subject": "L-charter-9001", "planner": "L-planner-9001",
                "reason": "ctx", "ts": (self.now - datetime.timedelta(minutes=2)).isoformat()}
-        source = fold.EVENTS / (end["planner"] + ".jsonl")
-        source.write_text(json.dumps(end) + "\n")
-        def wrapper(argv):
-            # The writer is the real wrapper, never restart_pane's admission path.
-            self.assertEqual(argv[-6:], ["planner-run",end["subject"],"--mode","ctx-restart","--attempt","1"])
-            env = {**os.environ, "HOME": str(self.root / "home"), "DOIT_ROOT": str(self.root),
-                   "PATH": str(self.root / "bin") + ":/usr/bin:/bin",
-                   "DOIT_SCRATCH": str(self.root.parent / (self.root.name + "-scratch"))}
-            (self.root / "home").mkdir(exist_ok=True)
-            result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-        with patch.object(up, "planner_launcher", side_effect=wrapper) as launcher, \
-             patch.object(up, "planner_alive", return_value=False):
-            self.assertTrue(up.restart_pane(end["planner"]))
-            launcher.assert_called_once()
-        starts = [r for file in fold.EVENTS.glob("*.jsonl") for line in file.read_text().splitlines()
-                  if (r := json.loads(line))["type"] == "planner-started"]
-        self.assertEqual(len(starts), 1)
-        self.assertEqual(starts[0]["subject"],end["subject"])
-        self.assertGreater(starts[0]["wrapper_pid"],0)
-        self.assertNotEqual(starts[0]["planner"],end["planner"])
-        for file in fold.EVENTS.glob("L-planner-*.jsonl"):
-            if file != source:
-                file.unlink()
-        for events, name in (([],end["planner"]),([end],"L-relay-9001"),
-                             ([{**end,"reason":"exit-0"}],end["planner"]),
-                             ([end,{"type":"planner-started","subject":end["subject"],
-                                    "ts":self.now.isoformat()}],end["planner"])):
-            source.write_text("".join(json.dumps(e)+"\n" for e in events))
-            with patch.object(up,"launch_planner") as launcher:
-                self.assertFalse(up.restart_pane(name))
-                launcher.assert_not_called()
-        source.write_text(json.dumps(end)+"\n")
-        with patch.object(up,"launch_planner",return_value="undetermined"):
-            with self.assertRaises(RuntimeError):
-                up.restart_pane(end["planner"])
-        with patch.object(up,"launch_planner",return_value="started"), \
-             patch.object(up,"RESTART_CONFIRM_SECONDS",0):
-            self.assertIsNone(up.restart_pane(end["planner"]))
-        self.assertEqual(len(list(fold.EVENTS.glob("L-planner-*.jsonl"))),1)
+        (fold.EVENTS / (end["planner"] + ".jsonl")).write_text(json.dumps(end) + "\n")
+        (self.root / "repos" / "do-it-v2").mkdir(parents=True, exist_ok=True)
+        dispatch.emit(fold.EVENTS / "L-operator-9001.jsonl", {}, "charter-filed",
+                      subject=end["subject"], project="do-it-v2")
+        calls = []
+        with patch.object(up, "planner_alive", return_value=False), \
+             patch.object(up, "launch_planner", side_effect=lambda *a, **k: calls.append(a) or "started"):
+            self.assertEqual(up.ensure_planner(fold.read_events(use_cache=False), self.now), "started")
+        self.assertEqual(calls, [(end["subject"], "charter", 1)])
 
     def test_tick_records_each_restart_result(self):
         with ExitStack() as stack:
@@ -232,6 +204,7 @@ class RelayRestartTests(unittest.TestCase):
             stack.enter_context(patch.object(tick, "_steps", return_value=[]))
             stack.enter_context(patch.object(tick, "run_steps", return_value=[]))
             stack.enter_context(patch.object(fold, "read_events", return_value=[]))
+            stack.enter_context(patch.object(up, "ensure_planner", return_value="idle"))
             for result in ("started", "serving", "idle", "undetermined", "wedged"):
                 with patch.object(up, "ensure_relay", return_value=result) as ensure:
                     tick._record()
@@ -299,7 +272,7 @@ class HeldPlannerTests(unittest.TestCase):
 
     def test_new_hold_and_clear_resume(self):
         self.emit("charter-filed")
-        self.assertEqual(up.main(max_cycles=2), 2)
+        self.assertEqual(up._supervisor_main(max_cycles=2), 2)
         self.assertEqual([x["subject"] for x in self.launches], [self.A])
         self.assertEqual(len(self.holds), 1)
         self.assertTrue(any("held since " in line for line in self.holds[0]))
@@ -315,7 +288,7 @@ class HeldPlannerTests(unittest.TestCase):
     def test_already_held_at_entry(self):
         self.emit("charter-filed")
         ts = self.emit("planner-held", actor="planner")
-        up.main(max_cycles=2)
+        up._supervisor_main(max_cycles=2)
         self.assertEqual(self.launches, [])
         self.assertEqual(len(self.holds), 2)
         self.assertTrue(all(any(f"held since {ts}" in line for line in lines) for lines in self.holds))
@@ -724,7 +697,7 @@ os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "0"
 sup_root("ac1")
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []))
 calls = sup_runs()
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 ok([c["cmd"][-1] for c in calls] == ["L-charter-0001", "L-charter-0002"],
    f"the loop starts one Planner per ready charter, each named its own charter: {[c['cmd'][-1] for c in calls]}")
 ok(all(c["cmd"][-2] == "--dangerously-skip-permissions" for c in calls),
@@ -786,23 +759,18 @@ def sup_attempts(events, charter_id=None, **k):
 
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []), planner_attempts=sup_attempts)
 calls = sup_runs()
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 esc = [e for e in sup_rows() if e["type"] == "escalation-blocking"]
-ok(len(esc) == 1 and esc[0]["subject"] == "L-charter-0001" and "irreversible" in esc[0]
-   and not all(k in esc[0] for k in ("default", "deadline", "revert")),
-   f"_charter_pass's escalation-blocking now carries irreversible= (L-spec-0188's fix), so "
-   f"fold.required_reason accepts it and it lands, well-formed, on the launcher's own file: {esc}")
+ok(esc == [] and not [e for e in fold.read_events() if e["type"] == "escalation-blocking"],
+   f"L-spec-2310: the dormant supervisor no longer writes the attempt-limit escalation: {esc}")
 ok([c["cmd"][-1] for c in calls] == ["L-charter-0002"],
    f"the escalated charter starts nothing this cycle and the next ready charter still starts: {calls}")
-ups = list(fold.EVENTS.glob("L-up-[0-9][0-9][0-9][0-9].jsonl"))
-ok(len(ups) == 1, f"one L-up-NNNN.jsonl per run, allocated lazily and reused: {ups}")
-evs = fold.read_events()
-ok(len([e for e in evs if e["type"] == "escalation-blocking"]) == 1,
-   "the one escalation-blocking is on the whole ledger too — the same append, not a second one")
 
 # ── L-spec-0433 AC14 · the irreversible= text names the replan=yes release condition ──
-ok("replan=yes" in esc[0]["irreversible"] and "held" in esc[0]["irreversible"],
-   f"AC14: the operator-facing irreversible= text names replan=yes and the word 'held': {esc[0]['irreversible']!r}")
+text = up._attempt_escalation("L-charter-0001", {"attempts": 2, "last_reason": "exit-1"})
+ok("replan=yes" in text["irreversible"] and "held" in text["irreversible"]
+   and text["attempts"] == 2 and text["subject"] == "L-charter-0001",
+   f"AC14: the operator-facing irreversible= text names replan=yes and the word 'held': {text['irreversible']!r}")
 
 # ── L-spec-0433 AC11 · a `next == "held"` charter starts no pane, escalates nothing,
 # and the SAME cycle still starts the next ready charter ───────────────────────────
@@ -820,7 +788,7 @@ sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []),
 calls = sup_runs()
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    up.main(max_cycles=1)
+    up._supervisor_main(max_cycles=1)
 out = buf.getvalue()
 ok([e for e in sup_rows() if e["type"] == "escalation-blocking"] == [],
    "AC11: a held charter gets no new escalation-blocking")
@@ -832,7 +800,7 @@ ok("L-up-0001.jsonl:3" in out, f"AC11: the held_by src is printed for the operat
 sup_root("ac4-crash")
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))
 calls = sup_runs(rc=1)
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 ends = [e for e in sup_rows(calls[0]["ledger"]) if e["type"] == "planner-ended"]
 ok(len(ends) == 1 and ends[0]["reason"] == "exit-1" and ends[0]["mode"] == "charter",
    f"a pane that dies writing nothing still leaves the failed-attempt record: {ends}")
@@ -841,7 +809,7 @@ sup_relay(plannable=lambda *a, **k: (["L-charter-0002"], []))
 calls = sup_runs(write=lambda led: dispatch.emit(led, {"spawn": led.stem}, "planner-ended",
                                                  subject="L-charter-0002", planner=led.stem,
                                                  mode="charter", reason="l1-complete"))
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 ends = [e for e in sup_rows(calls[0]["ledger"]) if e["type"] == "planner-ended"]
 ok(len(ends) == 1 and ends[0]["reason"] == "l1-complete",
    f"and the pane's own clean end row is never doubled by the launcher's: {ends}")
@@ -851,7 +819,7 @@ sup_root("ac5")
 sup_relay(plannable=lambda *a, **k: (["L-charter-0007"], []),
           planner_attempts=lambda *a, **k: {"attempts": 1, "last_reason": "exit-2", "next": "retry"})
 calls = sup_runs()
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 led = calls[0]["ledger"]
 st = [e for e in sup_rows(led) if e["type"] == "planner-started"]
 ok(len(st) == 1 and st[0]["subject"] == "L-charter-0007" and st[0]["planner"] == led.stem
@@ -867,7 +835,7 @@ sup_relay(waiting_lines=lambda *a, **k: WAIT)
 calls = sup_runs()
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    cycles = up.main(max_cycles=3)
+    cycles = up._supervisor_main(max_cycles=3)
 out = buf.getvalue().splitlines()
 ok(cycles == 3 and not calls, "an empty queue holds the loop open and starts nothing; it never ends it (R6)")
 ok([l for l in out if l in WAIT] == WAIT,
@@ -877,7 +845,7 @@ os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "600"
 sup_relay(waiting_lines=lambda *a, **k: WAIT, ledger_changed=lambda *a, **k: (True, 7))
 t0 = clock.monotonic()
 with contextlib.redirect_stdout(io.StringIO()):
-    up.main(max_cycles=2)
+    up._supervisor_main(max_cycles=2)
 ok(clock.monotonic() - t0 < 5, "a ledger write re-derives immediately instead of waiting out the interval")
 os.environ["DOIT_SUPERVISOR_INTERVAL_SEC"] = "0"
 
@@ -907,7 +875,7 @@ sys.modules["relay"] = None
 calls = sup_runs()
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
-    up.main(max_cycles=2)
+    up._supervisor_main(max_cycles=2)
 ok(("ImportError" in buf.getvalue() or "ModuleNotFoundError" in buf.getvalue()) and not calls
    and _only_boot_row(),
    f"with src/relay.py absent the loop names the exception and starts no pane, "
@@ -921,7 +889,7 @@ for fn in up.RELAY_FNS:
     calls = sup_runs()
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        up.main(max_cycles=1)
+        up._supervisor_main(max_cycles=1)
     ok("RuntimeError" in buf.getvalue() and not calls and _only_boot_row(),
        f"relay.{fn} raising is caught, named, and starts no pane of either mode, "
        f"appending only its own boot row: {buf.getvalue()!r}")
@@ -930,7 +898,7 @@ for fn in up.RELAY_FNS:
 sup_root("sole-relay-planner")
 sup_relay(pending_packets=lambda *a, **k: [{"spawn": "L-builder-0009"}])
 calls = sup_runs()
-up.main(max_cycles=1)
+up._supervisor_main(max_cycles=1)
 ok(not calls, "Planner holds even with pending seats; only the relay serves them")
 
 # ── AC14 · the other half of this file belongs to L-spec-0045 (A2) ────────────
@@ -1211,7 +1179,7 @@ def _spy_emit(dst, base, type_, /, **kv):
 
 dispatch.emit = _spy_emit
 try:
-    up.main(max_cycles=1)
+    up._supervisor_main(max_cycles=1)
 finally:
     dispatch.emit = real_emit
 types_order = [t for t, _ in emitted]
@@ -1281,7 +1249,7 @@ sentinel_calls = []
 up._EXECV = _sentinel_execv(sentinel_calls)
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001"], []))
 try:
-    up.main(max_cycles=2)
+    up._supervisor_main(max_cycles=2)
     ok(False, "AC6/main: the sentinel must propagate out of main()")
 except _Sentinel428:
     pass
@@ -1329,7 +1297,7 @@ sentinel_calls = []
 up._EXECV = _sentinel_execv(sentinel_calls)
 sup_relay(plannable=lambda *a, **k: (["L-charter-0001", "L-charter-0002"], []))
 try:
-    up.main(max_cycles=1)
+    up._supervisor_main(max_cycles=1)
     ok(False, "AC13: the sentinel must propagate out of main()")
 except _Sentinel428:
     pass

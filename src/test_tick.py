@@ -23,6 +23,10 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 import autodispatch, dispatch, lane_driver, lane_rules, merge_queue, nextstep
+import up
+# L-spec-2310: no tick in this suite may reap, signal or launch a Planner. The scheduler
+# is replaced at the same boundary as ensure_relay's fixtures; tests that need it patch it.
+up.ensure_planner = lambda events, now, **kw: 'idle'
 
 
 def _launcher_evidence(criterion, body):
@@ -3407,7 +3411,7 @@ class VanishedTickTests(unittest.TestCase):
                     (pr_closeout, 'run', None), (install_sync, 'run', []), (push_origin, 'run', None),
                     (carry, 'uncarried', []), (carry, 'sync_v4', []), (pane_resume, 'run', None),
                     (crons, 'check', []), (look, 'heartbeat_missed', None), (look, 'emit_once', None),
-                    (up, 'ensure_relay', None), (merge_queue, 'enqueue_due', []),
+                    (up, 'ensure_relay', None), (up, 'ensure_planner', 'idle'), (merge_queue, 'enqueue_due', []),
                     (autodispatch, 'capacity', 1)):
                 stack.enter_context(patch.object(module, name, return_value=result))
             stack.enter_context(patch.object(tick, 'run_steps', side_effect=recording_run))
