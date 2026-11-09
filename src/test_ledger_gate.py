@@ -539,5 +539,340 @@ class TestForwardSignature(Scratch):
             self.assertTrue(r['uncomparable'])
 
 
+class TestSurfaceSelection(Scratch):
+    def test_invalid_selection_timeout_and_partial_answers(self):
+        for surfaces in ((), ('brief', 'brief'), ('unknown',), 'brief'):
+            self.assertFalse(self.compare(surfaces=surfaces)['success'])
+        for timeout in (True, 0, -1, float('nan'), float('inf')):
+            self.assertFalse(self.compare(timeout=timeout)['success'])
+        for value in ({}, {'brief': {}}, {'brief': {self.ids[0]: {}}}):
+            with patch.object(gate, 'evaluate', return_value=value):
+                result = self.compare(surfaces=('brief',))
+                self.assertFalse(result['success'])
+                self.assertEqual(result['completed_count'], 0)
+                self.assertTrue(result['uncomparable'])
+
+    def test_timeout_forwarded_and_exact_surfaces(self):
+        def evaluate(*args, **kw):
+            self.assertEqual(kw, {'surfaces': ('brief',), 'timeout': 123})
+            return {'brief': answer(args[2])['brief']}
+        with patch.object(gate, 'evaluate', side_effect=evaluate) as worker:
+            result = self.compare(surfaces=('brief',), timeout=123)
+        self.assertEqual(worker.call_count, 2)
+        self.assertTrue(result['success'], result)
+        self.assertEqual([r['surface'] for r in result['surfaces']], ['brief'])
+        print('SURFACES enumeration: ' + ', '.join(gate.SURFACES))
+
+    def test_real_worker_omits_board_and_changed_brief_fails(self):
+        revision = self.path / 'revision'
+        gate.materialize(REPO, BASE, revision)
+        fold = revision / 'src/fold.py'
+        # Any CLI invocation of fold (board, states or events) is forbidden.
+        fold.write_text(fold.read_text().replace('if __name__ == "__main__":',
+            'if __name__ == "__main__":\n    raise RuntimeError("forbidden board sentinel")', 1))
+        snap = gate.capture(self.root)
+        before_manifest = gate.manifest(self.root)
+        selected = self.ids[:2]
+        actual = gate.evaluate(revision, snap, selected, FIXED, self.path / 'eval',
+                               surfaces=('brief',))
+        self.assertEqual(set(actual), {'brief'})
+        gate.validate_answers(actual, selected, surfaces=('brief',))
+        # Same clock/root, actual CLI versus shared-render answer, in isolation.
+        brief = revision / 'src/brief.py'
+        original = brief.read_text()
+        brief.write_text(original + '\n_original_dossier = dossier\n'
+            'def dossier(*args, **kwargs):\n'
+            '    d = _original_dossier(*args, **kwargs)\n'
+            '    assert _gate_cli_bytes(args[0]) == render(d) + "\\n"\n'
+            '    return d\n'
+            'def _gate_cli_bytes(subject):\n'
+            '    from gate_runtime import _cli\n'
+            '    return _cli(__file__, [subject])\n')
+        # runpy __main__ does not reach the wrapper until after CLI rendering.
+        cli_checked = gate.evaluate(revision, snap, selected, FIXED, self.path / 'eval',
+                                    surfaces=('brief',))
+        self.assertEqual(actual, cli_checked)
+        brief.write_text(original.replace('def render(d):',
+            'def render(d):\n    return "changed brief bytes"'))
+        result = self.compare(current=revision, surfaces=('brief',))
+        self.assertFalse(result['success'])
+        self.assertTrue(result['differences'])
+        self.assertEqual({d['surface'] for d in result['differences']}, {'brief'})
+        self.assertEqual(gate.manifest(self.root), before_manifest)
+
+    def test_actual_each_surface_matches_legacy_and_bounded_child_defaults(self):
+        snapshot = gate.capture(self.root)
+        ids = self.ids[:1]
+        workspace = self.path / 'eval'
+        legacy = gate.evaluate(REPO, snapshot, ids, FIXED, workspace)
+        self.assertEqual(tuple(legacy), tuple(sorted(gate.SURFACES)))
+        for surface in gate.SURFACES:
+            with self.subTest(surface=surface):
+                selected = gate.evaluate(REPO, snapshot, ids, FIXED, workspace,
+                                         surfaces=(surface,))
+                self.assertEqual(selected, {surface: legacy[surface]})
+        for kw, expected in (({},90), ({'surfaces':('brief',),'timeout':900},900)):
+            value = legacy if not kw else {'brief': legacy['brief']}
+            with patch.object(gate, 'run_child', return_value=value) as child:
+                gate.evaluate(REPO, snapshot, ids, FIXED, workspace, **kw)
+            self.assertEqual(child.call_args.kwargs['timeout'],expected)
+
+    def test_requested_isolation_failure_and_timeout_fail_closed(self):
+        revision = self.path / 'revision'
+        gate.materialize(REPO, BASE, revision)
+        brief = revision / 'src/brief.py'
+        original = brief.read_text()
+        for expression in ('open("/home/forbidden-live-config").read()',
+                           '__import__("socket").socket().connect(("127.0.0.1", 1))',
+                           '__import__("subprocess").run(["claude", "--version"])',
+                           '__import__("time").sleep(2)'):
+            brief.write_text(original.replace('def render(d):',
+                'def render(d):\n    ' + expression))
+            result = self.compare(current=revision, surfaces=('brief',), timeout=.5)
+            self.assertFalse(result['success'], expression)
+            self.assertTrue(result['uncomparable'])
+
+
+class JobScratch(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='job-meter-test-')
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name)
+        self.root = self.path / 'root'
+        seed(self.root, 1)
+        self.samples = self.path / 'samples.jsonl'
+        self.logs = self.path / 'cron'
+        self.logs.mkdir()
+        self.current = datetime(2026, 11, 8, tzinfo=timezone.utc)
+        self.first = datetime(2026, 11, 7, tzinfo=timezone.utc)
+        self.baseline = datetime(2026, 11, 5, tzinfo=timezone.utc)
+        self.env = patch.dict(os.environ, {'DOIT_ROOT': str(self.root),
+            'LEDGER_GATE_SAMPLES': str(self.samples),
+            'LEDGER_GATE_CRON_RUNS_DIR': str(self.logs),
+            'LEDGER_GATE_REPO': str(REPO)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        # Real admitted canonical ledger provenance, with a locally resolvable parent.
+        sha = git(REPO, 'rev-parse', 'HEAD')
+        self.merges = [dict(subject='L-spec-9001', charter='L-charter-0086',
+                            ts=self.first.isoformat(), sha=sha),
+                       dict(subject='L-spec-9002', charter='L-charter-0086',
+                            ts=(self.current-timedelta(hours=1)).isoformat(), sha=sha),
+                       dict(subject='L-spec-9003', charter='L-charter-0079',
+                            ts=(self.current+timedelta(seconds=10)).isoformat(), sha=sha),
+                       dict(subject='L-spec-9004', charter='L-charter-0084',
+                            ts=(self.current+timedelta(seconds=40)).isoformat(), sha=sha)]
+        for merge in self.merges:
+            self.append(self.root / 'events/L-spec-writer-0002.jsonl',
+                        dict(merge, type='spec-written', project='fixture'))
+            self.append(self.root / 'events/L-executor-0001.jsonl',
+                        dict(merge, type='shipped', project='fixture'))
+        self.rows = []
+        for begin, factor in ((self.baseline, 4), (self.first-timedelta(days=1), 2),
+                              (self.current, 1)):
+            for offset, wall, tick, pre in ((10, 10, 5, 2), (40, 30, 15, 6)):
+                self.rows.append(dict(ts=(begin+timedelta(seconds=offset)).isoformat(),
+                    wall=wall, by={'ledger-bookkeeping': 500},
+                    ledger=[dict(cpu=tick*factor, cmd='python src/tick.py wait')],
+                    top=[dict(cpu=tick*factor, cmd='python src/tick.py wait', cat='ledger-bookkeeping'),
+                         dict(cpu=pre*factor, cmd='python src/spec_preflight.py')]))
+        self.write_rows()
+        for job in ('tick', 'spec_preflight'):
+            file = self.logs / ('spec-preflight.jsonl' if job == 'spec_preflight' else 'tick.jsonl')
+            records = [dict(ev='coverage', start=self.baseline.isoformat(),
+                end=(self.current+timedelta(seconds=40)).isoformat(), continuous=True,
+                source='operator-preserved fixture')]
+            for begin in (self.baseline, self.first-timedelta(days=1), self.current):
+                for offset in (1, 11):
+                    start = (begin+timedelta(seconds=offset)).isoformat()
+                    records += [dict(ev='start', ts=start, pid=offset),
+                                dict(ev='end', ts=(begin+timedelta(seconds=offset+3)).isoformat(),
+                                     start_ts=start, duration_s=3, rc=0)]
+            file.write_text(''.join(json.dumps(r)+'\n' for r in records))
+
+    @staticmethod
+    def append(path, row):
+        with path.open('a') as stream:
+            stream.write(json.dumps(row)+'\n')
+
+    def write_rows(self):
+        self.samples.write_text(''.join(json.dumps(r)+'\n' for r in self.rows))
+
+    def report(self):
+        return gate.job_meter(self.current.isoformat(),
+            (self.current+timedelta(seconds=40)).isoformat(), ['tick', 'spec_preflight'])
+
+
+class TestJobMeterArithmetic(JobScratch):
+    def test_three_windows_weighted_rates_passes_and_canonical_merges(self):
+        manifest = gate.manifest(self.path)
+        result = self.report()
+        self.assertTrue(result['success'], result['reasons'])
+        current = result['windows']['current']
+        for job, cpu, rate, per_pass in (('tick',20,43200,10), ('spec_preflight',8,17280,4)):
+            row = current['jobs'][job]
+            self.assertEqual((row['observed_cpu_s'],row['cpu_s_per_86400_sampled_wall'],
+                              row['passes'],row['cpu_s_per_pass']), (cpu,rate,2,per_pass))
+            self.assertEqual(row['cpu_quality'], 'lower-bound')
+            self.assertEqual(result['windows']['baseline']['jobs'][job]['observed_cpu_s'],cpu*4)
+            self.assertEqual(result['windows']['control']['jobs'][job]['observed_cpu_s'],cpu*2)
+            self.assertEqual(result['changes'][job]['baseline']['percent'], -75)
+            self.assertEqual(result['changes'][job]['control']['percent'], -50)
+        self.assertEqual(current['sampled_wall_s'],40)
+        self.assertTrue(current['coverage']['complete_window'])
+        self.assertFalse(result['windows']['baseline']['coverage']['complete_window'])
+        self.assertEqual([m['charter'] for m in current['merges']],
+                         ['L-charter-0079','L-charter-0084'])
+        self.assertEqual(result['provenance']['first_merge']['subject'], 'L-spec-9001')
+        self.assertEqual(result['provenance']['last_merge']['subject'], 'L-spec-9002')
+        self.assertEqual(result['provenance']['first_merge']['parent_sha'],git(REPO,'rev-parse','HEAD^'))
+        self.assertIsNone(result['charter_bar_met'])
+        self.assertEqual(gate.manifest(self.path),manifest)
+        print('weighted rates: tick=43200/day, 10/pass; spec_preflight=17280/day, 4/pass')
+
+    def test_start_excluded_end_included_and_ring_truncation(self):
+        self.rows.append(dict(self.rows[-1], ts=self.current.isoformat(), wall=1))
+        self.rows.sort(key=lambda r:r['ts'])
+        self.write_rows()
+        result=self.report()
+        self.assertEqual(result['windows']['current']['sample_count'],2)
+        for path in self.logs.iterdir():
+            lines=[json.loads(l) for l in path.read_text().splitlines()]
+            path.write_text(''.join(json.dumps(r)+'\n' for r in lines
+                if r['ev'] != 'coverage' and gate.utc(r['ts']) > self.current))
+        result=self.report()
+        for row in result['windows']['current']['jobs'].values():
+            self.assertEqual(row['known_completions'],2)
+            self.assertIsNone(row['passes'])
+            self.assertIsNone(row['cpu_s_per_pass'])
+        self.assertFalse(result['success'])
+
+    def test_cli_and_legacy_meter(self):
+        p=subprocess.run([sys.executable,str(REPO/'src/ledger_gate.py'),'job-meter',
+            '--from',self.current.isoformat(),'--to',(self.current+timedelta(seconds=40)).isoformat(),
+            '--jobs','tick','spec_preflight'],capture_output=True,text=True)
+        self.assertEqual(p.returncode,0,p.stderr+p.stdout)
+        self.assertEqual(json.loads(p.stdout)['windows']['current']['jobs']['tick']['passes'],2)
+        self.assertEqual(gate.meter(self.current.isoformat(),
+            (self.current+timedelta(seconds=40)).isoformat(), samples=self.samples)['bar'],5350)
+
+
+class TestJobMeterEvidence(JobScratch):
+    def test_full_ledger_still_lower_bound_missing_match_unknown_and_no_double_count(self):
+        r=self.report()
+        self.assertEqual(r['windows']['current']['jobs']['tick']['observed_cpu_s'],20)
+        for row in self.rows:
+            row['top']=[e for e in row['top'] if 'tick.py' in e['cmd']]
+        self.write_rows()
+        r=self.report()
+        job=r['windows']['current']['jobs']['spec_preflight']
+        self.assertIsNone(job['observed_cpu_s'])
+        self.assertEqual(job['cpu_quality'],'unknown')
+        self.assertEqual(job['wall_fallback']['wall_s_per_known_completed_pass'],3)
+        self.assertEqual(job['wall_fallback']['known_completions'],2)
+        self.assertFalse(r['success'])
+        self.assertIsNone(r['charter_bar_met'])
+        print('command matches remain lower-bound; missing CPU is unknown; wall fallback is separate')
+
+    def test_missing_logs_unmatched_failed_and_zero_complete(self):
+        file=self.logs/'tick.jsonl'
+        file.unlink()
+        r=self.report()['windows']['current']['jobs']['tick']
+        self.assertIsNone(r['passes'])
+        self.assertIsNone(r['cpu_s_per_pass'])
+        start=(self.current-timedelta(seconds=1)).isoformat()
+        self.append(file,dict(ev='coverage',start=start,
+            end=(self.current+timedelta(seconds=40)).isoformat(),continuous=True,source='fixture'))
+        self.append(file,dict(ev='start',ts=self.current.isoformat(),pid=1))
+        r=self.report()['windows']['current']['jobs']['tick']
+        self.assertEqual(r['passes'],0)
+        self.assertEqual(r['unfinished_invocations'],1)
+        self.assertIsNone(r['cpu_s_per_pass'])
+        self.append(file,dict(ev='end',ts=(self.current+timedelta(seconds=5)).isoformat(),
+                            start_ts=start,rc=2,duration_s=6))
+        r=self.report()['windows']['current']['jobs']['tick']
+        self.assertEqual(r['failed_completions'],1)
+        self.assertEqual(r['unmatched_ends'],1)
+        self.assertEqual(r['boundary_crossing_completions'],1)
+
+    def test_absent_control_anchor_and_short_coverage(self):
+        (self.root/'events/L-executor-0001.jsonl').unlink()
+        r=self.report()
+        self.assertIsNone(r['windows']['control'])
+        self.assertIsNone(r['provenance']['first_merge'])
+        self.assertFalse(r['success'])
+        self.assertIsNone(r['changes']['tick']['control']['delta'])
+        self.rows=self.rows[-1:]; self.rows[0]["wall"]=1; self.write_rows()
+        r=self.report()
+        self.assertFalse(r['windows']['current']['coverage']['complete_window'])
+
+    def test_bad_samples_fail_clearly(self):
+        good=copy.deepcopy(self.rows)
+        for field,value in (('wall',True),('wall',0),('wall',-1),('wall',float('inf')),
+                            ('ts','2026-11-08T00:00:10'),('ts','bad'),('by',[]),
+                            ('ledger',[dict(cpu=-1,cmd='tick.py')]),
+                            ('top',[dict(cpu=True,cmd='spec_preflight.py')]),
+                            ('ledger',[dict(cpu=float('nan'),cmd='tick.py')])):
+            with self.subTest(field=field,value=value):
+                self.rows=copy.deepcopy(good); self.rows[-1][field]=value; self.write_rows()
+                r=self.report(); self.assertFalse(r['success']); self.assertTrue(r['reasons'])
+        for rows in (good+[good[-1]],list(reversed(good))):
+            self.rows=rows; self.write_rows(); self.assertFalse(self.report()['success'])
+        self.samples.write_text('{bad json\n'); self.assertFalse(self.report()['success'])
+        for jobs in ([],['bad'],['tick','tick'],'tick'):
+            self.assertFalse(gate.job_meter(self.current.isoformat(),
+                (self.current+timedelta(seconds=40)).isoformat(),jobs)['success'])
+
+    def test_schedule_is_separate_estimate_and_explicit_zero_match(self):
+        cadence = self.path/'cadence.jsonl'
+        for job in ('tick','spec_preflight'):
+            self.append(cadence,dict(job=job,start=self.baseline.isoformat(),
+                end=(self.current+timedelta(days=1)).isoformat(), cadence_s=10,
+                anchor=self.current.isoformat(), source='operator effective schedule fixture',effective=True))
+        for path in self.logs.iterdir():
+            path.unlink()
+        for row in self.rows:
+            for obs in row['ledger']+row['top']:
+                obs['cpu']=0
+        self.write_rows()
+        with patch.dict(os.environ,{'LEDGER_GATE_CADENCE':str(cadence)}):
+            r=self.report()
+        for row in r['windows']['current']['jobs'].values():
+            self.assertEqual(row['scheduled_passes'],4)
+            self.assertEqual(row['scheduled_quality'],'estimate')
+            self.assertEqual(row['cpu_s_per_scheduled_pass'],0)
+            self.assertIsNone(row['passes'])
+            self.assertIsNone(row['cpu_s_per_pass'])
+            self.assertEqual(row['cpu_quality'],'lower-bound')
+        self.assertFalse(r['success'])
+        self.assertIsNone(r['charter_bar_met'])
+
+    def test_unauthorized_merge_cannot_supply_anchor_and_positive_change_is_retained(self):
+        merges=self.root/'events/L-executor-0001.jsonl'
+        (self.root/'events/L-builder-0001.jsonl').write_bytes(merges.read_bytes())
+        merges.unlink()
+        self.assertIsNone(self.report()['provenance']['first_merge'])
+        (self.root/'events/L-builder-0001.jsonl').rename(merges)
+        for row in self.rows[-2:]:
+            for obs in row['ledger']+row['top']:
+                obs['cpu']*=8
+        self.write_rows()
+        r=self.report()
+        self.assertTrue(r['success'],r['reasons'])
+        self.assertEqual(r['changes']['tick']['baseline']['percent'],100)
+        self.assertEqual(r['changes']['tick']['control']['percent'],300)
+        self.assertIsNone(r['charter_bar_met'])
+
+    def test_bad_completion_measurements(self):
+        file=self.logs/'tick.jsonl'; good=file.read_text()
+        for field,value in (('duration_s',True),('duration_s',-1),('duration_s',float('inf')),
+                            ('rc',True),('start_ts','bad'),('ts','2026-11-08T00:00:10')):
+            rows=[json.loads(l) for l in good.splitlines()]
+            rows[-1][field]=value
+            file.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            r=self.report(); self.assertFalse(r['success']); self.assertTrue(r['reasons'])
+        file.write_text(good+'bad json\n');self.assertFalse(self.report()['success'])
+
+
 if __name__ == '__main__':
     unittest.main()
