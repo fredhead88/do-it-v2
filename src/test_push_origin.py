@@ -238,7 +238,7 @@ class PushOriginTests(unittest.TestCase):
         self.git(racer, "push", "origin", "HEAD")
         for _ in range(2):
             runner = self.runner()
-            self.assertEqual(push_origin.run([], runner=runner), [])
+            self.assertEqual(push_origin.run(fold.read_events(), runner=runner), [])
             self.assertFalse(any(args[0] == "push" for args, _ in runner.calls))
             self.assertEqual(self.git(origin, "rev-parse", "main"), remote)
         rows = self.ledger("origin-diverged")
@@ -246,12 +246,12 @@ class PushOriginTests(unittest.TestCase):
         self.assertEqual((rows[0]["subject"], rows[0]["sha"], rows[0]["origin_sha"], rows[0]["branch"]),
                          ("do-it-v2", local, remote, "main"))
         local = self.commit(clone, "local advances again")
-        self.assertEqual(push_origin.run([], runner=self.runner()), [])
+        self.assertEqual(push_origin.run(fold.read_events(), runner=self.runner()), [])
         self.assertEqual(len(self.ledger("origin-diverged")), 2)
         self.assertEqual(self.ledger("origin-diverged")[-1]["sha"], local)
         remote = self.commit(racer, "origin advances again")
         self.git(racer, "push", "origin", "HEAD")
-        self.assertEqual(push_origin.run([], runner=self.runner()), [])
+        self.assertEqual(push_origin.run(fold.read_events(), runner=self.runner()), [])
         self.assertEqual(len(self.ledger("origin-diverged")), 3)
         self.assertEqual(self.ledger("origin-diverged")[-1]["origin_sha"], remote)
         self.assertEqual(self.git(origin, "rev-parse", "main"), remote)
@@ -259,7 +259,8 @@ class PushOriginTests(unittest.TestCase):
         self.commit(clone, "unreadable ledger")
         before = self.snapshot()
         with patch.object(fold, "read_events", side_effect=OSError("unreadable ledger")):
-            self.assertEqual(push_origin.run([], runner=self.runner()), [])
+            # L-spec-2176: only the direct helper needs a guarded own read.
+            push_origin._record_diverged("do-it-v2", "main", local, remote)
         self.assertEqual(self.snapshot(), before)
         for kw in ({"failures": {"merge-base": 2}}, {"timeouts": {"merge-base"}},
                    {"failures": {"rev-list": 1}}):

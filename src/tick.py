@@ -10,6 +10,9 @@ passes launch routine roles, including due charter close reviews. The ordinary
 tick event is the durable heartbeat and close-review fork receipt. The Executor
 is a supervised pane that reads the same lane for itself.
 """
+from contextvars import ContextVar
+from itertools import chain
+
 import ledger_files
 import ledger_cache
 import argparse, fcntl, hashlib, json, os, pathlib, re, socket, sys, time
@@ -47,6 +50,22 @@ SPEC_DONE = ("accepted", "shipped-owed-evidence", "shipped-owed-expired", "dropp
 PROVING_CLOSE_REASON = ("every owed check discharged; sweep at fixpoint; no open in-scope brief; "
                         "charter review complete or not owed")
 LANE_LOG_BYTES = 1024 * 1024
+# Only the current guarded pass owns these observations and accepted launches.
+# Context-local state also covers recovery without changing its public contract.
+_PASS = ContextVar('tick_pass', default=None)
+
+
+def _committed(refused):
+    state = _PASS.get()
+    if refused is None and state is not None:
+        state['wrote'] = True
+    return refused
+
+
+def _committed_brief(brief):
+    if brief is not None and _PASS.get() is not None:
+        _PASS.get()['wrote'] = True
+    return brief
 
 
 def _log_lane_driver(lines, snapshot):
@@ -139,7 +158,7 @@ def _spawn_busy(ev):
                               reason='vanished')
                 if 'project' in e:
                     fields['project'] = e['project']
-                dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-failed', **fields)
+                _committed(dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-failed', **fields))
                 ends.setdefault(sid, set()).add('spawn-failed')
         elif terminal:
             # Stale remains outside busy, but is not a real terminal for reconciliation.
@@ -147,8 +166,8 @@ def _spawn_busy(ev):
         elif state == 'stale':
             if sid and not _ended_since_read(sid):
                 cap = dispatch.ROLES.get(spawns._role(e), (None, 60, 0))[1]
-                dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-stale',
-                              subject=e.get('subject'), role=spawns._role(e), cap_min=cap)
+                _committed(dispatch.emit(tick_path(), {'spawn': sid}, 'spawn-stale',
+                              subject=e.get('subject'), role=spawns._role(e), cap_min=cap))
                 ends.setdefault(sid, set()).add('spawn-stale')
         else:
             busy.add(e.get('subject'))
@@ -264,7 +283,19 @@ class _PassDispatcher:
         self.now, self.dry_run = now, dry_run
 
     def __call__(self, argv):
-        return self.runner(argv)
+        result = self.runner(argv)
+        state = _PASS.get()
+        if (state is not None and argv[:2] == ['doit', 'dispatch']
+                and result.get('code', 1) == 0):
+            # Record acceptance before the synchronous append: a later failure
+            # cannot erase a launch, including on the recovery path.
+            try:
+                accepted = json.loads(result.get('stdout') or '').get('detached')
+            except (ValueError, AttributeError):
+                accepted = None
+            if accepted and '--detach' in argv:
+                state['launched'].add(argv[argv.index('--detach') + 2])
+        return result
 
 
 def _launch_events():
@@ -301,21 +332,28 @@ def _record_held_skips(events, specs, *, reporter=None):
     if not reasons:
         return
     latest = {}
-    # A recovery pass or a direct launch may reuse the earlier snapshot. Read
-    # persisted observations too, so it cannot repeat the routine pass's write.
-    persisted = _launch_events()
+    # Recovery reuses the pass snapshot plus only successful observations.
+    # Independent direct calls still verify their persisted observations.
+    state = _PASS.get()
+    persisted = state['skips'] if state is not None else _launch_events()
     if persisted is None:
         return
-    observations = [e for e in list(events) + persisted
+    observations = [e for e in chain(events, persisted if state is None else ())
                     if e.get('type') == 'autodispatch-skipped' and e.get('actor') == 'tick']
     for e in sorted(observations, key=autodispatch._hold_order):
         latest[e.get('subject')] = e.get('reason')
+    if state is not None:
+        for event in state['skips']:
+            latest[event['subject']] = event['reason']
     for sid, reason in reasons.items():
         if reason and latest.get(sid) != reason:
-            refused = dispatch.emit(tick_path(), {'subject': sid}, 'autodispatch-skipped',
-                                    strict=True, reason=reason)
+            refused = _committed(dispatch.emit(tick_path(), {'subject': sid}, 'autodispatch-skipped',
+                                    strict=True, reason=reason))
             if refused:
                 raise ValueError('autodispatch-skipped record refused: ' + str(refused))
+            if state is not None:
+                state['skips'].append(dict(type='autodispatch-skipped', actor='tick',
+                                           subject=sid, reason=reason, ts=dispatch.now()))
 
 
 def launch(step, *, dispatcher):
@@ -326,8 +364,8 @@ def launch(step, *, dispatcher):
     import dispatch
     if not isinstance(step, nextstep.Step):
         reason = 'undetermined: unreadable Step'
-        dispatch.emit(tick_path(), {'subject': getattr(step, 'item', 'tick')},
-                      'autodispatch-failed', reason=reason)
+        _committed(dispatch.emit(tick_path(), {'subject': getattr(step, 'item', 'tick')},
+                      'autodispatch-failed', reason=reason))
         raise ValueError(reason)
     if step.state != 'action' or step.owner != 'tick' or step.action not in LAUNCH_ACTIONS:
         return None
@@ -423,8 +461,8 @@ def launch(step, *, dispatcher):
                 spawn = str(spawn)
             if not isinstance(spawn, str) or not spawn:
                 raise ValueError('undetermined: missing spawn id')
-            refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
-                                    role=role, rule='audit', since=step.since, spawn=spawn)
+            refusal = _committed(dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
+                                    role=role, rule='audit', since=step.since, spawn=spawn))
             if refusal is not None:
                 raise ValueError('autodispatched record refused: ' + str(refusal))
             return spawn
@@ -469,15 +507,15 @@ def launch(step, *, dispatcher):
             spawn = str(spawn)
         if not isinstance(spawn, str) or not spawn:
             raise ValueError('undetermined: missing spawn id')
-        refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
+        refusal = _committed(dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatched',
                                 role=role, rule=step.action, since=step.since, spawn=spawn,
-                                **({'worktree_recreated': True} if recreated else {}))
+                                **({'worktree_recreated': True} if recreated else {})))
         if refusal is not None:
             raise ValueError('autodispatched record refused: ' + str(refusal))
         return spawn
     except Exception as exc:
-        refusal = dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
-                                role=role, rule=step.action, reason=str(exc))
+        refusal = _committed(dispatch.emit(tick_path(), {'subject': step.item}, 'autodispatch-failed',
+                                role=role, rule=step.action, reason=str(exc)))
         raise ValueError(str(exc) + (f'; failure record refused: {refusal}' if refusal else '')) from exc
 
 
@@ -539,11 +577,11 @@ def _record_retry_exhaustion(step, events, now):
            and nextstep._admitted_actor(e) in {'tick','executor','thinker','operator'}
            for e in list(events)+persisted):
         return None
-    reason = dispatch.emit(tick_path(), {'subject':step.item}, 'escalation-blocking', strict=True,
+    reason = _committed(dispatch.emit(tick_path(), {'subject':step.item}, 'escalation-blocking', strict=True,
         kind='retries-exhausted', owner='thinker', role=role, reasons=list(history.reasons), ref=step.trigger,
         default='leave the action stopped pending a human decision',
         deadline=(now+timedelta(hours=24)).isoformat(),
-        revert='no automatic action was taken; nothing to revert')
+        revert='no automatic action was taken; nothing to revert'))
     return ('failed durable exhaustion: '+str(reason) if reason else 'escalated '+step.item+' retries-exhausted')
 
 
@@ -569,7 +607,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     """Shared entry point; a tick pass supplies its single computed snapshot."""
     import autodispatch
     import lane_driver
-    events = list(events)
+    events = events if isinstance(events, list) else list(events)
     by_subject = {}
     for e in events:
         by_subject.setdefault(e.get('subject'), []).append(e)
@@ -699,6 +737,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                                 gate_errors.append('note_launch: ' + str(exc))
                                 gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
                     if spawn:
+                        if _PASS.get() is not None:
+                            _PASS.get()['launched'].add(step.item)
                         out.append(f'acted {step.item} {step.action} spawn={spawn}')
                         if role in slots:
                             slots[role] -= 1
@@ -889,6 +929,9 @@ def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
     import autodispatch
     import look
     candidates = rework_waits(events, now, free_slots)
+    state = _PASS.get()
+    if state is not None and state.get('observer_excluded'):
+        candidates = [row for row in candidates if row['subject'] not in state['observer_excluded']]
     by_subject = {}
     for event in events:
         by_subject.setdefault(event.get('subject'), []).append(event)
@@ -939,8 +982,8 @@ def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
             summary['held_reasons'][reason] = summary['held_reasons'].get(reason, 0) + 1
             continue
         if not emitted(candidate):
-            look.emit_once('rework-wait:' + candidate['trigger'], subject, 'thinker',
-                           candidate, events, root=fold.ROOT)
+            _committed_brief(look.emit_once('rework-wait:' + candidate['trigger'], subject, 'thinker',
+                           candidate, events, root=fold.ROOT))
             summary['observed'] += 1
     return summary
 
@@ -998,9 +1041,9 @@ def _record_next_step_held(events, specs, steps, now):
         # read_events preserves append order for same-file timestamp ties.
         if held and held[-1]['reason'] == step.reason:
             continue
-        refusal = dispatch.emit(tick_path(), {}, 'next-step-held',
+        refusal = _committed(dispatch.emit(tick_path(), {}, 'next-step-held',
                                 subject='held:' + step.item, spec=step.item,
-                                reason=step.reason, owner=step.owner, since=since.isoformat())
+                                reason=step.reason, owner=step.owner, since=since.isoformat()))
         if refusal is not None:
             raise RuntimeError(refusal)
 
@@ -1026,12 +1069,24 @@ def _record():
     except BlockingIOError:
         lock.close()
         return None
+    token = _PASS.set(dict(skips=[], launched=set(), wrote=False))
+    try:
+        return _record_pass()
+    finally:
+        _PASS.reset(token)
+        lock.close()
+
+
+def _record_pass():
+    """The locked pass: at most two whole-ledger loads, one planning attempt."""
     snapshot = fold.ReaderSnapshot()
     try:
+        # Take the marker BEFORE the body load: a racing append can only make
+        # the pre-dispatch check conservative, never certify an older view.
+        generation = ledger_files.stat_keys(fold.EVENTS)
         ev = fold.read_events(snapshot=snapshot)
-    except ledger_cache.LockTimeout as exc:
+    except Exception as exc:
         print(str(exc), file=sys.stderr)
-        lock.close()
         return None
     # SD11 (L-spec-0242, extended by L-spec-0244 and L-spec-0243): `intake.run(ev)`
     # fires off the FIRST read, its own try/except so a raise never stops the
@@ -1083,21 +1138,17 @@ def _record():
         push_origin.run(ev)
     except Exception as e:
         push_origin_error = f"{e}"
-    # Reuse the guarded post-intake read for reconciliation and its resulting
-    # snapshot. Both reads keep the same lock-timeout logging/return contract.
-    for reconcile in (True, False):
-        try:
+    # A2: reconcile the held events first; intake and vanished-failure rows
+    # become visible together in the only possible pre-dispatch refresh.
+    _spawn_busy(ev)
+    loads = 1
+    try:
+        if ledger_files.stat_keys(fold.EVENTS) != generation:
             ev = fold.read_events(snapshot=snapshot)
-        except ledger_cache.LockTimeout as exc:
-            print(str(exc), file=sys.stderr)
-            lock.close()
-            return None
-        if reconcile:
-            before = tick_path().stat().st_size if tick_path().exists() else 0
-            _spawn_busy(ev)
-            after = tick_path().stat().st_size if tick_path().exists() else 0
-            if before == after:
-                break
+            loads += 1
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return None
     specs, charters, _, _ = fold.fold(ev)
     reaped = {e.get("subject") for e in ev if e["type"] == "tree-reaped"}
     errors = []
@@ -1131,13 +1182,13 @@ def _record():
         missing = crons.check() or []
         row = next((r for r in missing if (r.get("name") if isinstance(r, dict) else r) == "look"), None)
         if row is not None:
-            look.emit_once("cron-missing", "look", "thinker", row, ev)
+            _committed_brief(look.emit_once("cron-missing", "look", "thinker", row, ev))
         else:
             st = look._read_state(fold.ROOT) or {}
             last_pass = st.get("last_pass")
             stale = last_pass is None or (fold.NOW - fold.ts(last_pass)).total_seconds() > 40 * 60
             if stale:
-                look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": last_pass}, ev)
+                _committed_brief(look.emit_once("look-stale", "look-stale", "thinker", {"last_pass": last_pass}, ev))
     except Exception as e:
         look_error = f"{e}"
     try:
@@ -1169,25 +1220,25 @@ def _record():
                                         review_owed=review_owed, open_briefs=open_briefs)
                 if proving.should_enter(c["evs"], mine):
                     next_text = summ["next"]["text"] if summ["next"] is not None else "nothing remaining"
-                    dispatch.emit(tick_path(), {}, "charter-proving", subject=cid,
+                    _committed(dispatch.emit(tick_path(), {}, "charter-proving", subject=cid,
                                   reason=f"{summ['remaining']} item(s) remain; next: {next_text}",
-                                  deadline=summ["deadline"])
+                                  deadline=summ["deadline"]))
                 for item in proving.to_reopen(c["evs"], mine, fold.NOW):
-                    dispatch.emit(tick_path(), {}, "charter-reopened", subject=cid,
+                    _committed(dispatch.emit(tick_path(), {}, "charter-reopened", subject=cid,
                                   spec=item["spec"], criterion=item["criterion"],
-                                  failed_src=item["failed_src"])
-                    look.emit_once("proving-check-failed",
+                                  failed_src=item["failed_src"]))
+                    _committed_brief(look.emit_once("proving-check-failed",
                                    f"{cid}|{item['spec']}|{item['criterion']}", "thinker",
                                    {"spec": item["spec"], "criterion": item["criterion"],
-                                    "failed_src": item["failed_src"]}, ev)
+                                    "failed_src": item["failed_src"]}, ev))
                 if fold.ts(summ["deadline"]) < fold.NOW:
                     key = f"{cid}|{summ['deadline']}"
                     fired = any(e.get("type") == "brief" and e.get("condition") == "proving-overdue"
                                and e.get("key") == key for e in ev)
                     if not fired:
-                        look.emit_once("proving-overdue", key, "operator",
+                        _committed_brief(look.emit_once("proving-overdue", key, "operator",
                                        {"next": (summ["next"]["text"] if summ["next"] is not None else None),
-                                        "owner": summ["owner"], "deadline": summ["deadline"]}, ev)
+                                        "owner": summ["owner"], "deadline": summ["deadline"]}, ev))
             elif c["state"] == "L2-complete":
                 proving_evs = [e for e in c["evs"] if e["type"] == "charter-proving"]
                 if proving_evs:
@@ -1204,8 +1255,8 @@ def _record():
                                        "blocking owed checks remain within configured allowance")
                             reason = (f"{pending}; sweep at fixpoint; no open in-scope brief; "
                                       "charter review complete or not owed")
-                        dispatch.emit(tick_path(), {}, "charter-closed", subject=cid,
-                                      label=label, reason=reason)
+                        _committed(dispatch.emit(tick_path(), {}, "charter-closed", subject=cid,
+                                      label=label, reason=reason))
     except Exception as e:
         proving_error = f"{e}"
     # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step
@@ -1219,6 +1270,27 @@ def _record():
     lane_driver_log_error = None
     dispatch_started = time.monotonic()
     steps = []
+    steps_attempted = False
+    steps_failure = None
+    steps_now = fold.NOW
+
+    def pass_steps():
+        """Dispatch and todo share one attempt on the pre-dispatch inputs.
+
+        An import can fail before planning. In that case todo still makes the
+        first attempt; a failed attempt and a completed empty lane are distinct.
+        """
+        nonlocal steps, steps_attempted, steps_failure
+        if not steps_attempted:
+            steps_attempted = True
+            try:
+                steps = _steps(ev, specs, steps_now)
+            except Exception as exc:
+                steps_failure = exc
+        if steps_failure is not None:
+            raise steps_failure
+        return steps
+
     outcomes = []
     seat_state = {}
     def log_outcomes(lines):
@@ -1233,7 +1305,7 @@ def _record():
         import close_reviews
         import autodispatch
         close_reviews_outcomes = close_reviews.run(ev, specs, fold.NOW,
-                                                   runner=autodispatch._real_runner)
+                                                   runner=_PassDispatcher(autodispatch._real_runner, ev, specs, fold.NOW, False))
     except Exception as exc:
         close_reviews_error = str(exc)
         close_reviews_outcomes = getattr(exc, 'outcomes', close_reviews_outcomes)
@@ -1242,10 +1314,11 @@ def _record():
     try:
         import autodispatch
         import merge_queue
-        steps = _steps(ev, specs, fold.NOW)
+        steps = pass_steps()
         outcomes = run_steps(ev, specs, fold.NOW, steps=steps, admission=admission, seat_state=seat_state)
         outcomes.extend(autodispatch.redispatch_dead(ev, specs, fold.NOW,
-                        handled=handled_items(steps)))
+                        handled=handled_items(steps),
+                        runner=_PassDispatcher(autodispatch._real_runner, ev, specs, fold.NOW, False)))
         launch_precheck(ev, fold.NOW)
         outcomes.extend(merge_queue.enqueue_due(ev, fold.NOW))
         log_outcomes(outcomes or [])
@@ -1267,14 +1340,29 @@ def _record():
         log_outcomes([f'failed autodispatch: {e}'])
     log_outcomes([f'finished autodispatch elapsed_s={time.monotonic() - dispatch_started:.3f}'])
     held_error = None
-    held_events = None
+    held_events = ev
+    observer_view = 'initial'
+    observer_excluded = set()
     try:
-        # Keep ev/specs private to dispatch and todo. This read observes even a
-        # partial dispatch pass, under the same tick lock as the append below.
-        held_events = ledger_cache.tail_refresh()
-        _record_next_step_held(held_events, specs, steps, fold.NOW)
+        state = _PASS.get()
+        if loads == 2:
+            observer_view = 'pre-dispatch'
+            observer_excluded = state['launched']
+        elif state['wrote'] or state['launched']:
+            # Retain the existing fresh cached reader when the budget permits.
+            held_events = ledger_cache.tail_refresh()
+            observer_view = 'post-dispatch'
     except Exception as exc:
         held_error = str(exc)
+        held_events = None
+        observer_view = 'unavailable'
+    state['observer_excluded'] = observer_excluded
+    if held_events is not None:
+        try:
+            observer_steps = [step for step in steps if step.item not in observer_excluded]
+            _record_next_step_held(held_events, specs, observer_steps, fold.NOW)
+        except Exception as exc:
+            held_error = str(exc)
     rework_wait_error = None
     rework_wait = None
     try:
@@ -1312,15 +1400,15 @@ def _record():
         recorded_reap = reap_tmp._reap_recorded(ev)
         wt_reaped, wt_retained = tree_cleanup.reap_worktrees(ev)
         for row in wt_reaped:
-            dispatch.emit(tick_path(), {}, "worktree-reaped", subject=row["spec"],
-                          path=row["path"], proof=row["proof"])
+            _committed(dispatch.emit(tick_path(), {}, "worktree-reaped", subject=row["spec"],
+                          path=row["path"], proof=row["proof"]))
         if wt_retained:
             worktrees_retained = len(wt_retained)
     except Exception as e:
         worktree_reap_error = f"{e}"
     try:
         todo = [f"{step.item} · {step.action or 'hold'} · {step.owner} · {fold._step_line(step.reason)}"
-                for step in _steps(ev, specs, fold.NOW) if step.owner == 'executor']
+                for step in pass_steps() if step.owner == 'executor']
     except Exception as exc:
         todo = [f"undetermined: next_steps failed: {type(exc).__name__}"]
     busy = in_flight(ev)
@@ -1331,7 +1419,11 @@ def _record():
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
     kv = {"lane": len(todo), "relay": relay_status,
-          "autodispatch_pass_failed": autodispatch_pass_failed}
+          "autodispatch_pass_failed": autodispatch_pass_failed,
+          "observer_view": observer_view,
+          "observer_excluded": sorted(observer_excluded),
+          "observer_excluded_count": len(observer_excluded),
+          "observer_excluded_reason": "accepted launch in this pass" if observer_excluded else None}
     if relay_status == "wedged":
         try:
             kv["relay_heartbeat_age_s"] = (datetime.now(timezone.utc).timestamp()
@@ -1382,10 +1474,7 @@ def _record():
     except Exception:
         admission = {'admission_error': 'oversize'}
     kv.update(admission)
-    dispatch.emit(tick_path(), {}, "tick", **kv)
-    # A caught sender exception can retain its traceback until cyclic GC.
-    # Release the lock explicitly so that traceback cannot drop the next tick.
-    lock.close()
+    _committed(dispatch.emit(tick_path(), {}, "tick", **kv))
     return todo
 
 

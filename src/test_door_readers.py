@@ -97,6 +97,7 @@ VIRTUAL = {
     'src/guards_live.py': {'read_text': 1},
     'src/ledger_cache.py': {'_members': 1, '_open_binary': 1},
     'src/ledger_gate.py': {'iter_sources': 1},
+    'src/look.py': {'read_text': 1},  # L-spec-2176: raw own-file ledger input.
     'src/merge_deadman.py': {'read_text': 1},
     'src/pane_resume.py': {'read_text': 1},
     'src/realm.py': {'read_text': 2},
