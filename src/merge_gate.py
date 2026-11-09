@@ -496,6 +496,12 @@ def gate(branch, main, grant):
                            reason="merge-conflict" if p.returncode == 1 else "gate-tooling")
     tree = p.stdout.decode().splitlines()[0].strip()
 
+    return _check_tree(main_sha, branch_sha, tree, grant)
+
+
+def _check_tree(main_sha, branch_sha, tree, grant):
+    """The same checks for a plain merge and a receipt-backed resolved tree."""
+
     removed, modified = [], []
     for st, path, dest in diff_names(main_sha, tree):
         if st[0] in "DRT":
@@ -521,6 +527,160 @@ def gate(branch, main, grant):
     exempt = {row["entry"].split("::")[0] for row in LAST_APPEND_ONLY if row["ok"]}
     reverts = [path for path in reverts if path not in exempt]
     return Result(removed, reverts, main_sha, branch_sha, tree)
+
+
+# Execute only the resolver's Git-object classifier in a private process. This
+# gives its inherited Git calls ENV/PINNED parity without changing os.environ
+# underneath another caller. The callback is deliberately ledger-free.
+_RESOLVER_SCRIPT = '''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import rechain
+receipts, proofs = [], []
+original = rechain.git
+def observed(repo, *args, **kw):
+    p = original(repo, *args, **kw)
+    if args[:1] == ('merge-tree',):
+        lines = p.stdout.decode().splitlines()
+        proofs.append([p.returncode, lines[0] if lines else ''])
+    return p
+rechain.git = observed
+def receipt(t, s, **kw):
+    receipts.append(dict(type=t, subject=s, **kw))
+try:
+    commit, reason = rechain.resolve(sys.argv[2], sys.argv[3],
+        tuple(sys.argv[4:7]), sys.argv[7], ev=receipt)
+    result = dict(commit=commit, reason=reason, receipts=receipts, proofs=proofs)
+except Exception as exc:
+    result = dict(error=type(exc).__name__)
+print(json.dumps(result))
+'''
+
+
+def _resolver_call(repo, main_sha, entry, window):
+    env = {k: v for k, v in ENV.items() if not k.startswith('GIT_')}
+    env.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
+    if len(PINNED) % 2 or any(PINNED[i] != '-c' for i in range(0, len(PINNED), 2)):
+        raise Undetermined('cannot bridge pinned Git configuration')
+    env['GIT_CONFIG_COUNT'] = str(len(PINNED) // 2)
+    for n, setting in enumerate(PINNED[1::2]):
+        key, sep, value = setting.partition('=')
+        if not sep:
+            raise Undetermined('cannot bridge pinned Git configuration')
+        env[f'GIT_CONFIG_KEY_{n}'], env[f'GIT_CONFIG_VALUE_{n}'] = key, value
+    # Resolver commands have their existing per-command bounds. The gate checks
+    # its own deadline on both boundaries; it does not promise interruption.
+    p = subprocess.run([sys.executable, '-c', _RESOLVER_SCRIPT,
+        str(pathlib.Path(__file__).resolve().parent), str(repo), main_sha,
+        *entry, window], env=env, capture_output=True)
+    if p.returncode:
+        raise Undetermined('resolver process failed')
+    try:
+        result = json.loads(p.stdout)
+        if not isinstance(result, dict):
+            raise ValueError()
+        return result
+    except (ValueError, UnicodeError):
+        raise Undetermined('resolver returned malformed observations') from None
+
+
+# Diagnostic provenance only: acceptance remains exclusively rechain.resolve's
+# decision. An unknown receipt cannot turn a tooling failure into builder work.
+_RULE_DECLINES = frozenset({
+    'migration lacks literal revision metadata',
+    'manifest does not have exactly one routed head',
+    'allowed revisions must be unique with head last', 'duplicate migration revision',
+    'manifest head disagrees with migration graph', 'disconnected migration graph',
+    'manifest head or successor is inconsistent', 'ambiguous manifest value position',
+    'unrecognised isolation-test branch change', 'old parent literal in another changed file',
+    'conflict outside re-chain allowlist', 'reason addition is not unambiguous',
+    'authority file is missing', 'unrecognised authority change',
+    'authority insertion outside revision set', 'ambiguous authority insertion point',
+    'branch must add exactly one active migration', 'migration requires a single literal parent',
+    'branch manifest and migration disagree', 'unrecognised down_revision assignment',
+    'resolved tree does not have the new single head',
+})
+
+
+def _remaining_deadline():
+    if DEADLINE - (time.monotonic() - _START) <= 0:
+        raise Undetermined('gate deadline exhausted', reason='deadline')
+
+
+def _pinned_inputs(branch, main, main_sha, branch_sha):
+    _remaining_deadline()
+    try:
+        current_main, current_branch = resolve(main), resolve(branch)
+    finally:
+        # Diagnostic verdicts retain the original run's identities too.
+        _RESOLVED[main], _RESOLVED[branch] = main_sha, branch_sha
+    if current_main != main_sha or current_branch != branch_sha:
+        raise Undetermined('input refs moved during dry run', reason='conflict-diagnostic', retryable=False)
+
+
+def _dry_rechain(branch, main, spec):
+    """Return (commit, receipt, decline rule), never cache landing authority."""
+    main_sha, branch_sha = _RESOLVED.get(main), _RESOLVED.get(branch)
+    if not main_sha or not branch_sha or not _TOP:
+        raise Undetermined('no pinned conflict inputs', reason='conflict-diagnostic', retryable=False)
+    _pinned_inputs(branch, main, main_sha, branch_sha)
+    proof = run(('merge-tree', '--write-tree', main_sha, branch_sha))
+    if proof.returncode != 1:
+        raise Undetermined('pinned merge conflict was not confirmed',
+                           reason='conflict-diagnostic', retryable=False)
+    try:
+        lines = [proof.stdout.splitlines()[0].decode('ascii')]
+    except (IndexError, UnicodeError):
+        raise Undetermined('malformed conflict proof', reason='conflict-diagnostic', retryable=False) from None
+    if not lines or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', lines[0]):
+        raise Undetermined('malformed conflict proof', reason='conflict-diagnostic', retryable=False)
+    _remaining_deadline()
+    try:
+        result = _resolver_call(_TOP, main_sha, (spec, branch, branch_sha), 'gate-' + spec)
+    except Exception as exc:
+        _remaining_deadline()
+        if isinstance(exc, Undetermined):
+            raise
+        raise Undetermined('resolver failed', reason='timeout' if isinstance(exc, subprocess.TimeoutExpired)
+                           else 'gate-tooling') from None
+    _remaining_deadline()
+    _pinned_inputs(branch, main, main_sha, branch_sha)
+    error = result.get('error')
+    if error:
+        raise Undetermined('resolver failed', reason='timeout' if error == 'TimeoutExpired' else 'gate-tooling')
+    receipts = result.get('receipts')
+    if not isinstance(receipts, list) or any(not isinstance(r, dict) for r in receipts):
+        raise Undetermined('malformed resolver receipts', reason='conflict-diagnostic', retryable=False)
+    commit, why = result.get('commit'), result.get('reason')
+    rule = None
+    if not commit:
+        ordinary = why == 'no added migration; ordinary conflict' and not receipts
+        if not ordinary:
+            if len(receipts) == 1:
+                row = receipts[0]
+                if (row.get('type') == 'rechain-declined' and row.get('subject') == spec
+                        and row.get('window') == 'gate-' + spec and row.get('branch') == branch):
+                    rule = row.get('rule')
+            if rule == 'TimeoutExpired':
+                raise Undetermined('resolver timeout', reason='timeout')
+            if not isinstance(rule, str) or rule not in _RULE_DECLINES:
+                raise Undetermined('resolver did not prove a rules decline')
+    if result.get('proofs') != [[1, lines[0]]]:
+        raise Undetermined('resolver disagrees with pinned conflict proof',
+                           reason='conflict-diagnostic', retryable=False)
+    if commit:
+        accepted = [r for r in receipts if r.get('type') == 'rechained'
+            and r.get('subject') == spec and r.get('window') == 'gate-' + spec
+            and r.get('branch') == branch and r.get('branch_sha') == branch_sha
+            and r.get('merge_sha') == commit
+            and all(isinstance(r.get(k), str) and r[k].strip() for k in ('old_parent', 'new_parent'))]
+        if (why is not None or len(receipts) != 1 or len(accepted) != 1
+                or not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit)):
+            raise Undetermined('resolved commit lacks matching receipt', reason='conflict-diagnostic', retryable=False)
+        if git('show', '-s', '--format=%P', commit).decode().split() != [main_sha, branch_sha]:
+            raise Undetermined('resolved commit has different inputs', reason='conflict-diagnostic', retryable=False)
+        return commit, {k: accepted[0][k] for k in ('old_parent', 'new_parent')}, None
+    return None, None, rule
 
 
 def _remove_worktree(path):
@@ -549,6 +709,7 @@ def _remove_worktree(path):
 # The gate caller supplies its subject without changing secret_scan's seam.
 from contextvars import ContextVar
 _SCAN_SUBJECT = ContextVar("secret_scan_subject", default=None)
+_DECLINE_RULE = ContextVar("gate_rechain_decline_rule", default=None)
 _SCAN_WALL_END = ContextVar("secret_scan_wall_end", default=None)  # independent of configuration
 
 
@@ -756,10 +917,16 @@ def out_of_grant(branch, main, spec_id):
         raise Undetermined(f"{branch} and {main} are the same commit — there is nothing to gate, "
                            f"and an empty diff is not a clean merge", reason="nothing-to-gate", retryable=False)
     p = run(("merge-tree", "--write-tree", main_sha, branch_sha))
-    if p.returncode:
+    if p.returncode == 1:
+        commit, _, _ = _dry_rechain(branch, main, spec_id)
+        if commit is None:
+            raise Undetermined('resolver declined the conflict', reason='merge-conflict')
+        tree = git('rev-parse', commit + '^{tree}').decode().strip()
+    elif p.returncode:
         raise Undetermined("the merge does not apply cleanly — a conflicted merge is not a gated one",
-                           reason="merge-conflict" if p.returncode == 1 else "gate-tooling")
-    tree = p.stdout.decode().splitlines()[0].strip()
+                           reason="gate-tooling")
+    else:
+        tree = p.stdout.decode().splitlines()[0].strip()
     entries = {entry.split("::")[0]: entry for entry in append_only_list(main_sha)}
     changes = diff_names(main_sha, tree)
     judged = {path: append_only(entries[path], main_sha, tree) for st, path, _ in changes
@@ -778,6 +945,7 @@ def out_of_grant(branch, main, spec_id):
                     continue
                 target += " (append-only ok, revert-shaped)"
             out.append(target)
+    _pinned_inputs(branch, main, main_sha, branch_sha)
     return out
 
 
@@ -997,7 +1165,8 @@ def conflict_event(branch, main, spec):
                  # `attempt:=` — a bare `attempt=1` round-trips as the string "1"
                  # (fold's D-rule: a bare value is a string unless unambiguously JSON)
                  f"attempt:={json.dumps(a.attempt)}", f"verdict={a.verdict}",
-                 f"paths={json.dumps(r.paths)}"])
+                 f"paths={json.dumps(r.paths)}"]
+                + ([f"rule:={json.dumps(_DECLINE_RULE.get())}"] if _DECLINE_RULE.get() else []))
     print(f"merge-gate: conflict — attempt {a.attempt}, {a.verdict} ({spec} on {branch})"
           + (f"\n  paths: {', '.join(r.paths)}" if r.paths else ""))
     return 1
@@ -1115,7 +1284,26 @@ def main_(argv):
         if spec:
             grant = grant_for(spec, grant)
         gate_started = True
-        r = gate(branch, main, grant)
+        rechain_receipt, resolved_commit = None, None
+        try:
+            r = gate(branch, main, grant)
+        except Undetermined as conflict_error:
+            if conflict_error.reason != 'merge-conflict' or not spec:
+                raise
+            resolved_commit, rechain_receipt, rule = _dry_rechain(branch, main, spec)
+            if resolved_commit is None:
+                _remaining_deadline()
+                token = _DECLINE_RULE.set(rule)
+                try:
+                    ev = conflict_event(branch, main, spec)
+                finally:
+                    _DECLINE_RULE.reset(token)
+                if ev is not None:
+                    return ev
+                raise Undetermined('conflict diagnosis failed', reason='conflict-diagnostic', retryable=False)
+            main_sha, branch_sha = _RESOLVED[main], _RESOLVED[branch]
+            tree = git('rev-parse', resolved_commit + '^{tree}').decode().strip()
+            r = _check_tree(main_sha, branch_sha, tree, grant)
         removed, reverts, main_sha, branch_sha, tree = r
         status = "rework" if (removed or reverts) else "clean"
         # R4/gate-secret-scan: only on a run that would OTHERWISE record clean
@@ -1125,7 +1313,7 @@ def main_(argv):
         if status == "clean":
             token = _SCAN_SUBJECT.set(subject)
             try:
-                outcome = secret_scan(_TOP, main_sha, branch_sha)
+                outcome = secret_scan(_TOP, main_sha, resolved_commit or branch_sha)
             finally:
                 _SCAN_SUBJECT.reset(token)
             tooling = _scan_outcome(outcome)
@@ -1136,9 +1324,13 @@ def main_(argv):
                 status = "rework"
         # The shas are the verdict's subject. Without them nothing ties a `clean`
         # to the --no-ff that follows it, and no audit can say what was gated.
+        if resolved_commit:
+            _pinned_inputs(branch, main, main_sha, branch_sha)
         fold.append([f"merge-gate-{status}", subject, f"branch={branch}",
                      f"main_sha={main_sha[:12]}", f"branch_sha={branch_sha[:12]}",
                      f"merged_tree={tree[:12]}", f"repo={_TOP}", f"grant={json.dumps(grant)}"]
+                    + (["rechain_dry_run:=true", f"rechain:={json.dumps(rechain_receipt)}"]
+                       if resolved_commit else [])
                     # a knob that weakens the gate and leaves no trace makes a
                     # doctored `clean` indistinguishable from an honest one
                     + ([f"knobs:={json.dumps(_KNOBS)}"] if _KNOBS else [])
@@ -1159,9 +1351,7 @@ def main_(argv):
     except Undetermined as e:
         if e.reason == "merge-conflict":
             if spec:
-                ev = conflict_event(branch, main, spec)
-                if ev is not None:
-                    return ev
+                # Spec conflicts were routed above only after pinned proof.
                 e = Undetermined("conflict diagnosis failed", reason="conflict-diagnostic", retryable=False)
             else:
                 import conflict

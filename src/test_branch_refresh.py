@@ -515,8 +515,9 @@ class TestAC8(unittest.TestCase):
         for name in ('merge_gate', 'dispatch_builder', 'attempts'):
             introduced = subprocess.check_output(['git', 'log', '--diff-filter=A', '--format=%H', '--',
                                                    'src/branch_refresh.py'], cwd=repo, text=True).splitlines()
-            base = os.environ.get('BRANCH_REFRESH_TEST_BASE') or (introduced[0] + '^' if introduced else 'HEAD')
-            diff = subprocess.check_output(['git', 'diff', '--numstat', base, '--', 'src/' + name + '.py'], cwd=repo, text=True).split()
+            self.assertTrue(introduced, 'branch_refresh.py must have an introducing commit')
+            diff = subprocess.check_output(['git', 'diff', '--numstat', introduced[0] + '^',
+                                            introduced[0], '--', 'src/' + name + '.py'], cwd=repo, text=True).split()
             added, removed = map(int, diff[:2]) if diff else (0, 0)
             self.assertLessEqual(added, 20)
             rows[name] = dict(added=added, net=added-removed)
