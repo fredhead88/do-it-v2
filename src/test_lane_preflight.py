@@ -74,7 +74,7 @@ class AdapterTests(unittest.TestCase):
                     and k not in ("DATABASE_URL", "GITHUB_ENV", "GITHUB_PATH", "PYTHONPATH")}
         self.env.update(PREFLIGHT_DOIT=str(self.stub), PREFLIGHT_OUT=str(self.home / "out"),
                         PREFLIGHT_WT=str(self.home / "scratch"), CALLS=str(self.calls))
-        self.script("echo clean; exit 0")
+        self.script("echo 'PREFLIGHT-CLEAN guards cpu_s=0 wall_s=0'; exit 0")
 
     def script(self, body):
         self.stub.write_text('#!/bin/bash\n'
@@ -104,6 +104,11 @@ class AdapterTests(unittest.TestCase):
         held = self.run_adapter("0001")
         self.assertIn("NEW-FAILURES:\nRUN-BROKEN: PREFLIGHT-UNDETERMINED guards base-red tests/x.py::t\nDONE", held)
         self.assertNotIn("NO-NEW-FAILURES", held)
+        # SD21: exit 0 alone is not a completed clean sweep; the clean line must be there.
+        self.script("echo clean; exit 0")
+        unfinished = self.run_adapter("0001")
+        self.assertIn("RUN-BROKEN:", unfinished)
+        self.assertNotIn("NO-NEW-FAILURES", unfinished)
         self.script("exit 7")
         silent = self.run_adapter("0001")
         self.assertIn("RUN-BROKEN:", silent)
