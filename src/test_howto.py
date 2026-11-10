@@ -98,6 +98,7 @@ class HowtoTests(unittest.TestCase):
         again = ' '.join(howto.render(str(self.repo)).split())
         self.assertIn('at most 2 CI runs at once', again)
         self.assertIn('reused for 6 hours', again)
+        self.assertIn('`src/prequeue.py` (`doit prequeue`)', again)
 
     def test_token_health_text(self):
         page = howto.render(str(REPO))

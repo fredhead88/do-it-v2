@@ -10,6 +10,7 @@ case "${1:-board}" in
   migration-order) shift; exec python3 "$SRC/lane_rules.py" --migration-order "$@" ;;
   precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
+  prequeue) shift; exec python3 "$SRC/prequeue.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   guards-live) shift; exec python3 "$SRC/guards_live.py" "$@" ;;
   merge-news) shift; exec python3 "$SRC/merge_news.py" "$@" ;;

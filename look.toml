@@ -135,3 +135,9 @@ reviewer = 30
 builder = 90
 spec-writer = 30
 spec-auditor = 15
+
+# Observe verdicts before the queue starts enforcing them.
+[prequeue]
+enforce = false
+wall_cap_s = 900
+load_max = 15
