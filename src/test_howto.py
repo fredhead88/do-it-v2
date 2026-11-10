@@ -92,6 +92,7 @@ class HowtoTests(unittest.TestCase):
     def test_member_verdict_section_follows_look_toml(self):
         page = howto.render(str(self.repo))
         self.assertIn('## Member verdicts', page)
+        self.assertIn('`src/window_dispatch.py`: predeploy tree, window, suite, quick ids', ' '.join(page.split()))
         self.assertIn('at most 4 CI runs at once', page)
         self.assertIn('reused for 24 hours', ' '.join(page.split()))
         self.write('look.toml', '[merge_queue]\nmember_verify_parallel = 2\nverdict_fresh_hours = 6\n')

@@ -1443,8 +1443,8 @@ def rerun_checks():
         fx.events_path_seen = False
         with (patch.object(window_gate, "git", side_effect=git) if failure == "tree" else
               patch.object(fold, "read_events", side_effect=unreadable)):
-            check(fx.go() == 0 and len(fx.calls()) == 1, "lookup failure dispatches " + failure)
-    response("tree_of_failure_dispatches", ["AC5"], {"tree_failure_dispatches": 1, "ledger_failure_dispatches": 1})
+            check(fx.go() == (2 if failure == "tree" else 0) and len(fx.calls()) == (0 if failure == "tree" else 1), "lookup failure dispatches " + failure)
+    response("tree_of_failure_dispatches", ["AC5"], {"tree_failure_dispatches": 0, "ledger_failure_dispatches": 1})
 
     # Full-CI bisection was replaced by independent targeted probes. Re-use
     # this real-git fixture to prove all unaffected specs ship together only
@@ -1729,7 +1729,7 @@ def train_checks():
             rc = fx.go()
         mark("no poll depth1", rc == 0 and not poll.called)
         params = inspect.signature(window_gate.verify).parameters
-        mark("verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal"]
+        mark("verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal", "tree", "quick"]
              and params["rehearsal"].kind == inspect.Parameter.KEYWORD_ONLY
              and params["rehearsal"].default is False)
 
@@ -2000,7 +2000,7 @@ def scope_checks():
     mark("AC2", "python-only no pg dispatch", not (fx.fdir / "base-calls").exists() and
          all(window_gate.PG_CHECK not in call for call in fx.calls()), fx.calls())
     params = inspect.signature(window_gate.verify).parameters
-    mark("AC2", "verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal"]
+    mark("AC2", "verify rehearsal keyword defaults off", list(params) == ["repo", "cand", "required", "window", "rehearsal", "tree", "quick"]
          and params["rehearsal"].kind == inspect.Parameter.KEYWORD_ONLY
          and params["rehearsal"].default is False)
     mark("AC6", "window-verified scope fields", event["scope"] == ["pytest"] and

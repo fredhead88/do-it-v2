@@ -44,6 +44,7 @@ import rechain
 import quarantine
 import window_prewindow
 import window_members
+import window_dispatch
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -826,79 +827,13 @@ def parse_verdict(out):
         url = m.group(0) if m else ""
     return doc, nodes, url
 
-def verify(repo, cand, required, window, *, rehearsal=False): return __import__("ci_infra").verify_with_rerun(_verify_once, ev, repo, cand, required, window, rehearsal=rehearsal)
-def _verify_once(repo, cand, required, window, *, rehearsal=False):
-    """-> dict(state=green|red|undetermined, nodes, url, doc). Anything that is not
-    an unambiguous green is not green."""
-    script = os.environ.get("DOIT_WINDOW_PREDEPLOY") or str(repo / PREDEPLOY)
-    ref = f"ci-verify/{cand[:12]}-win{os.getpid()}"
-    env = {**os.environ, "PREDEPLOY_GATE_CI_ONLY": "1", "PREDEPLOY_GATE_ONLY_GREEN": "1",
-           "PREDEPLOY_GATE_DEPLOY_SHA": cand, "PREDEPLOY_GATE_REPO_ROOT": str(repo),
-           "PREDEPLOY_GATE_CI_CHECKS": "\n".join(required),
-           "PREDEPLOY_GATE_REQUIRED_CHECKS": "\n".join(required)}
-    dispatch_minutes = dispatch_timeout_min(env)
-    env["PREDEPLOY_GATE_DISPATCH_TIMEOUT_MIN"] = (str(int(dispatch_minutes)) if dispatch_minutes.is_integer()
-                                                 else str(dispatch_minutes))
-    timeout = verify_timeout_secs(env)
-    # Ephemeral ci-verify ref: skip the repo pre-push guardrails (fix-the-fix breaker walks every
-    # pushed fix: commit and exceeded the 60s git timeout on multi-branch windows, 2026-10-16).
-    push = git(repo, "push", "--no-verify", "origin", f"{cand}:refs/heads/{ref}", check=False)
-    pushed = push.returncode == 0
-    try:
-        if not pushed:
-            return dict(state="undetermined", nodes=[], url="", doc={}, why="could not push the ci-verify ref: " + push.stderr[:200])
-        proc = subprocess.Popen(["bash", script], cwd=str(repo), env=env, text=True, start_new_session=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        try:
-            train = _VERIFY_TRAIN.get()
-            if train is None or train["window"] != window:
-                out, _ = proc.communicate(timeout=timeout)
-            else:
-                deadline = time.monotonic() + timeout
-                while True:
-                    reason = predecessor_state(**{k: v for k, v in train.items() if k != "window"})
-                    if reason:
-                        raise TrainCancelled(reason)
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        raise subprocess.TimeoutExpired(proc.args, timeout)
-                    try:
-                        out, _ = proc.communicate(timeout=min(train_poll_secs(), left))
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-        except TrainCancelled:
-            stop_verification(proc)
-            raise
-        except subprocess.TimeoutExpired:
-            stop_verification(proc)
-            return dict(state="undetermined", nodes=[], url="", doc={}, why=f"verification timed out after {timeout:.0f}s")
-        doc, nodes, url = parse_verdict(out)
-        checks = doc.get("checks")
-        # predeploy_gate.sh (L-spec-0764) reports each check as {"state": "ran", "run_id", "url"};
-        # older fixtures use the bare string "ran". Accept both: a shape mismatch here turned
-        # every green CI verdict into a red window with nodes=[] (windows 0101 and 0201, 2026-10-10).
-        def _ran(v):
-            return v == "ran" or (isinstance(v, dict) and v.get("state") == "ran")
-        all_ran = (isinstance(checks, dict) and all(_ran(checks.get(c)) for c in required))
-        pg_failed, pg_failures = False, {}
-        if all_ran and PG_CHECK in required:
-            try:
-                pg_failed, pg_failures = pg_result(repo, doc, rehearsal=rehearsal)
-            except RuntimeError as e:
-                return dict(state="undetermined", nodes=[], url=url, doc=doc, why=str(e))
-        detail = dict(pg_failed=pg_failed, pg_failures=pg_failures, other_nodes=list(nodes), output=out)
-        nodes = list(dict.fromkeys(nodes + list(pg_failures)))
-        if proc.returncode == 0 and all_ran and not nodes and not pg_failed and doc.get("verdict", "green") == "green":
-            return dict(state="green", nodes=[], url=url, doc=doc, **detail)
-        if proc.returncode == 2 or (proc.returncode == 0 and not doc):
-            return dict(state="undetermined", nodes=nodes, url=url, doc=doc,
-                        why=f"gate exit {proc.returncode}: " + (out.strip().splitlines() or [""])[-1][:200], **detail)
-        return dict(state="red", nodes=nodes, url=url, doc=doc,
-                    why=f"gate exit {proc.returncode}", **detail)
-    finally:
-        if pushed:
-            git(repo, "push", "--no-verify", "origin", f":refs/heads/{ref}", check=False)
+def verify(repo, cand, required, window, *, rehearsal=False, tree=None, quick=()):
+    return __import__("ci_infra").verify_with_rerun(
+        lambda *a, **k: _verify_once(*a, **k, **({} if tree is None and not quick else dict(tree=tree, quick=quick))), ev, repo, cand, required, window, rehearsal=rehearsal)
+def _verify_once(repo, cand, required, window, *, rehearsal=False, tree=None, quick=()):
+    """Verify through the shared subprocess boundary, retaining legacy defaults."""
+    return window_dispatch.verify(sys.modules[__name__], repo, cand, required, window,
+                                  rehearsal=rehearsal, tree=tree, quick=quick)
 
 
 def stop_verification(proc):
@@ -1682,7 +1617,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             flakes_all.update(prior.get("flakes", []))
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
-        res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        with window_dispatch.managed(tree):
+            res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
         ev('window-verification-result', window, state=res['state'], first_run=judgments == 1,
            sha=cand, specs=kept, nodes=res.get('nodes', []))
         try:
