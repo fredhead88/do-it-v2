@@ -329,8 +329,14 @@ def manual_dispatch_violations(events) -> list[dict]:
     return [{k: e.get(k) for k in ("subject", "role", "ts", "reason")}
             for e in events if e.get("type") == "manual-dispatch"]
 
+def _own_group(cmd):
+    """The builder (claude `--agent builder`, or codex full access) launches in its own process group."""
+    return "danger-full-access" in cmd or cmd[2:4] == ["--agent", "builder"]
+
 def run_claude(cmd, packet, cwd, timeout):
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "DOIT_LEDGER_FILE")}   # no meter to fall through to
+    if _own_group(cmd):   # builder: own process group, so a timeout can prove the writer stopped (L-spec-2284)
+        return __import__("wip_resume").run_group(cmd, packet, cwd, env, timeout)
     return subprocess.run(cmd, input=packet, capture_output=True, text=True, cwd=cwd,
                           env=env, timeout=timeout)
 
@@ -341,6 +347,8 @@ CODEX_WRITES = ("builder", "spec-writer", "research", "reuse-scout", "probe", "r
 def run_codex_exec(cmd, packet, cwd, timeout):
     """The one subprocess the codex backend runs. Neither vendor's metered key is in the environment: the spawn draws the ChatGPT plan or it fails loudly."""
     env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DOIT_LEDGER_FILE")}
+    if _own_group(cmd):
+        return __import__("wip_resume").run_group(cpu_share.niced(cmd), packet, cwd, cpu_share.launch_env(env, ROOT), timeout)
     return subprocess.run(cpu_share.niced(cmd), input=packet, capture_output=True, text=True, cwd=cwd, env=cpu_share.launch_env(env, ROOT), timeout=timeout)
 
 
@@ -659,6 +667,7 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
             if elapsed > window:
                 raise Unserved(spawn, claim_p, elapsed)
         elif clock() - claim_t > timeout:
+            spawns.restore_sigterm(prev_term)
             raise subprocess.TimeoutExpired(cmd, timeout)
         sleep(2)
     spawns.restore_sigterm(prev_term)
@@ -1559,6 +1568,11 @@ def _main(a):
         cmd += ["--mcp-config", a.mcp_config]
     seat = backend == "seat"
     backend_ran = True
+    start_head = getattr(a, "start_head", None)   # set by builder admission, after any resume rebase
+
+    def timed_out(exc, on_seat, tail=""):
+        note = __import__("wip_resume").on_timeout(sys.modules[__name__], a, cwd, ledger, base, spawn, start_head, exc, on_seat) if builder else ""
+        fail(f"timeout after {a.timeout or tmin} min{tail}" + (f"; {note}" if note else ""), reason="timeout", backend_failure=True, exit_code=124)
     try:
         if backend == "codex":
             r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
@@ -1568,8 +1582,8 @@ def _main(a):
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view)
         else:
             r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
-    except subprocess.TimeoutExpired:
-        fail(f"timeout after {a.timeout or tmin} min", reason="timeout", backend_failure=True, exit_code=124)
+    except subprocess.TimeoutExpired as exc:
+        timed_out(exc, seat)
     except (Unserved, spawns.Cancelled) as e:
         spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
                                     spawn, grading_view)
@@ -1592,8 +1606,8 @@ def _main(a):
             r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view) if seat \
                 else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
-        except subprocess.TimeoutExpired:
-            fail(f"timeout after {a.timeout or tmin} min (on the fallback backend {backend})", reason="timeout", backend_failure=True, exit_code=124)
+        except subprocess.TimeoutExpired as exc:
+            timed_out(exc, seat, f" (on the fallback backend {backend})")
         except (Unserved, spawns.Cancelled) as e:
             spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
                                         spawn, grading_view)

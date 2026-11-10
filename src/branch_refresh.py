@@ -573,7 +573,8 @@ def dispatch_preflight(runtime, a, cwd, events, fail):
     # Initial, unbuilt branches retain the existing builder admission contract.
     completed = any(e.get('subject') == a.subject and e.get('type') == 'build-done'
                     and e.get('status') == 'DONE' for e in events)
-    if not completed:
+    # An applicable build-timeout is incomplete work: never adopted, recut or re-gated.
+    if not completed or __import__('wip_resume').applicable_timeout(events, a.subject):
         return False
     if git(cwd, 'merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD', check=False).returncode == 0:
         return True
