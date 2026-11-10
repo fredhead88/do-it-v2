@@ -793,6 +793,53 @@ def commit_shape_events(subject, status, pinned, ready_sha, worktree, *, events=
     return [("rejected-criterion", dict(criterion="COMMIT-SHAPE",
                                         why=f"{count_desc} commits above {pinned}"))]
 
+
+def _committed_head(worktree):
+    try:
+        r = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q", "HEAD^{commit}"], capture_output=True, text=True, timeout=30)
+        return r.stdout.strip().lower() if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", r.stdout.strip()) else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+def _ledger_lines(root):
+    """{file name: line count} of the ledger under root, read straight from disk (not the reader's meter door)."""
+    try:
+        return {f.name: len(f.read_text().splitlines()) for f in (pathlib.Path(root) / "events").glob("*.jsonl")}
+    except OSError:
+        return None
+def _merge_new_rows(root, before):
+    """Rows another writer (handin_check) appended during the check join this invocation's view as the reader would see them."""
+    view = _active_view.get()
+    if view is None or not view.loaded:
+        return
+    import fold
+    try:
+        if before is None:
+            view.loaded = False          # unknown prior state: next current() re-reads
+            return
+        for f in sorted((pathlib.Path(root) / "events").glob("*.jsonl")):
+            lines = f.read_text().splitlines()
+            for n in range(before.get(f.name, 0), len(lines)):
+                event = __import__("ledger_compact").compact(json.loads(lines[n]))
+                event["actor"] = fold.actor_of(f.name)
+                event["_src"] = f"{f.name}:{n + 1}"
+                view.committed(event)
+    except (OSError, ValueError, KeyError, TypeError):
+        view.loaded = False
+def handin_verdict(out, subject, worktree, *, root=None):
+    """L-spec-2209: "clean", "secret-scan" or "undetermined"; trusted only if HEAD before and after == identity.ready_sha."""
+    root = root if root is not None else ROOT
+    before = _ledger_lines(root)
+    try:
+        ready, pre = str(out["identity"]["ready_sha"]).lower(), _committed_head(worktree)
+        res = __import__("handin_check").run(worktree, subject, root=root)
+        ok, failed, post = res.ok, res.failed_check, _committed_head(worktree)
+        if len(ready) >= 7 and pre and pre == post and pre.startswith(ready):
+            return "clean" if ok is True and failed is None else "secret-scan" if ok is False and failed == "secret-scan" else "undetermined"
+        return "undetermined"
+    except (Exception, SystemExit):
+        return "undetermined"
+    finally:
+        _merge_new_rows(root, before)    # handin_check appends its own handin-checked row outside this invocation's view
 def events_for(role, out, a, base, *, events=None):
     """Output object → the events the contract names. Declarations become events typed by the term."""
     decl = [(d["term"], {k: v for k, v in d.items() if k != "term"}) for d in out.get("declarations", [])]
@@ -924,6 +971,9 @@ def events_for(role, out, a, base, *, events=None):
         if getattr(a, "pinned_base_sha_explicit", False):
             bd_kv["base_sha_explicit"] = True
         bd_kv.update(__import__("build_readiness").build_done_fields(out))
+        handin = getattr(a, "_handin", None)     # set by _main's completion guard
+        if out["status"] == "DONE" and handin in ("clean", "undetermined"):
+            bd_kv.update(handin_check=handin, **({"handin_reason": "handin-check:undetermined"} if handin == "undetermined" else {}))
         ev.append(("build-done", bd_kv))
         ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd, events=current_events(events))
         for d in out["deviations"]:
@@ -933,7 +983,9 @@ def events_for(role, out, a, base, *, events=None):
                 ev.append(("adr-filed", dict(adr=e["adr"], kind="architecture")))
             ev.append(("build-deviation", e))
         ev += [("build-stub", s) for s in out["stubs"]]
-        if out["status"] == "BLOCKED":
+        if out["status"] == "BLOCKED" and handin == "secret-scan":
+            ev.append(("build-blocked", dict(reason="handin-check:secret-scan")))
+        elif out["status"] == "BLOCKED":
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"))))
     elif role in ("owed-sweeper", "owed-verifier"):
@@ -1689,6 +1741,8 @@ def _main(a):
         if not exists:
             fail(f"nothing at {p} — the model reported {out.get('status') or out.get('answered')} "
                  "with no file on disk (D120 W3)")
+    if builder and out.get("status") == "DONE":   # L-spec-2209: one independent hand-in check for every backend route
+        a._handin = handin_verdict(out, a.subject, a.cwd, root=ROOT); out = {**out, "status": "BLOCKED"} if a._handin == "secret-scan" else out
     # Repo movement across a non-builder spawn is an observation, not a verdict: the Executor merges into the very directory a concurrent spec-writer or spec-auditor was handed as --cwd, and voiding that audit lost three correct runs to hand-repair. Two things are still hard failures, because they are a broken observation rather than concurrency: an after-snapshot that cannot be read at all, and the repository itself coming or going under --cwd.
     moved = None
     if not builder:
