@@ -413,6 +413,44 @@ producer gets a validated single-id dependency hold; missing/ambiguous inputs,
 coupled tests outside Writes, unavailable dependencies, or a failing base
 Verification chain bounce as spec-shape-failed for the writer to correct.
 
+## Telegram activation and restore
+
+Run `doit telegram-cutover --dry-run` first from the installed checkout. Actual
+activation waits for all charter waves, including daily-carries-the-rest, to
+merge. Q-A concerns who runs the command, not a code or authorization branch:
+the default is the operator at the next agreed activation time (Israel time),
+unless the operator delegates execution. The operator's 08:05 Israel-time go on 2026-11-06
+is the commissioning source; Q-A does not waive the full-wave prerequisite.
+
+SD23 accepts producer inbox, merge-news and daily cron rows installing at ship.
+Cutover backs up their actual current form, including already-installed rows.
+Only the explicit `doit telegram-cutover` command installs SD17 live files.
+Its first live step atomically replaces only rloop.sh, then runs unchanged
+restart-driver.sh with no arguments from the push directory. The helper alone
+writes rloop.run.sh. Success requires helper exit zero, byte equality of source
+and execution copy, and a running execution-copy driver. Refusal restores the
+pre-attempt source, removes rq/stop, and calls the helper once more only if no
+execution-copy process remains. Even successful recovery returns failure:
+run again later. No batch is signalled and no idle-window hold applies.
+
+After installation, SD17 requires the prior managed poller to exit and unchanged
+tg-keepalive.sh to start a fresh process using the installed repo source. The
+180-second provenance check precedes ordinary `doit tg-check`. SD19 retires
+only tg-gate.py and tg-daily.py cron invocations after that gate exits zero;
+SD22 writes state/tg-cutover-done with daily retirement. Failure retains the
+stopgaps; a failed gate also restores the prior tg-send.sh path. Diagnostics
+from tg-check remain visible; no --offbox prerequisite or exemption applies.
+The retained root thinker-inbox.py is a symlink to the versioned inbox, so
+`python3 ~/.do-it/thinker-inbox.py --list` and its printed path remain valid.
+
+Use `doit telegram-cutover --revert` for explicit runtime restoration after
+success or partial failure. It reads the protected durable pre-image in
+state/telegram-cutover, runs SD21 first against the original loop source, then
+restores files, links, modes and the captured crontab, removes the marker and
+confirms a fresh keepalive-started poller using the restored source. A refused
+revert retains the current installation with the same bounded loop recovery.
+Repository reversion does not restore a runtime installation.
+
 ## Lessons (operator rule, 2026-09-22)
 
 The system is being dialled in, and the record of what to change is the ledger, not anyone's
@@ -430,7 +468,7 @@ brief you append is already harvested; a `lesson` is for what those do not say â
 
 ## Waiting on the Thinker (operator rule, 2026-10-11)
 
-Anything you need from the Thinker is a ledger `question` or `escalation-blocking`, with asks, default and deadline, on the subject that is blocked. It is never only a sentence in your own pane: nobody reads your pane. `~/.do-it/thinker-inbox.py` runs every 5 minutes. It delivers each open item to the Thinker pane, and to the operator on Telegram if it is unanswered for 60 minutes. The Thinker answers with a `decision` carrying `ref=<your event's src>`, which closes it on the board and in the realm. Before you write "waiting on the Thinker" anywhere, check that the item exists: `python3 ~/.do-it/thinker-inbox.py --list`. If a decision has already landed on the subject, act on it; do not wait.
+Anything you need from the Thinker is a ledger `question` or `escalation-blocking`, with asks, default and deadline, on the subject that is blocked. It is never only a sentence in your own pane: nobody reads your pane. `~/.do-it/thinker-inbox.py` runs every 5 minutes through its retained link to the versioned inbox. It delivers each open item to the Thinker pane; Telegram heads-up is for operator-owned items or items unanswered for over 240 minutes. The Thinker answers with a `decision` carrying `ref=<your event's src>`, which closes it on the board and in the realm. Before you write "waiting on the Thinker" anywhere, check that the item exists: `python3 ~/.do-it/thinker-inbox.py --list`. If a decision has already landed on the subject, act on it; do not wait.
 
 
 Window escalation defaults (operator GO 2026-11-01): on a `win-*`/`window-*` escalation, a trusted machine-readable decision must name the escalation's exact `ref` and carry a validated `ruling`. `doit append` refuses prose-only or invalid window rulings and prints a JSON ruling template. After 30 minutes without such a ruling, tick owns `window-default`: gate-attributed specs remain dropped; unattributed members receive `window-dropped reason=escalation-default disposition=requeue` with failing ids, followed by a fresh queue entry. Tick closes the escalation and records `window-cancelled reason=escalation-default`. Do not hand-append its disposition. This cancellation frees admission; it does not ship an unverified tree.

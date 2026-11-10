@@ -244,6 +244,44 @@ them. The newest action-bearing ruling restarts its own 30-minute clock;
 an ordinary action-less decision does not supersede it. Record decisions
 only: the executor carries out the act through the existing guarded seams.
 
+## Telegram activation and restore
+
+Run `doit telegram-cutover --dry-run` first from the installed checkout. Actual
+activation waits for all charter waves, including daily-carries-the-rest, to
+merge. Q-A concerns who runs the command, not a code or authorization branch:
+the default is the operator at the next agreed activation time (Israel time),
+unless the operator delegates execution. The operator's 08:05 Israel-time go on 2026-11-06
+is the commissioning source; Q-A does not waive the full-wave prerequisite.
+
+SD23 accepts producer inbox, merge-news and daily cron rows installing at ship.
+Cutover backs up their actual current form, including already-installed rows.
+Only the explicit `doit telegram-cutover` command installs SD17 live files.
+Its first live step atomically replaces only rloop.sh, then runs unchanged
+restart-driver.sh with no arguments from the push directory. The helper alone
+writes rloop.run.sh. Success requires helper exit zero, byte equality of source
+and execution copy, and a running execution-copy driver. Refusal restores the
+pre-attempt source, removes rq/stop, and calls the helper once more only if no
+execution-copy process remains. Even successful recovery returns failure:
+run again later. No batch is signalled and no idle-window hold applies.
+
+After installation, SD17 requires the prior managed poller to exit and unchanged
+tg-keepalive.sh to start a fresh process using the installed repo source. The
+180-second provenance check precedes ordinary `doit tg-check`. SD19 retires
+only tg-gate.py and tg-daily.py cron invocations after that gate exits zero;
+SD22 writes state/tg-cutover-done with daily retirement. Failure retains the
+stopgaps; a failed gate also restores the prior tg-send.sh path. Diagnostics
+from tg-check remain visible; no --offbox prerequisite or exemption applies.
+The retained root thinker-inbox.py is a symlink to the versioned inbox, so
+`python3 ~/.do-it/thinker-inbox.py --list` and its printed path remain valid.
+
+Use `doit telegram-cutover --revert` for explicit runtime restoration after
+success or partial failure. It reads the protected durable pre-image in
+state/telegram-cutover, runs SD21 first against the original loop source, then
+restores files, links, modes and the captured crontab, removes the marker and
+confirms a fresh keepalive-started poller using the restored source. A refused
+revert retains the current installation with the same bounded loop recovery.
+Repository reversion does not restore a runtime installation.
+
 ## Lessons (operator rule, 2026-09-22; problem field added 2026-09-24)
 
 The system is being dialled in, and the record of what to change is the ledger, not anyone's
