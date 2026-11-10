@@ -23,6 +23,7 @@ import dispatch
 import fold
 import pace
 import stall_sample
+from test_spec_preflight_reads import MODES, NOW as SEED_NOW, cache_mode, seed
 
 NOW = datetime(2026,10,28,12,tzinfo=timezone.utc)
 REPO = Path(__file__).resolve().parent.parent
@@ -52,6 +53,10 @@ def fixture(root, prefix, cap):
 fixture(A,'910',6)
 
 
+# Frozen from the unmodified base sampler (0eeb8ff, real reference parser).
+FROZEN_SAMPLE = '{"ts": "2026-11-01T00:00:00Z", "buckets": {"STUCK": ["L-spec-9405"]}, "hold_kinds": {}, "builder_capacity": 7, "ok": true}'
+
+
 class StallTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(dir=TEMP.name)
@@ -73,6 +78,45 @@ class StallTests(unittest.TestCase):
     def reader(self, root, since='2000-01-01T00:00:00Z'):
         code = 'import stall_sample,pace,json,sys; from pathlib import Path; print(json.dumps(stall_sample.samples(pace._time(sys.argv[2]),root=Path(sys.argv[1]))))'
         return json.loads(subprocess.check_output(['/usr/bin/python3','-c',code,str(root),since],cwd=REPO/'src',text=True))
+
+    def test_cache_modes_and_busy_roundtrip(self):
+        seeded = self.root.parent/'S'
+        seed(seeded)
+        original = (fold.ROOT, fold.EVENTS, fold.BOARD, fold.NOW, dispatch.ROOT,
+                    dispatch.EVENTS, dispatch.CONTENT, list(fold.APPLIED))
+        tree = lambda: {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for d in ('events', 'content') for p in sorted((seeded/d).iterdir())}
+        before = tree()
+        scope = lambda root: {'scope': str(root)}
+        expected = {}
+        for mode in MODES:
+            for root in (seeded, self.root, seeded, A):
+                with cache_mode(mode, root) as calls:
+                    row = stall_sample.sample(SEED_NOW, root=root)
+                pattern = [scope(root)] + ([{'use_cache': False, 'scope': str(root)}] if mode == 'busy' else [])
+                self.assertEqual(calls, pattern, (mode, root))
+                self.assertTrue(row['ok'], row)
+                self.assertNotIn('reason', row)
+                self.assertEqual(json.dumps(row), expected.setdefault(root, json.dumps(row)), (mode, root))
+                self.assertEqual((fold.ROOT, fold.EVENTS, fold.BOARD, fold.NOW, dispatch.ROOT,
+                                  dispatch.EVENTS, dispatch.CONTENT, list(fold.APPLIED)), original)
+            if mode == 'cold':
+                self.assertTrue(any((seeded/'cache').iterdir()))
+        self.assertEqual(expected[seeded], FROZEN_SAMPLE)
+        self.assertTrue(json.loads(FROZEN_SAMPLE)['buckets'])
+        # A fresh process consumes the cache the cold production read committed.
+        code = ('import json,sys,pace,stall_sample; from pathlib import Path; '
+                'print(json.dumps(stall_sample.sample(pace._time(sys.argv[2]),root=Path(sys.argv[1]))))')
+        fresh = subprocess.check_output(['/usr/bin/python3', '-c', code, str(seeded), SEED_NOW.isoformat()],
+                                        cwd=REPO/'src', text=True,
+                                        env=dict(os.environ, DOIT_ROOT=str(seeded))).strip()
+        self.assertEqual(fresh, FROZEN_SAMPLE)
+        # Busy record writes the retained row through production code; another process reads it.
+        with cache_mode('busy', seeded):
+            saved = stall_sample.record(SEED_NOW, root=seeded)
+        self.assertEqual(json.dumps(saved), FROZEN_SAMPLE)
+        self.assertEqual(self.reader(seeded), [saved])
+        self.assertEqual(tree(), before)
 
     def test_grouping(self):
         original = (fold.ROOT,fold.EVENTS,dispatch.CONTENT,list(fold.APPLIED))

@@ -20,6 +20,9 @@ os.environ.update(HOME=str(BASE / "home"), DOIT_ROOT=str(BASE / "root"),
                   DOIT_SCRATCH=str(BASE / "scratch"))
 import spec_preflight as sp
 import fold
+import dispatch
+import ledger_cache
+import stall_sample
 
 NOW = datetime.now(timezone.utc)
 
@@ -438,6 +441,68 @@ def AC2046():
     assert calls == ["L-spec-9300"], calls
     assert "deferred=2" in output.getvalue() and "L-spec-9301, L-spec-9302" in output.getvalue(), output.getvalue()
     assert len([e for e in sp._events(budget.root) if e["type"] == "spec-preflight"]) == 1
+
+
+def AC12():
+    """Busy-cache fallback: success when the reference parser answers, failure otherwise."""
+    import hashlib
+    import io
+
+    f = Fixture()
+    f.spec(sid="L-spec-9501")
+    tree = lambda: {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for d in ("events", "content") for p in sorted((f.root / d).iterdir())}
+    scoped = lambda: (fold.ROOT, fold.EVENTS, fold.PROJECT, fold.NOW, fold.BOARD, dispatch.ROOT,
+                      dispatch.EVENTS, dispatch.CONTENT, list(fold.APPLIED))
+    busy = mock.patch.object(ledger_cache, "read", side_effect=ledger_cache.LockTimeout("fixture busy"))
+    reentrant = mock.patch.object(ledger_cache, "read", side_effect=ledger_cache.ReentrantRead("fixture reentrant"))
+    original, before = scoped(), tree()
+    real_uncached = fold._read_events_uncached
+
+    def tick():
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            return sp.tick(root=f.root, now=NOW), out.getvalue(), err.getvalue()
+
+    # Busy cache then a failing reference parser stays a failure, never empty data.
+    with busy, mock.patch.object(fold, "_read_events_uncached", side_effect=OSError("reference unavailable")) as ref:
+        body = sp.run("L-spec-9501", root=f.root, now=NOW)
+        assert body["undetermined"] and body["undetermined"][0].startswith("spec: "), body
+        assert ref.call_count == 1
+        code, _, err = tick()
+        assert code == 2 and err.startswith("preflight ledger unavailable: "), (code, err)
+        assert ref.call_count == 2
+        row = stall_sample.sample(NOW, root=f.root)
+        assert row["ok"] is False and row["buckets"] == {} and row["hold_kinds"] == {}, row
+        assert row["reason"].startswith("OSError: "), row
+        assert ref.call_count == 3
+    assert scoped() == original and tree() == before
+
+    # ReentrantRead is a caller bug: no reference retry, and it stays visible.
+    with reentrant, mock.patch.object(fold, "_read_events_uncached", side_effect=real_uncached) as ref:
+        for call in (lambda: sp.run("L-spec-9501", root=f.root, now=NOW), lambda: sp._events(f.root), tick):
+            try:
+                call()
+            except ledger_cache.ReentrantRead:
+                pass
+            else:
+                raise AssertionError("ReentrantRead was swallowed")
+        row = stall_sample.sample(NOW, root=f.root)
+        assert row["ok"] is False and row["reason"].startswith("ReentrantRead: "), row
+        assert ref.call_count == 0
+    assert scoped() == original and tree() == before
+
+    # A busy cache with a working reference parser succeeds; the production append commits.
+    with busy:
+        code, out, err = tick()
+    assert code == 0 and err == "" and "processed=1" in out, (code, out, err)
+    code = ("import json,sys,fold; print(json.dumps([e for e in fold.read_events(use_cache=False) "
+            "if e.get('type') == 'spec-preflight']))")
+    committed = json.loads(proc(["/usr/bin/python3", "-c", code], cwd=SOURCE,
+                                env={**os.environ, "DOIT_ROOT": str(f.root)}))
+    assert [(e["subject"], e["project"], e["spec"]) for e in committed] == \
+        [("L-spec-9501", "do-it-v2", "L-spec-9501")], committed
+    assert scoped() == original
 
 
 GROUPS = {name: value for name, value in list(globals().items()) if re.fullmatch(r"AC\d+", name)}

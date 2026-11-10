@@ -18,6 +18,7 @@ import time
 from typing import Callable
 
 import fold
+import ledger_cache
 import merge_gate
 import packet
 import scratch
@@ -61,7 +62,13 @@ def _events(root):
         fold.ROOT, fold.EVENTS, fold.PROJECT = root, root / "events", ""
         if not fold.EVENTS.is_dir():
             raise OSError("events directory unavailable")
-        events = fold.read_events()
+        try:
+            events = fold.read_events()
+        except ledger_cache.ReentrantRead:
+            raise
+        except ledger_cache.LockTimeout:
+            # Busy cache: one reference-parser read in the same root scope.
+            events = fold.read_events(use_cache=False)
         ignored = {id(e) for e in fold.fold(events)[2]}
         return [e for e in events if id(e) not in ignored]
     finally:
