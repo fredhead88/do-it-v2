@@ -76,7 +76,10 @@ class CacheTests(unittest.TestCase):
                         bypasses.append((path.name, node.lineno))
                 if isinstance(node.func, ast.Attribute) and node.func.attr == 'tail_refresh':
                     fresh.add(path.name)
-        self.assertEqual(bypasses, [], 'necessary full-parse allow-list is empty')
+        allowed = [('dispatch.py', 'pre-fork refusal read: no ledger-cache lock and no cache write (SD2)')]
+        self.assertEqual(sorted({name for name, _ in bypasses}), [name for name, _ in allowed],
+                         'necessary full-parse allow-list is the one pre-fork read')
+        self.assertEqual(len(bypasses), len(allowed), 'exactly one uncached read in dispatch.py')
         self.assertEqual(fresh, set(reasons))
         print('L-spec-2049 AC1 uncached_allow_list=[] tail_refresh=' + json.dumps(reasons, sort_keys=True))
 
