@@ -716,11 +716,11 @@ EXPECTED_CRONS_ROWS = [
      "owner": "thinker", "project": "do-it-v2"},
     {"name": "sweep-owed", "where": "user", "schedule": "11 0,6,12,18 * * *",
      "max_runtime_s": 3600,
-     "command": "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
+     "command": "env DOIT_SUPERVISED=cron-sweep-owed {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit sweep-owed\b", "owner": "thinker", "project": "do-it-v2"},
     {"name": "verify-owed", "where": "user", "schedule": "8,23,38,53 * * * *",
      "max_runtime_s": 3600,
-     "command": "{doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1",
+     "command": "env DOIT_SUPERVISED=cron-verify-owed {doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1",
      "path": "{doit}", "sig": r"\bdoit verify-owed\b", "owner": "thinker", "project": "do-it-v2", "expiry": "2026-12-08T00:00:00Z"},
     {"name": "auto-deploy", "where": "cron.d", "schedule": "*/5 * * * *",
      "command": "albert {doit} cron-run auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py "
