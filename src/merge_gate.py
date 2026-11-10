@@ -34,7 +34,7 @@ read as rework (1); tooling outcomes carry bounded retry policy.
 
 Runs at the Executor's merge step (§3.9, D17), BEFORE `--no-ff`.
 """
-import ast, collections, fcntl, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
+import ast, collections, fcntl, hashlib, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time
 
 from datetime import timedelta
 import uuid
@@ -1377,6 +1377,69 @@ def _emit_tooling(subject, branch, main_sha, branch_sha, history, review, reason
     return 2
 
 
+def _receipt_history(subject, *, use_cache=True, project=None):
+    """Select admitted subject history and its review through one reader seam."""
+    import nextstep
+    history = [e for e in fold.read_events(use_cache=use_cache)
+               if e.get('subject') == subject
+               and (project is None or e.get('project') == project)
+               and nextstep._admitted_actor(e) is not None]
+    return history, nextstep._clean_review({'evs': history})
+
+
+def _emit_rework(subject, branch, main_sha, branch_sha, check, payload, history, review):
+    """Serialize fresh review selection, authorized duplicate lookup and append.
+
+    The verdict has already been computed. Only the receipt is idempotent;
+    conflict diagnostics and unresolved identities always get another receipt.
+    The persistent inode coordinates gate processes using different ledger files.
+    """
+    project = fold.PROJECT or fold.subject_project(subject) or pathlib.Path.cwd().name
+    key = hashlib.sha256(json.dumps([fold.PROJECT, subject], separators=(',', ':'),
+                                   ensure_ascii=True).encode()).hexdigest()
+    resolved = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", branch_sha or ""))
+    branch_sha = branch_sha if resolved else ""
+    try:
+        deadline = time.monotonic() + 5
+        directory = fold.ROOT / 'locks'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / ('merge-gate-rework-' + key + '.lock')).open('a+b') as lock:
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise TimeoutError('rework coordination lock timed out')
+                    time.sleep(min(.025, left))
+            history, review = _receipt_history(subject, use_cache=False, project=project)
+            cycle = str(review['ts']) if review else ''
+            duplicate = resolved and check != 'conflict-diagnostic' and any(
+                e.get('type') == 'merge-gate-rework'
+                and isinstance(e.get('_src'), str)
+                and fold.actor_of(e['_src'].rsplit(':', 1)[0]) in {'executor', 'tick'}
+                and e.get('branch_sha') == branch_sha and e.get('check') == check
+                and e.get('cycle') == cycle for e in history)
+            if duplicate:
+                print('merge-gate: rework receipt already recorded for this review')
+            else:
+                fold.append(['merge-gate-rework', subject, f'branch:={json.dumps(branch)}',
+                             f'branch_sha:={json.dumps(branch_sha)}', f'check:={json.dumps(check)}',
+                             f'cycle:={json.dumps(cycle)}'] + payload)
+        return 1
+    except (Exception, SystemExit):
+        # A failed read/write/lock must never masquerade as successful suppression.
+        # Even storage that refuses the tooling receipt remains an explicit hold.
+        try:
+            return _emit_tooling(subject, branch, main_sha, branch_sha, history, review,
+                                 'rework-coordination', False, 'rework-coordination')
+        except (Exception, SystemExit):
+            print('merge-gate: tooling hold — rework-coordination; receipt storage failed',
+                  file=sys.stderr)
+            return 2
+
+
 def main_(argv):
     global _RUN_ACTIVE, _COMMON
     _RESOLVED.clear()
@@ -1401,11 +1464,8 @@ def main_(argv):
     os.environ["DOIT_LEDGER_FILE"] = os.environ.get("DOIT_GATE_LEDGER_FILE", "L-executor-0001.jsonl")
     subject = spec or branch
     gate_started = False
-    import nextstep
     events = fold.read_events()
-    history = [e for e in events if e.get('subject') == subject
-               and nextstep._admitted_actor(e) is not None]
-    review = nextstep._clean_review({'evs': history})
+    history, review = _receipt_history(subject)
     main_sha = branch_sha = ""
     grant_token = _GRANT_EVENTS.set(events)
     try:
@@ -1458,8 +1518,7 @@ def main_(argv):
         # to the --no-ff that follows it, and no audit can say what was gated.
         if resolved_commit:
             _pinned_inputs(branch, main, main_sha, branch_sha)
-        fold.append([f"merge-gate-{status}", subject, f"branch={branch}",
-                     f"main_sha={main_sha[:12]}", f"branch_sha={branch_sha[:12]}",
+        payload = ([f"main_sha={main_sha[:12]}",
                      f"merged_tree={tree[:12]}", f"repo={_TOP}", f"grant={json.dumps(grant)}"]
                     + (["rechain_dry_run:=true", f"rechain:={json.dumps(rechain_receipt)}"]
                        if resolved_commit else [])
@@ -1474,6 +1533,15 @@ def main_(argv):
                     + ([f"reverted={json.dumps(reverts)}"] if reverts else [])
                     + ([f"reason=secret-scan", f"findings={json.dumps(scan_findings)}"]
                        if scan_verdict in ("rework", "undetermined") else []))
+        if status == 'rework':
+            check = ('removed+reverted' if removed and reverts else 'removed' if removed
+                     else 'reverted' if reverts else 'secret-scan')
+            if _emit_rework(subject, branch, main_sha, branch_sha, check, payload,
+                            history, review) == 2:
+                return 2
+        else:
+            fold.append(['merge-gate-clean', subject, f'branch={branch}',
+                         f'branch_sha={branch_sha[:12]}'] + payload)
         print(f"merge-gate: {status}  ({main} {main_sha[:7]} + {branch} {branch_sha[:7]})"
               + (f"\n  removed:  {', '.join(removed)}" if removed else "")
               + (f"\n  reverted: {', '.join(reverts)}" if reverts else "")
@@ -1497,9 +1565,22 @@ def main_(argv):
             return _emit_tooling(subject, branch, main_sha or _RESOLVED.get(main, ""),
                                  branch_sha or _RESOLVED.get(branch, ""), history, review,
                                  e.reason, e.retryable, None if e.retryable else e.reason)
-        fold.append(["merge-gate-rework", subject, f"branch={branch}", f"undetermined={e}"]
+        # Grant guards precede gate(), but still have a real commit when Git can
+        # establish one. A failed resolution never invents or reuses an identity.
+        if branch not in _RESOLVED:
+            try:
+                begin_run()
+                resolve(main)
+                resolve(branch)
+            except Undetermined:
+                pass
+        branch_sha = branch_sha or _RESOLVED.get(branch, '')
+        main_sha = main_sha or _RESOLVED.get(main, '')
+        if _emit_rework(subject, branch, main_sha, branch_sha, e.reason,
+                       [f"undetermined={e}"]
                     + ([f"append_only={json.dumps(LAST_APPEND_ONLY)}"]
-                       if gate_started and LAST_APPEND_ONLY else []))
+                       if gate_started and LAST_APPEND_ONLY else []), history, review) == 2:
+            return 2
         print(f"merge-gate: rework — could not determine: {e}")
         if gate_started:
             _print_append_only()
