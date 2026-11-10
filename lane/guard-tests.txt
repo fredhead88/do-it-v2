@@ -1,0 +1,32 @@
+# Guard inventory for the 180-second preflight sweep. Project scope: albert-scott.
+# do-it-v2 deliberately has an empty guard stage. One albert-scott-relative node id per line.
+# exclude: tests/test_795_cron_pythonpath_parity.py::test_ac10_cron_lint_clean_over_every_committed_cron_template | scripts/ci/cron_lint.sh over every committed cron template and deploy.sh has its own 60-second CPU-scaled timeout, not one bounded cheap guard; full CI still gates it
+tests/ci/test_no_remote_ref_tests.py
+api/tests/profit_v2/test_1069_classification_drift.py
+api/tests/profit_v2/test_173_legacy_aggregate_exclusion_lint.py
+tests/amazon/test_ads_source_rule.py
+tests/test_795_cron_pythonpath_parity.py
+tests/test_activation_manifest_completeness.py
+tests/ci/test_977_selfhosted_runner_switch.py
+tests/test_820_no_abs_test_imports.py
+tests/test_496_r3_guard.py
+api/tests/profit_v2/test_read_model_refresh.py::test_ac9_deploy_sh_net_zero
+tests/deploy/test_protected_stamp.py::test_ac12_deploy_sh_line_count_not_grown
+tests/deploy/test_ship_snapshot.py::test_ac14_line_counts
+tests/test_207_monitoring_denoise.py::TestDigestFoldCronStale::test_query_cron_runs_stale_returns_data_trust_when_failed
+tests/pipelines/amazon/test_retire_product_objection_record.py::test_ac1_no_tracked_reader
+tests/test_821_empty_ledger_guard.py::test_ac8_every_non_mention_invoker_is_named_in_the_inventory
+tests/test_soda_scan_retired.py::test_active_execution_paths_have_no_soda_references
+tests/ci/test_path_scope_coverage.py
+tests/health/test_portal_route_inventory.py
+api/tests/test_550_reviewer_live_floor.py
+tests/ci/test_pg_scratch_file_list_parity.py
+tests/test_activation_fixture_parity.py
+tests/ci/test_608_amazon_activations.py
+tests/test_deploy_activation_assertion.py
+tests/ci/test_runner_select.py
+tests/ci/test_shard_layout.py
+tests/test_activation_row_truth.py
+tests/pipelines/amazon/test_tier1_orders_window_sizing.py::test_ac8_module_limit_and_untouched_sources
+tests/test_775_feed_health_expectations.py
+tests/services/data_mcp/test_core_pages_served.py

@@ -2,7 +2,6 @@
 import hashlib
 import json
 import os
-import shlex
 import signal
 from pathlib import Path
 import subprocess
@@ -47,284 +46,195 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(text.count("$L/attr.sh"), 1)
         evidence("AC2", ["preflight calls: 2; relative attr calls: 1; old paths absent"])
 
+    def test_ac6_adapter_has_no_embedded_python_or_duplicate_inventory(self):
+        text = (LANE / "preflight.sh").read_text()
+        for forbidden in ("python", "import ", "merge -q", "worktree add", "pytest", "tests/ci/test_no_remote_ref_tests.py",
+                          "\nGUARDS="):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("guard-tests.txt", text)
+        self.assertIn(" preflight --project ", text)
+        self.assertEqual(text.count('preflight --project'), 1)
+        guards = [line for line in (LANE / "guard-tests.txt").read_text().splitlines()
+                  if line.strip() and not line.startswith("#")]
+        self.assertEqual(len(guards), 29)
+        evidence("AC6", ["adapter has no embedded Python, raw merge, or guard list; 29 guards in the one file"])
 
-class FixtureTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        try:
-            __import__("pytest")
-        except ImportError as exc:
-            raise AssertionError(f"missing module pytest in {sys.executable}") from exc
+
+class AdapterTests(unittest.TestCase):
+    """The adapter runs against a recording stand-in for `doit`, never a real test pass."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="lane-preflight-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="lane-adapter-")
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        self.repo = self.home / "repo"
-        self.repo.mkdir()
+        self.calls = self.home / "calls"
+        self.stub = self.home / "doit"
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(("GIT_", "PG", "SUPABASE_DB_URL", "AS_LOCAL_PG_", "DATA_MCP_DSN"))
-                    and k not in ("DATABASE_URL", "GITHUB_ENV", "GITHUB_PATH")}
-        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-                        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
-                        # A nested pytest run must not load the dispatch runner's
-                        # plugins, which are unavailable in candidate worktrees.
-                        PYTEST_ADDOPTS="-p _doit_runner_pytest_addopts_missing",
-                        PYTEST_PLUGINS="_doit_runner_pytest_plugins_missing",
-                        PYTHONPATH=str(self.home / "dispatch-runner"))
-        self.git("init", "-q", "-b", "master")
-        self.git("config", "user.name", "Lane fixture")
-        self.git("config", "user.email", "lane@example.invalid")
-        self.write("tests/test_ok.py", "def test_ok(): assert True\n")
-        self.write("tests/test_guard.py", "def test_guard(): assert True\n")
-        self.write("shared.txt", "original\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.env.update(PREFLIGHT_REPO=str(self.repo), PREFLIGHT_INTEG=str(self.repo),
-                        PREFLIGHT_OUT=str(self.home / "out"), PREFLIGHT_PY=sys.executable,
-                        PREFLIGHT_CONTENT=str(self.home / "content"),
-                        PREFLIGHT_SRC=str(ROOT / "src"),
-                        PREFLIGHT_GUARDS="tests/test_guard.py",
-                        PREFLIGHT_WT=str(self.home / "worktrees"))
-        (self.home / "content").mkdir()
+                    if not k.startswith(("PG", "SUPABASE_DB_URL", "AS_LOCAL_PG_", "DATA_MCP_DSN"))
+                    and k not in ("DATABASE_URL", "GITHUB_ENV", "GITHUB_PATH", "PYTHONPATH")}
+        self.env.update(PREFLIGHT_DOIT=str(self.stub), PREFLIGHT_OUT=str(self.home / "out"),
+                        PREFLIGHT_WT=str(self.home / "scratch"), CALLS=str(self.calls))
+        self.script("echo clean; exit 0")
 
-    def git(self, *args):
-        return command("git", *args, cwd=self.repo, env=self.env)
+    def script(self, body):
+        self.stub.write_text('#!/bin/bash\n'
+                             'echo "$*|guards=${DOIT_PREFLIGHT_GUARDS:-}|tmp=${TMPDIR:-}|pg=${SUPABASE_DB_URL-unset}${PGHOST-}" >> "$CALLS"\n'
+                             + body + "\n")
+        self.stub.chmod(0o755)
 
-    def write(self, name, text):
-        path = self.repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-
-    def commit(self):
-        self.git("add", ".")
-        self.git("commit", "-qm", "fixture")
-
-    def branch(self, number, files):
-        self.git("checkout", "-qb", "l-spec-" + number, self.base)
-        for name, text in files.items():
-            self.write(name, text)
-        self.commit()
-
-    def batch_args(self, *numbers):
-        return ["bash", str(LANE / "preflight.sh"), self.base,
-                *("L-spec-" + n for n in numbers)]
-
-    def run_batch(self, *numbers):
-        command(*self.batch_args(*numbers), env=self.env)
+    def run_adapter(self, *numbers, check=True, env=None):
+        args = ["bash", str(LANE / "preflight.sh"), "b" * 40, *("L-spec-" + n for n in numbers)]
+        result = subprocess.run(args, env=env or self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if check:
+            self.assertEqual(result.returncode, 0, result.stdout)
         report = self.home / "out" / ("rehearse-" + "-".join(numbers) + ".txt")
-        self.assertEqual(list((self.home / "worktrees").iterdir()), [])
-        self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
         text = report.read_text()
         self.assertTrue(text.endswith("DONE\n"), text)
         return text
 
-    def test_ac3_batches_and_conflict(self):
-        self.branch("0001", {"tests/test_added.py": "def test_added(): assert True\n",
-                             "shared.txt": "one\n"})
-        self.branch("0002", {"tests/test_bad.py": "def test_bad(): assert False\n"})
-        self.branch("0003", {"shared.txt": "three\n"})
-        clean = self.run_batch("0001")
-        self.assertIn("NO-NEW-FAILURES", clean)
-        self.assertFalse((self.home / "out/rehearse-0001.txt.base").exists())
-        failed = self.run_batch("0001", "0002")
-        self.assertIn("NEW-FAILURES:\ntests/test_bad.py::test_bad", failed)
-        self.assertNotIn("NO-NEW-FAILURES", failed)
-        conflict = self.run_batch("0001", "0003")
-        self.assertIn("CONFLICT L-spec-0003", conflict)
-        self.assertNotIn("cand:", conflict)
-        evidence("AC3", [clean, failed, conflict])
+    def test_ac6_clean_red_and_undetermined_tokens(self):
+        clean = self.run_adapter("0001")
+        self.assertIn("NO-NEW-FAILURES\nDONE", clean)
+        self.assertNotIn("NEW-FAILURES:", clean)
+        self.script("echo 'PREFLIGHT-RED guards - guard guard assertion failed: tests/x.py::t'; exit 1")
+        red = self.run_adapter("0001")
+        self.assertIn("NEW-FAILURES:\nPREFLIGHT-RED guards - guard guard assertion failed: tests/x.py::t\nDONE", red)
+        self.assertNotIn("NO-NEW-FAILURES", red)
+        self.script("echo 'PREFLIGHT-UNDETERMINED guards base-red tests/x.py::t'; exit 2")
+        held = self.run_adapter("0001")
+        self.assertIn("NEW-FAILURES:\nRUN-BROKEN: PREFLIGHT-UNDETERMINED guards base-red tests/x.py::t\nDONE", held)
+        self.assertNotIn("NO-NEW-FAILURES", held)
+        self.script("exit 7")
+        silent = self.run_adapter("0001")
+        self.assertIn("RUN-BROKEN:", silent)
+        self.assertNotIn("NO-NEW-FAILURES", silent)
+        evidence("AC6", [clean, red, held, silent])
 
-    def test_ac4_scratch_exclusion_and_base_red(self):
-        self.branch("0001", {"tests/test_scratch.py":
-                             "# pg_scratch ScratchRequired\ndef test_db(): assert False\n"})
-        excluded = self.run_batch("0001")
-        targets = next(line for line in excluded.splitlines() if line.startswith("targets:"))
-        self.assertNotIn("test_scratch.py", targets)
-        self.assertIn("excluded: 1", excluded)
-        self.assertIn("ScratchRequired", excluded)
-        self.git("checkout", "-q", "master")
-        self.write("tests/test_guard.py", "def test_guard(): assert False\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0002", {"tests/test_guard.py": "# same failure\ndef test_guard(): assert False\n"})
-        # The unchanged passing guard lets the run distinguish failures from a broken zero-pass run.
-        self.env["PREFLIGHT_GUARDS"] += " tests/test_ok.py"
-        red = self.run_batch("0002")
-        self.assertIn("NO-NEW-FAILURES", red)
-        self.assertIn("base:", red)
-        evidence("AC4", [excluded, red])
+    def test_ac6_red_classes_keep_the_consumer_lines(self):
+        for cls, owner, expect in (("content-conflict", "L-spec-0002", "CONFLICT L-spec-0002"),
+                                   ("declined", "L-spec-0002", "CONFLICT L-spec-0002"),
+                                   ("overlap", "L-spec-0002", "OVERLAP L-spec-0002: overlaps L-spec-0001"),
+                                   ("writes", "L-spec-0002", "OVERLAP L-spec-0002: overlaps L-spec-0001"),
+                                   ("pg-marker", "L-spec-0002", "OVERLAP L-spec-0002: overlaps L-spec-0001"),
+                                   ("alembic-heads", "L-spec-0002", "ALEMBIC-HEADS L-spec-0002: overlaps L-spec-0001")):
+            self.script("echo 'PREFLIGHT-RED static %s %s overlaps L-spec-0001'; exit 1" % (owner, cls))
+            text = self.run_adapter("0001", "0002")
+            self.assertIn(expect + "\n", text, text)
+            self.assertIn("NEW-FAILURES:\nPREFLIGHT-RED static", text)
+            self.assertTrue(text.endswith("DONE\n"))
 
-    def test_ac5_timeout(self):
-        self.write("tests/test_sleep.py", "import time\ndef test_sleep(): time.sleep(30)\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0001", {"shared.txt": "one\n"})
-        self.env.update(PREFLIGHT_GUARDS="tests/test_sleep.py", PREFLIGHT_PYTEST_TIMEOUT="5")
+    def test_ac6_consumes_the_one_guard_file_and_runs_once(self):
+        text = self.run_adapter("0001", "0002")
+        self.assertIn("guards: 29 from " + str(LANE / "guard-tests.txt"), text)
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("preflight --project albert-scott --on " + "b" * 40 + " --specs L-spec-0001,L-spec-0002", calls[0])
+        self.assertIn("guards=" + str(LANE / "guard-tests.txt"), calls[0])
+        # An override file is read, counted and handed through; there is no second inventory.
+        other = self.home / "other-guards.txt"
+        other.write_text("# note\ntests/a.py\n\ntests/b.py\n")
+        self.env["PREFLIGHT_GUARD_FILE"] = str(other)
+        self.calls.unlink()
+        text = self.run_adapter("0003")
+        self.assertIn("guards: 2 from " + str(other), text)
+        self.assertIn("guards=" + str(other), self.calls.read_text())
+        self.env["PREFLIGHT_GUARD_FILE"] = str(self.home / "missing.txt")
+        self.assertIn("RUN-BROKEN: guard inventory unreadable", self.run_adapter("0004"))
+
+    def test_ac6_bounded_timeout_hold_and_scratch_environment(self):
+        self.script("sleep 60")
+        self.env["PREFLIGHT_OUTER_TIMEOUT"] = "1"
         start = time.monotonic()
-        report = self.run_batch("0001")
-        elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 60)
-        self.assertIn("PREFLIGHT-TIMEOUT\nNO-NEW-FAILURES", report)
-        evidence("AC5", [report, f"elapsed < 60 seconds: {elapsed:.2f}"])
+        text = self.run_adapter("0001")
+        self.assertLess(time.monotonic() - start, 30)
+        self.assertIn("RUN-BROKEN: PREFLIGHT-UNDETERMINED timeout", text)
+        self.assertNotIn("NO-NEW-FAILURES", text)
+        self.script("echo ok")
+        env = dict(self.env, PGHOST="fixture", SUPABASE_DB_URL="postgresql://live.invalid/x", DATABASE_URL="x")
+        self.run_adapter("0005", env=env)
+        last = self.calls.read_text().splitlines()[-1]
+        self.assertIn("tmp=" + str(self.home / "scratch"), last)
+        self.assertIn("pg=", last)
+        self.assertNotIn("live.invalid", last)
+        self.assertNotIn("fixture", last)
 
-    def test_collection_error_and_zero_pass_are_broken(self):
-        self.branch("0001", {"tests/test_invalid.py": "def invalid syntax\n"})
-        self.assertIn("RUN-BROKEN:", self.run_batch("0001"))
-        self.branch("0002", {"tests/test_skip.py":
-                             "import pytest\n@pytest.mark.skip\ndef test_skip(): pass\n"})
-        self.env["PREFLIGHT_GUARDS"] = ""
-        self.assertIn("RUN-BROKEN: candidate ran zero passing tests", self.run_batch("0002"))
-
-    def test_environment_scrub_and_no_nearby_tests(self):
-        self.env.update(PG_LANE_SENTINEL="fixture", SUPABASE_DB_URL_SENTINEL="fixture",
-                        AS_LOCAL_PG_SENTINEL="fixture", DATA_MCP_DSN="fixture",
-                        DATA_MCP_DSN_SENTINEL="fixture", DATABASE_URL="fixture",
-                        GITHUB_ENV="fixture", GITHUB_PATH="fixture",
-                        NODE_ID_SECRET="fixture", CI_BUILD_BOX="true")
-        self.branch("0001", {"tests/test_environment.py":
-            "import os\ndef test_environment():\n"
-            "    prefixes = ('P' + 'G', 'AS_LOCAL_' + 'PG_', 'DATA_MCP_' + 'DSN')\n"
-            "    assert not any(k.startswith(prefixes) for k in os.environ)\n"
-            "    for suffix in ('', '_DIRECT', '_RO', '_MIGRATIONS'):\n"
-            "        assert os.environ['SUPABASE_' + 'DB_URL' + suffix] == ''\n"
-            "    assert 'SUPABASE_' + 'DB_URL_SENTINEL' not in os.environ\n"
-            "    assert os.environ['DATABASE_' + 'URL'] == ''\n"
-            "    assert 'GITHUB_ENV' not in os.environ and 'GITHUB_PATH' not in os.environ\n"
-            "    assert 'PYTEST_ADDOPTS' not in os.environ\n"
-            "    assert 'PYTEST_PLUGINS' not in os.environ\n"
-            "    assert os.environ['PYTHONPATH'] == 'api:.'\n"
-            "    assert os.environ['NODE_ID_SECRET'] == 'ci-pg-parity-node-id-secret'\n"
-            "    assert os.environ['CI_BUILD_BOX'] == 'false'\n"
-            "    assert os.environ['PATH'].split(os.pathsep)[0] == os.path.dirname(os.environ['PREFLIGHT_PY'])\n",
-            "feature.py": "value = 1\n"})
-        self.git("checkout", "-q", "master")
-        self.write("tests/test_nearby.py", "# feature\ndef test_unrelated(): assert False\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        report = self.run_batch("0001")
-        self.assertIn("NO-NEW-FAILURES", report)
-        self.assertNotIn("test_nearby.py", report)
-
-    def test_static_marker_and_writes_overlap(self):
-        self.write("tests/test_scratch.py", "# pg_scratch ScratchRequired\ndef test_db(): pass\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0001", {"tests/test_scratch.py": "# ScratchRequired\ndef test_db(): pass\n"})
-        report = self.run_batch("0001")
-        self.assertIn("has no pg_scratch marker", report)
-        self.assertNotIn("cand:", report)
-        self.branch("0002", {"two.txt": "two\n"})
-        self.branch("0003", {"three.txt": "three\n"})
-        for number in ("0002", "0003"):
-            (self.home / "content" / ("L-spec-" + number + ".md")).write_text(
-                "Writes:\n- shared.txt\n")
-        report = self.run_batch("0002", "0003")
-        self.assertIn("OVERLAP L-spec-0003: Writes grant shared.txt", report)
-        self.assertNotIn("cand:", report)
-        evidence("AC6", [report, "marker removal rejected before pytest"])
-
-    def test_ac6_sigterm_cleans_worktrees(self):
-        self.branch("0001", {"tests/test_signal.py":
-            "import os, time\nfrom pathlib import Path\n"
-            "def test_sleep():\n"
-            "    Path(os.environ['STARTED']).touch()\n"
-            "    time.sleep(120)\n"})
+    def test_ac6_sigterm_stops_the_sweep_and_exits_143(self):
         started = self.home / "started"
-        self.env["STARTED"] = str(started)
-        with subprocess.Popen(self.batch_args("0001"), env=self.env,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              start_new_session=True) as proc:
+        self.script('touch "%s"; exec sleep 120' % started)
+        with subprocess.Popen(["bash", str(LANE / "preflight.sh"), "c" * 40, "L-spec-0001"], env=self.env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True) as proc:
             try:
                 deadline = time.monotonic() + 15
                 while not started.exists() and proc.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.05)
-                self.assertTrue(started.exists(), "candidate pytest did not start")
+                self.assertTrue(started.exists(), "sweep stand-in did not start")
                 proc.send_signal(signal.SIGTERM)
                 self.assertEqual(proc.wait(timeout=10), 143)
             finally:
                 if proc.poll() is None:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
-        self.assertEqual(list((self.home / "worktrees").iterdir()), [])
-        self.assertEqual(self.git("worktree", "list", "--porcelain").count("worktree "), 1)
-        evidence("AC6", ["SIGTERM: exit 143, no pf-* worktrees remain"])
+        evidence("AC6", ["SIGTERM: exit 143"])
 
-    def test_marker_lint_exempts_existing_missing_marker(self):
-        self.write("tests/test_scratch.py", "# ScratchRequired\ndef test_db(): pass\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0001", {"tests/test_scratch.py": "# ScratchRequired\ndef test_db(): assert False\n"})
-        self.assertIn("NO-NEW-FAILURES", self.run_batch("0001"))
-
-    def test_stale_report_and_worktrees_replaced(self):
-        self.branch("0001", {"shared.txt": "one\n"})
+    def test_ac6_stale_report_replaced(self):
         out = self.home / "out"
         out.mkdir()
-        report = out / "rehearse-0001.txt"
-        report.write_text("NEW-FAILURES:\nstale failure\nDONE\n")
-        parent = self.home / "worktrees"
-        parent.mkdir()
-        for name in ("pf-cand-0001", "pf-base-0001"):
-            self.git("worktree", "add", "-q", "--detach", str(parent / name), self.base)
-        text = self.run_batch("0001")
+        (out / "rehearse-0001.txt").write_text("NEW-FAILURES:\nstale failure\nDONE\n")
+        text = self.run_adapter("0001")
         self.assertNotIn("stale failure", text)
         self.assertIn("NO-NEW-FAILURES", text)
 
-    def test_timeout_preserves_emitted_failures(self):
-        self.write("conftest.py",
-            "def pytest_runtest_logreport(report):\n"
-            "    if report.failed: print('\\nFAILED ' + report.nodeid, flush=True)\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0001", {"tests/test_early.py":
-            "import time\ndef test_a_bad(): assert False\ndef test_z_sleep(): time.sleep(30)\n"})
-        self.env["PREFLIGHT_PYTEST_TIMEOUT"] = "5"
-        report = self.run_batch("0001")
-        self.assertIn("PREFLIGHT-TIMEOUT", report)
-        self.assertIn("tests/test_early.py::test_a_bad", report)
-        self.assertNotIn("NO-NEW-FAILURES", report)
 
-    def test_vitest_own_targets_and_base_comparison(self):
-        # A local stand-in checks the CLI contract without invoking node/network.
-        binary = self.home / "bin"
-        binary.mkdir()
-        # Keep the interpreter and npx stand-in together: preflight correctly
-        # prepends the interpreter directory, which may otherwise contain npx.
-        python = binary / "python"
-        python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
-        python.chmod(0o755)
-        npx = binary / "npx"
-        npx.write_text(
-            '#!/bin/bash\nprintf "%s\\n" "$*" >> "$VITEST_CALLS"\n'
-            '[ -L node_modules ] && [ "$(readlink node_modules)" = "$PREFLIGHT_REPO/dashboard/node_modules" ] || exit 2\n'
-            'if grep -q red src/own.test.tsx; then\n'
-            '  echo " × src/own.test.tsx > same failure 2ms"; exit 1\nfi\n')
-        npx.chmod(0o755)
-        calls = self.home / "vitest-calls"
-        self.env.update(PATH=str(binary) + os.pathsep + self.env["PATH"],
-                        VITEST_CALLS=str(calls), PREFLIGHT_PY=str(python))
-        self.write("dashboard/src/own.test.tsx", "green\n")
-        self.write("dashboard/src/nearby.test.ts", "red\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0001", {"dashboard/src/own.test.tsx": "red\n"})
-        report = self.run_batch("0001")
-        self.assertIn("vitest: src/own.test.tsx > same failure", report)
-        self.assertEqual(len(calls.read_text().splitlines()), 2)
-        self.assertTrue(all("--no-install vitest run" in line for line in calls.read_text().splitlines()))
-        self.assertNotIn("nearby.test.ts", calls.read_text())
-        self.branch("0003", {"dashboard/src/component.tsx": "export default 1;\n"})
-        calls.write_text("")
-        self.assertIn("NO-NEW-FAILURES", self.run_batch("0003"))
-        self.assertEqual(len(calls.read_text().splitlines()), 1)
-        self.assertIn("nearby.test.ts", calls.read_text())
-        self.git("checkout", "-q", "master")
-        self.write("dashboard/src/own.test.tsx", "red\n")
-        self.commit()
-        self.base = self.git("rev-parse", "HEAD")
-        self.branch("0002", {"dashboard/src/own.test.tsx": "red\n// comment\n"})
-        self.assertIn("NO-NEW-FAILURES", self.run_batch("0002"))
+class RealSweepAdapterTests(unittest.TestCase):
+    """The adapter with the real `doit preflight`: bookkeeping is re-chained, not raw-merged."""
+
+    def test_ac6_two_migration_branches_rechain_with_no_alembic_heads_rejection(self):
+        from unittest.mock import patch
+        from test_rechain import Fixture, git
+        import fold
+        with tempfile.TemporaryDirectory(prefix="lane-real-") as tmp, patch.dict(os.environ):
+            home = Path(tmp)
+            fx = Fixture(home)
+            fx.write("tests/test_guard.py", "def test_guard(): assert True\n")
+            import rechain
+            isolation = (fx.repo / rechain.TEST).read_text()
+            fx.write(rechain.TEST, "import json\nfrom pathlib import Path\n"
+                     "head=json.loads((Path(__file__).parents[1]/'alembic_supabase/branch_isolation.json').read_text())['heads'][0]['revision']\n"
+                     "declared_heads=actual_heads={head}\nMANIFEST=VERSIONS=None\n"
+                     "def resolve_scratch_target(*args): return head\ndef resolve_target(*args): return head\n"
+                     "def resolve_scratch_union_heads(*args): return (head,)\n" + isolation)
+            base = fx.commit("guard")
+            fx.base = base
+            state = home / "state"
+            for d in ("content", "events", "repos"):
+                (state / d).mkdir(parents=True)
+            (state / "repos" / "albert-scott").symlink_to(fx.repo, target_is_directory=True)
+            config = state / "grading.toml"
+            config.write_text('[project.albert-scott]\nvenv = "/opt/albert-scott/.venv"\n')
+            guards = home / "guards.txt"
+            guards.write_text("tests/test_guard.py\n")
+            os.environ.update(DOIT_ROOT=str(state), DOIT_LEDGER_FILE="L-builder-fixture.jsonl", DOIT_GRADING_TOML=str(config))
+            with patch.object(fold, "ROOT", state), patch.object(fold, "EVENTS", state / "events"):
+                numbers = []
+                for name in ("2001", "2002"):
+                    spec, branch, sha = fx.branch(name)
+                    numbers.append(name)
+                    (state / "content" / ("L-spec-%s.md" % name)).write_text(
+                        "Writes:\n" + "".join("- %s\n" % p for p in git(fx.repo, "diff", "--name-only", base, sha).splitlines()))
+                    fold.append(["spec-written", "L-spec-" + name, "project=albert-scott"], strict=True)
+                    with patch.dict(os.environ, DOIT_LEDGER_FILE="L-executor-fixture.jsonl"):
+                        fold.append(["merge-gate-clean", "L-spec-" + name, "project=albert-scott", "branch=" + branch], strict=True)
+            env = dict(os.environ, PREFLIGHT_OUT=str(home / "out"), PREFLIGHT_WT=str(home / "scratch"),
+                       PREFLIGHT_GUARD_FILE=str(guards))
+            (home / "scratch").mkdir()
+            result = subprocess.run(["bash", str(LANE / "preflight.sh"), base, "L-spec-2001", "L-spec-2002"],
+                                    env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+            report = (home / "out/rehearse-2001-2002.txt").read_text()
+            self.assertEqual(result.returncode, 0, result.stdout + report)
+            self.assertNotIn("ALEMBIC-HEADS", report)
+            self.assertIn("PREFLIGHT-RECHAINED L-spec-2002 h0 ", report)
+            self.assertIn("NO-NEW-FAILURES\nDONE\n", report)
+            evidence("AC6", [report])
 
 
 if __name__ == "__main__":
