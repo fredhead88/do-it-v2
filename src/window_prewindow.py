@@ -242,6 +242,47 @@ def metadata(repo, master, entry, events, content):
         raise ValueError('spec metadata missing or invalid Writes grant') from exc
 
 
+def prequeue_gate(repo, spec, sha, events):
+    """Enforce the box-check verdict for an albert-scott entry; shadow it when off.
+
+    Returns nothing when admitted. Raises Deferred when there is no usable
+    verdict, ValueError when the newest verdict for this sha is red.
+    """
+    if os.path.basename(os.path.normpath(str(repo))) != 'albert-scott':
+        return
+    if re.fullmatch(r'quarantine-[0-9a-f]{16}', spec):
+        return
+    try:
+        import prequeue
+        enforce = prequeue.settings().get('enforce') is True
+    except Exception:  # fail open: unreadable settings never enforce
+        enforce = False
+    verdict, failing = None, []
+    try:
+        rows = [(str(e.get('ts') or ''), i, e) for i, e in enumerate(events)
+                if isinstance(e, dict) and e.get('subject') == spec
+                and e.get('branch_sha') == sha
+                and str(e.get('type', '')).startswith('prequeue-')]
+        if rows:
+            newest = max(rows, key=lambda row: row[:2])[2]
+            verdict = newest['type']
+            failing = [str(x) for x in (newest.get('failing') or [])]
+    except Exception:
+        if not enforce:
+            return
+        verdict = None
+    if verdict == 'prequeue-green':
+        return
+    if verdict == 'prequeue-red':
+        if enforce:
+            raise ValueError('prequeue red: ' + ' '.join(failing))
+        print(f'gate-window: prewindow shadow prequeue would drop {spec}')
+        return
+    if enforce:
+        raise Deferred('prequeue pending')
+    print(f'gate-window: prewindow shadow prequeue would defer {spec}')
+
+
 def select(repo, base, main, entries, events, content, *, on=None):
     """Return admitted entries and rework drops; log deferrals without events.
 
@@ -274,6 +315,7 @@ def select(repo, base, main, entries, events, content, *, on=None):
             changed = set(git(repo, 'diff', '--name-only', '-z', fork, sha).stdout.split('\0'))
             if added_callers and CENSUS not in changed:
                 raise ValueError('backend caller census must be updated: ' + ', '.join(sorted(added_callers)))
+            prequeue_gate(repo, spec, sha, events)
             dependency = prerequisite(spec, text, events)
             if dependency and dependency not in grants and not merged_dependency(repo, dependency, master, events):
                 raise Deferred('dependency-hold waits_for=' + dependency + ' is not merged or earlier in this window')

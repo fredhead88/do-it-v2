@@ -521,5 +521,80 @@ class PrewindowTests(Fixture):
         self.assertDropped('quarantine metadata', [fake])
 
 
+class PrequeueAdmissionTests(Fixture):
+    def run_select(self, enforce, entries=None):
+        import prequeue
+        out = io.StringIO()
+        with patch.object(prequeue, 'settings', return_value=dict(enforce=enforce)), \
+                contextlib.redirect_stdout(out):
+            kept, drops = self.select(entries)
+        return kept, drops, out.getvalue()
+
+    def verdict(self, kind, entry, **kw):
+        self.events.append(dict(type='prequeue-' + kind, subject=entry[0],
+                                branch_sha=entry[2], **kw))
+
+    def test_enforced_cases(self):
+        e = self.branch(1, {'one.txt': 'one'})
+        kept, drops, out = self.run_select(True)
+        self.assertEqual((kept, drops), ([], []))
+        self.assertIn('prequeue pending', out)
+        self.verdict('undetermined', e, ts='2026-11-01T00:00:01Z')
+        kept, drops, out = self.run_select(True)
+        self.assertEqual((kept, drops), ([], []))
+        self.assertIn('prequeue pending', out)
+        self.verdict('red', e, ts='2026-11-01T00:00:02Z', failing=['t/a.py::x'])
+        kept, drops, _ = self.run_select(True)
+        self.assertEqual(kept, [])
+        self.assertEqual(len(drops), 1)
+        self.assertTrue(drops[0][1].startswith('prequeue red:'))
+        self.assertIn('t/a.py::x', drops[0][1])
+        self.verdict('green', e, ts='2026-11-01T00:00:03Z')
+        kept, drops, _ = self.run_select(True)
+        self.assertEqual((kept, drops), ([e], []))
+
+    def test_green_for_other_sha_is_ignored(self):
+        e = self.branch(1, {'one.txt': 'one'})
+        self.events.append(dict(type='prequeue-green', subject=e[0], branch_sha='0' * 40))
+        kept, drops, out = self.run_select(True)
+        self.assertEqual((kept, drops), ([], []))
+        self.assertIn('prequeue pending', out)
+
+    def test_shadow_when_not_enforced(self):
+        e = self.branch(1, {'one.txt': 'one'})
+        kept, drops, out = self.run_select(False)
+        self.assertEqual((kept, drops), ([e], []))
+        self.assertIn('prewindow shadow prequeue would defer L-spec-1', out)
+        self.verdict('red', e, failing=['t::x'])
+        kept, drops, out = self.run_select(False)
+        self.assertEqual((kept, drops), ([e], []))
+        self.assertIn('prewindow shadow prequeue would drop L-spec-1', out)
+        self.verdict('green', e, ts='2999-01-01T00:00:00Z')
+        kept, drops, out = self.run_select(False)
+        self.assertEqual(kept, [e])
+        self.assertNotIn('shadow', out)
+
+    def test_quarantine_exempt_and_other_repo_unchecked(self):
+        e = self.branch(1, {'one.txt': 'one'})
+        q = ('quarantine-' + 'a' * 16, e[1], e[2])
+        kept, drops, out = self.run_select(True, [q])
+        self.assertNotIn('prequeue', out)
+        self.assertNotIn('prequeue', ' '.join(str(d[1]) for d in drops))
+        other = self.root / 'repos/other'
+        self.repo.rename(other)
+        self.repo = other
+        kept, drops, out = self.run_select(True, [e])
+        self.assertEqual((kept, drops), ([e], []))
+
+    def test_unreadable_settings_do_not_enforce(self):
+        import prequeue
+        e = self.branch(1, {'one.txt': 'one'})
+        out = io.StringIO()
+        with patch.object(prequeue, 'settings', side_effect=OSError('x')), \
+                contextlib.redirect_stdout(out):
+            kept, drops = self.select()
+        self.assertEqual((kept, drops), ([e], []))
+
+
 if __name__ == '__main__':
     unittest.main()
