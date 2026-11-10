@@ -826,8 +826,8 @@ def parse_verdict(out):
         url = m.group(0) if m else ""
     return doc, nodes, url
 
-
-def verify(repo, cand, required, window, *, rehearsal=False):
+def verify(repo, cand, required, window, *, rehearsal=False): return __import__("ci_infra").verify_with_rerun(_verify_once, ev, repo, cand, required, window, rehearsal=rehearsal)
+def _verify_once(repo, cand, required, window, *, rehearsal=False):
     """-> dict(state=green|red|undetermined, nodes, url, doc). Anything that is not
     an unambiguous green is not green."""
     script = os.environ.get("DOIT_WINDOW_PREDEPLOY") or str(repo / PREDEPLOY)
