@@ -8,7 +8,7 @@
 set -u
 R="${DOIT_ROOT:-$HOME/.do-it}"
 TODAY="${EXECUTOR_WAKE_TODAY:-$(date -u +%F)}"
-PANE=flow:2.3
+PANE=$(cat /var/tmp/push/foreman/pane 2>/dev/null); PANE=${PANE:-flow:2.3}  # Thinker 2026-11-05 14:20Z: Executor merged into the foreman (operator); wake the foreman pane
 STATE=$R/state/executor-wake.idle
 LOG=$R/logs/executor-wake.log
 mkdir -p "$R/state" "$R/logs"
@@ -52,7 +52,7 @@ fi
 # --- Planner
 # STOPGAP planner-idle expires 2026-11-10 (held-planner-end and the pane-watchdog heartbeat)
 if active planner-idle; then
-PPANE=flow:2.1; PSTATE=$R/state/planner-wake.idle
+PPANE=$(tmux list-panes -a -F "#{pane_id} #{pane_start_command}" 2>/dev/null | awk '/doit up/{print $1; exit}'); PPANE=${PPANE:-flow:2.1}; PSTATE=$R/state/planner-wake.idle
 if [ "$(tmux display -p -t "$PPANE" '#{pane_dead}' 2>/dev/null)" = "0" ]; then
   ps_=$(tmux capture-pane -p -t "$PPANE" | tail -14)
   if echo "$ps_" | grep -qE 'esc to interrupt|Compacting|tokens · thinking|background agent|◯ |· ↓'; then rm -f "$PSTATE"
@@ -75,7 +75,7 @@ if echo "$screen" | grep -qE 'esc to interrupt|· ↓|Compacting|tokens · think
   rm -f "$STATE"; exit 0
 fi
 if [ ! -f "$STATE" ]; then echo "$now" > "$STATE"; echo "$now idle-1" >> "$LOG"; exit 0; fi
-msg="Wake (executor-wake.sh, $now): you have been idle at the prompt for 5+ min. Re-read the ledger now (doit board) and take the next durable action on every actionable lane item: grade/review/merge finished builds first, then dispatch builders only for shelf specs whose earlier-wave siblings are settled (do not try wave-held ones; the gate refuses them), then owed checks. Keep a doit wait running and re-check at least every 5 minutes."
+msg="Wake (executor-wake.sh, $now): foreman, idle 5+ min. Check: python3 /home/albert/.do-it/thinker-inbox.py --list, rloop.log, and any open WORKLIST in /var/tmp/push/foreman. Act per RULEBOOK.md; do NOT run doit board (slow) and do NOT dispatch builders (the tick does). If nothing is open, stay idle."  # Thinker 2026-11-05 14:30Z: wake text for the foreman, not the retired Executor
 "$R/bin/pane-say.sh" "$PANE" "$msg"  # Thinker 2026-10-24: a single Enter was swallowed as paste; pane-say re-submits
 rm -f "$STATE"
 echo "$now woke" >> "$LOG"

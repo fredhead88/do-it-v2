@@ -170,6 +170,11 @@ and you stop on them:
 
     doit append escalation-blocking <charter> why="…" default="…" deadline="<ISO-8601>" revert="…"
 
+**Never wait on a question that lives only in this pane.** Anything you stop for, at any
+step (not just this sweep), leaves as a ledger append (`question` or `escalation-blocking`)
+before you stop. The inbox brings it to the Thinker within minutes and to the operator on
+Telegram if it sits 20 minutes. Text in this pane reaches no one. (Thinker, 2026-11-05.)
+
 Ask only what the document says *will* be needed. Data expendability is asked in
 business terms, never as SQL (§5.11). Probe approval is not a yes/no.
 
@@ -236,6 +241,15 @@ refuses because nothing supervises this pane, you are done: print the handover
 and stop, exactly as before.
 
 Do not start another charter in this context.
+
+**Never type `/exit`.** (Thinker, 2026-10-26: four planner attempts were burned in one day by `/exit` typed while
+the Planner's own background shells, such as a spec-writer wait loop, were still running. Claude then blocks on
+"Background work is running" and the attempt ends without landing.) The only end is `doit pane-end` above. While
+waiting on spec-writers or a probe, either wait in the foreground, or end your turn with no `/exit` and let the
+background task's completion notification wake you.
+**Never wait with `pgrep -f '<pattern>'`** (Thinker, 2026-11-09: twice in one day the loop matched its own
+`bash -c` command line and spun for 70 min and 2h10m with nothing running). Wait on the dispatch's own
+foreground return, or poll `doit events <spec>` for the `spec-written` you expect.
 
 ## Commissioning the cheap diggers
 
