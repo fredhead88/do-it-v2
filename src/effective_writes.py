@@ -24,6 +24,31 @@ def granted_tests(spec_id, events):
     return deepcopy(rows)
 
 
+def granted_files(spec_id, events):
+    """Literal files of the newest coupled-files-granted event for the newest written revision."""
+    written = next((e for e in reversed(events) if e.get("type") == "spec-written"
+                    and e.get("subject") == spec_id), {})
+    revision = written.get("_src")
+    if not revision:
+        return []
+    grant = next((e for e in reversed(events) if e.get("type") == "coupled-files-granted"
+                  and e.get("subject") == spec_id
+                  and e.get("spec_written_src") == revision), None)
+    if grant is None:
+        return []
+    rows = grant.get("files")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) or "file" not in row
+                                         for row in rows):
+        raise merge_gate.Undetermined("malformed recorded files for " + spec_id)
+    return [row["file"] for row in rows]
+
+
+def _literal(path):
+    return not (not isinstance(path, str) or not path or PurePosixPath(path).is_absolute()
+                or ".." in path.split("/") or any(c in path for c in "*?[]")
+                or path.endswith("/") or PurePosixPath(path).name in ("", ".", ".."))
+
+
 def effective_grant(spec_id, text, events):
     """Text paths first, followed by validated literal recorded files, once each."""
     paths = merge_gate.grant_from_text(text)
@@ -36,4 +61,10 @@ def effective_grant(spec_id, text, events):
                                           + ": expected a literal repository-relative file")
     if recorded:
         merge_gate.check_grant(recorded, "recorded tests for " + spec_id)
-    return list(dict.fromkeys([*paths, *recorded]))
+    files = granted_files(spec_id, events)
+    if not all(_literal(path) for path in files):
+        raise merge_gate.Undetermined("recorded files for " + spec_id
+                                      + ": expected a literal repository-relative file")
+    if files:
+        merge_gate.check_grant(files, "recorded files for " + spec_id)
+    return list(dict.fromkeys([*paths, *recorded, *files]))

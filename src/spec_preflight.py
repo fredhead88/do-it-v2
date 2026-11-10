@@ -249,6 +249,14 @@ def _discover_coupled(spec_id, body, written, checkout):
 after_run.append(_discover_coupled)
 
 
+def _coupled_files_hook(spec_id, body, written, checkout):
+    import coupled_files
+    coupled_files.hook(spec_id, body, written, checkout, _DISCOVERY.get()[0])
+
+
+after_run.append(_coupled_files_hook)
+
+
 def _grant_blocked(body):
     return any(reason.startswith(("check 3:", "spec:", "hook ")) for reason in body["undetermined"])
 
@@ -479,6 +487,19 @@ def _append_grant(root, sid, tests, written):
         raise ValueError("coupled grant append failed")
 
 
+def _append_coupled_files(root, sid, files, written):
+    if not written.get("_src"):
+        raise ValueError("coupled files grant has no canonical spec-written revision")
+    fields = dict(files=files, why="Merge-gate-pinned non-test files: add the line the spec needs; do not weaken checks.",
+                  spec_written_src=written["_src"])
+    argv = [str(DOIT), "append", "coupled-files-granted", sid, "project=" + written["project"]]
+    argv.extend(key + ":=" + json.dumps(value) for key, value in fields.items())
+    result = _process(argv, env={**os.environ, "DOIT_ROOT": str(root),
+                               "DOIT_LEDGER_FILE": "L-spec-preflight-local.jsonl"}, timeout=30)
+    if result.returncode:
+        raise ValueError("coupled files grant append failed")
+
+
 def tick(*, root=None, now=None):
     root = Path(root) if root is not None else fold.ROOT
     now = now or datetime.now(timezone.utc)
@@ -511,6 +532,7 @@ def tick(*, root=None, now=None):
                        hooks=after_run, expected_identity=identities[sid])
             deferred = body.pop(_DEFERRED, False)
             tests = body.pop(_GRANT, None)
+            files = body.pop("_coupled_files", None)
             try:
                 unchanged = _text_identity(root, written[sid]) == identities[sid]
             except OSError:
@@ -522,6 +544,10 @@ def tick(*, root=None, now=None):
                                   and e.get("spec_written_src") == written[sid].get("_src") for e in events)
             if tests is not None and not _grant_blocked(body) and not already_granted:
                 _append_grant(root, sid, tests, written[sid])
+            already_files = any(e.get("type") == "coupled-files-granted" and e.get("subject") == sid
+                                and e.get("spec_written_src") == written[sid].get("_src") for e in events)
+            if files and not _grant_blocked(body) and not already_files:
+                _append_coupled_files(root, sid, files, written[sid])
             stamp = datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00"))
             body["lag_s"] = (now - stamp).total_seconds()
             _append(root, body, spec_written=written[sid])

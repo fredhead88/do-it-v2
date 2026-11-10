@@ -79,5 +79,40 @@ class EffectiveWritesTests(unittest.TestCase):
             ew.effective_grant(self.sid, "Writes: prose only\n", events)
 
 
+class CoupledFilesTests(unittest.TestCase):
+    sid = "L-spec-9001"
+    text = "Writes: src/a.py\n"
+
+    def written(self, src="writer:1"):
+        return dict(type="spec-written", subject=self.sid, _src=src)
+
+    def grant(self, files, rev="writer:1"):
+        return dict(type="coupled-files-granted", subject=self.sid, spec_written_src=rev,
+                    files=[dict(file=f, rule="r", reason="x") for f in files])
+
+    def test_current_revision_files_join_the_text_grant(self):
+        events = [self.written(), self.grant(["scripts/ci/pg_scratch_files.txt"])]
+        self.assertEqual(ew.effective_grant(self.sid, self.text, events),
+                         ["src/a.py", "scripts/ci/pg_scratch_files.txt"])
+
+    def test_older_revision_contributes_nothing(self):
+        events = [self.written("old"), self.grant(["a/b.txt"], "old"), self.written("new")]
+        self.assertEqual(ew.effective_grant(self.sid, self.text, events), ["src/a.py"])
+
+    def test_glob_absolute_and_dotdot_are_undetermined(self):
+        for path in ("scripts/**", "/etc/passwd", "../x.txt", "a/../b.txt", "a/", ""):
+            with self.subTest(path=path), self.assertRaises(merge_gate.Undetermined):
+                ew.effective_grant(self.sid, self.text, [self.written(), self.grant([path])])
+        grant = self.grant([])
+        grant["files"] = [17]
+        with self.assertRaises(merge_gate.Undetermined):
+            ew.effective_grant(self.sid, self.text, [self.written(), grant])
+
+    def test_fold_registers_the_event(self):
+        import fold_emits
+        self.assertEqual(fold_emits.EMITS["coupled-files-granted"], {"spec-preflight"})
+        self.assertEqual(fold_emits.REQUIRED_ROWS["coupled-files-granted"], ("files", "why", "spec_written_src"))
+
+
 if __name__ == "__main__":
     unittest.main()
