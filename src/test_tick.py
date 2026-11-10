@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One runnable check on the tick. Run: python3 test_tick.py"""
-import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, time, types
+import contextlib, datetime, fcntl, io, json, os, pathlib, re, sys, tempfile, time
 
 TMP = pathlib.Path(tempfile.mkdtemp())
 os.environ["DOIT_ROOT"], os.environ["DOIT_NO_POKE"] = str(TMP), "1"
@@ -59,11 +59,6 @@ class LauncherTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
         _builder_project(self.root, stack)
-        # These fixtures keep their events in memory, so launch's fresh ledger read
-        # sees no evidence bundle; they exercise launch mechanics, not that gate.
-        import grader_packet
-        stack.enter_context(patch.object(grader_packet, 'evidence_state',
-                                         return_value=types.SimpleNamespace(state='ready')))
         self.now = fold.NOW
         self.events = []
         for module, key, value in ((fold, 'ROOT', self.root), (fold, 'EVENTS', self.root / 'events'),
