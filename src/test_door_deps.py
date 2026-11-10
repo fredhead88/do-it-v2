@@ -1696,7 +1696,7 @@ SURFACE_GROUPS = (
     (r'(fold|nextstep|tick|dispatch|autodispatch|merge_queue|proving|rulings|dependency_holds|'
      r'lane_rules|attempts|bundle_wait|routing|spawns|start_check|window_policy|window_prewindow|'
      r'grader_packet|grading_env|checks|owed|owed_failures|owed_routes|owed_verdicts|panes|'
-     r'project_scope|ledger_files|fold_emits|fold_stalls|evidence_revision|health_alarms|build_runner)',
+     r'project_scope|ledger_files|fold_emits|fold_stalls|evidence_revision|health_alarms|build_runner|chain_runner)',
      'answer-module function that no answer root reaches: CLI main, report, ledger writer or executor '
      'entry living beside a reachable helper'),
     (r'(brief|daily_summary|digest_actions|dispatch_disagreement|flow_health|look|look_.*|realm|realm_.*|scorecard|stuck_digest|'

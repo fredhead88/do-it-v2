@@ -187,6 +187,25 @@ class ProvisionTests(unittest.TestCase):
                 self.run_check('# live_db\ntrue')
             self.assert_cleaned()
 
+    def test_exact_env_forced_profile_and_confinement_prefix(self):
+        seen = []
+        wrapper = self.top / "confine.sh"
+        wrapper.write_text('#!/bin/sh\nshift\nCONFINED=yes exec "$@"\n')
+        wrapper.chmod(0o755)
+        def confine(has_pg):
+            seen.append(has_pg)
+            return [str(wrapper)]
+        with patch.dict(os.environ, LEAKED_TOKEN="secret-sentinel"):
+            code, output = self.run_check('test "$BASE" = fixture-base && test "$CONFINED" = yes '
+                '&& test -z "${LEAKED_TOKEN:-}" && test "$KEPT" = 1',
+                env={"PATH": os.environ["PATH"], "KEPT": "1"}, confine=confine)
+        self.assertEqual((code, output), (0, b""))
+        self.assertEqual(seen, [False])
+        self.assertFalse(self.pglog.exists())
+        code, _ = self.run_check("true", profile="repo-scratch-pg", confine=confine)
+        self.assertEqual((code, seen[-1]), (0, True))
+        self.assert_cleaned()
+
     def test_cleanup_refuses_outside_var_tmp_and_symlinks(self):
         for path in (self.top, pathlib.Path("/var/tmp"), pathlib.Path("/var/tmp/../owed-pg-bad")):
             with self.assertRaisesRegex(build_runner.Undetermined, "unsafe"):
