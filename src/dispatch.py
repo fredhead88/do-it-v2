@@ -9,7 +9,7 @@ AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
 import grader_packet
-import coupled_tests
+import coupled_tests, sweep_need
 import panes, spawns, scratch, cpu_share  # noqa: E402 — panes: proc_start/alive; spawns: dup-dispatch/cancel/clear
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
@@ -1533,13 +1533,7 @@ def _main(a):
     elif a.role == "grader":
         # A grader's stamp reflects its proven view, including an admin-only cluster; backends with no view carry none.
         dsn_role = grading_env.dsn_role(grading_view) if grader_seat else "none"
-    elif a.role in ("owed-sweeper", "owed-verifier"):
-        # Plain/browser sweeps receive a private RO DSN. Repo checks use only
-        # the per-check scratch endpoint supplied by sweep_provision.
-        import packet as packet_module
-        sweep_manifest = packet_module.parse_sweep_manifest(CONTENT / f"{a.subject}.md")
-        dsn_role = ("none" if sweep_manifest["kind"] == "repo" else
-                    provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent")
+    elif a.role in ("owed-sweeper", "owed-verifier"): dsn_role = sweep_need.sweep_dsn_role(CONTENT / f"{a.subject}.md", a.project, lambda: provision_sweep_env(cwd, ROOT / "repos" / a.project))
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
     wm = window_min(a.role, a.subject, fold.read_events(), backend=backend)
     waiter_pid = os.getpid()
