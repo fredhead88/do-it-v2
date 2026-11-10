@@ -92,8 +92,7 @@ def render(repo: str) -> str:
                   '`doit health [--json]`: finishing, intake, usage percentages, disk and tokens_per_live_spec.',
                   'Seven-day shipped mean: uncached input + output; unmeasured_specs excluded; spawn-stale unknown.',
                   'Authors: Codex; judges: Claude seats. Executor: claude-sonnet-5-5; judgment: claude-opus-5-5 seat.',
-                  'Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;',
-                  'record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.'])
+                  'Sonnet trial: tokens_per_live_spec.claude now and 14 days on, lesson lines axis=K; a rise ends it.'])
     lines.extend(['', '## Lane rules', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     # Keep each lane tuple intact while leaving room for new cron rows within
     # the page's existing line budget.

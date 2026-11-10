@@ -26,8 +26,7 @@ Vendors are `codex` or `claude`; input includes cached input; absent usage is un
 `doit health [--json]`: finishing, intake, usage percentages, disk and tokens_per_live_spec.
 Seven-day shipped mean: uncached input + output; unmeasured_specs excluded; spawn-stale unknown.
 Authors: Codex; judges: Claude seats. Executor: claude-sonnet-5-5; judgment: claude-opus-5-5 seat.
-Sonnet trial: log tokens_per_live_spec.claude via doit health --json at start and 14 days later;
-record both readings and judgment outcomes in lesson lines (axis=K); a measured rise ends it.
+Sonnet trial: tokens_per_live_spec.claude now and 14 days on, lesson lines axis=K; a rise ends it.
 
 ## Lane rules
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
@@ -51,9 +50,10 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
   ledger-repack -- {doit} backup maintain >> {root}/logs/ledger-repack.log 2>&1
   ledger-snapshot | 2 * * * * | user | {repo}/scripts/snapshot.sh  {doit} cron-run ledger-snapshot
   -- {repo}/scripts/snapshot.sh >/dev/null 2>&1; sweep-owed | 11 0,6,12,18 * * * | user | {doit}
-  {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1
-  verify-owed | 8,23,38,53 * * * * | user | {doit}  {doit} cron-run verify-owed -- {doit}
-  verify-owed >> {root}/logs/verify-owed.log 2>&1
+  env DOIT_SUPERVISED=cron-sweep-owed {doit} cron-run sweep-owed -- {doit} sweep-owed >>
+  {root}/logs/sweep-owed.log 2>&1; verify-owed | 8,23,38,53 * * * * | user | {doit}  env
+  DOIT_SUPERVISED=cron-verify-owed {doit} cron-run verify-owed -- {doit} verify-owed >>
+  {root}/logs/verify-owed.log 2>&1
   auto-deploy | */5 * * * * | cron.d | /opt/albert-scott/venv/bin/python  albert {doit} cron-run
   auto-deploy -- /opt/albert-scott/venv/bin/python /opt/albert-scott/scripts/ops/auto_deploy.py
   --once >> /var/log/albert-scott/auto-deploy-run.log 2>&1; owed-digest | 0 6 * * * | user | {doit}
