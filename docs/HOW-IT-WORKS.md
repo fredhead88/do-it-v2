@@ -122,10 +122,10 @@ Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_r
 Source: `look.toml` `[merge_queue]` and `src/window_members.py`.
 - After a red window with unnamed owners, each remaining member is verified alone on the window
   base, at most 4 CI runs at once (member_verify_parallel).
-- Each run appends `member-verdict {spec, window, tree, state, url, nodes}`. Drop red members with
-  their failing nodes; green and undetermined members stay eligible for the next window.
+- Each run appends `member-verdict {spec, window, tree, state, url, nodes}`; red members drop.
 - Green member-verdict or window-tree-verified for required checks on the exact tree is reused for
   24 hours (verdict_fresh_hours). Reject undetermined, malformed, stale or future-dated evidence.
+- `src/window_dispatch.py`: predeploy tree, window, suite, quick ids; legacy tree/quick empty.
 
 ## Branch refresh
 Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 3/spec/day.

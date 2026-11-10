@@ -138,11 +138,11 @@ def render(repo: str) -> str:
                   'Source: `look.toml` `[merge_queue]` and `src/window_members.py`.'])
     lines.extend(_wrap('After a red window with unnamed owners, each remaining member is verified alone on the '
                        f'window base, at most {parallel} CI runs at once (member_verify_parallel).'))
-    lines.extend(_wrap('Each run appends `member-verdict {spec, window, tree, state, url, nodes}`. Drop red members '
-                       'with their failing nodes; green and undetermined members stay eligible for the next window.'))
+    lines.extend(_wrap('Each run appends `member-verdict {spec, window, tree, state, url, nodes}`; red members drop.'))
     lines.extend(_wrap('Green member-verdict or window-tree-verified for required checks on the exact tree is '
                        f'reused for {fresh} hours (verdict_fresh_hours). Reject undetermined, malformed, '
                        'stale or future-dated evidence.'))
+    lines.extend(_wrap('`src/window_dispatch.py`: predeploy tree, window, suite, quick ids; legacy tree/quick empty.'))
     lines.extend(['', '## Branch refresh',
                   'Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; '
                   f'max {queue.get("branch_refresh_per_day", 3)}/spec/day.'])

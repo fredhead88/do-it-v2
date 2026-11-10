@@ -269,6 +269,29 @@ class Rehearsal(unittest.TestCase):
         self.assertEqual((code, calls), (0, []))
         after = [e for e in fold.read_events() if e['type'] == 'window-tree-verified']
         self.assertEqual(after, before)
+        receipt = before[0]
+        from datetime import datetime, timedelta, timezone
+        cases = {
+            'fresh-covered': dict(receipt),
+            'changed-tree': dict(receipt, tree='0' * 40),
+            'stale-green': dict(receipt, ts=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat()),
+            'incomplete': dict(receipt, required=[wg.PYTEST_CHECK]),
+        }
+        observed = {}
+        for name, prior in cases.items():
+            with self.subTest(name=name), \
+                 patch.object(fold, 'read_events', return_value=[prior]), \
+                 patch.object(wg, 'verify', side_effect=RuntimeError('boundary dispatch')) as verify, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                rc = wg.main_(self.args(ident='rh-boundary-' + name))
+                self.assertEqual(rc, 0 if name == 'fresh-covered' else 2)
+                self.assertEqual(verify.call_count, 0 if name == 'fresh-covered' else 1)
+                observed[name] = dict(exit_code=rc, dispatches=verify.call_count)
+                if name != 'fresh-covered':
+                    self.assertEqual(verify.call_args.kwargs, {'rehearsal': True})
+        raw = json.dumps(observed, sort_keys=True)
+        print(json.dumps(dict(url='scratch://rehearsal/reuse-boundary', status=200,
+            body_sha256=hashlib.sha256(raw.encode()).hexdigest(), body_excerpt=observed)))
 
     def test_cached_candidate_still_waits_for_predecessor_and_cannot_ship_on_cancellation(self):
         self.rehearse()

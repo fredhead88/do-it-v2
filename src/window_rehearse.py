@@ -15,6 +15,7 @@ import quarantine_file
 import window_attribution
 import window_gate as gate
 import window_prewindow
+import window_dispatch
 import test_slots
 
 
@@ -238,7 +239,8 @@ def _run(ident, project, specs, on, main):
                     emit('running', sha=candidate, tree=tree, required=required)
                     previous = signal.signal(signal.SIGTERM, _cancel_verification)
                     try:
-                        result = gate.verify(repo, candidate, required, ident, rehearsal=True)
+                        with window_dispatch.managed(tree):
+                            result = gate.verify(repo, candidate, required, ident, rehearsal=True)
                     finally:
                         signal.signal(signal.SIGTERM, previous)
                 reused = False
