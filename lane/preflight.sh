@@ -51,7 +51,9 @@ wait "$ACTIVE"; rc=$?
 ACTIVE=""
 while IFS= read -r line; do log "$(clean "$line")"; done < <(grep -E '^PREFLIGHT-(RECHAINED|GUARDS|TARGETS|CLEAN) ' "$OUT.sweep")
 case "$rc" in
-  0) log NO-NEW-FAILURES ;;
+  0) # clean only on a completed clean sweep: exit 0 without its PREFLIGHT-CLEAN line is undetermined
+     if grep -q '^PREFLIGHT-CLEAN ' "$OUT.sweep"; then log NO-NEW-FAILURES
+     else log "NEW-FAILURES:"; log "RUN-BROKEN: PREFLIGHT-UNDETERMINED exit 0 without a completed clean sweep line"; fi ;;
   1)
     red=$(grep -m1 '^PREFLIGHT-RED ' "$OUT.sweep")
     read -r _ stage owner cls detail <<<"$red"
