@@ -102,7 +102,7 @@ name = "sweep-owed"
 where = "user"
 max_runtime_s = 3600
 schedule = "11 0,6,12,18 * * *"
-command = "{doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
+command = "env DOIT_SUPERVISED=cron-sweep-owed {doit} cron-run sweep-owed -- {doit} sweep-owed >> {root}/logs/sweep-owed.log 2>&1"
 path = "{doit}"
 sig = '\bdoit sweep-owed\b'
 owner = "thinker"
@@ -113,7 +113,7 @@ name = "verify-owed"
 where = "user"
 max_runtime_s = 3600
 schedule = "8,23,38,53 * * * *"
-command = "{doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1"
+command = "env DOIT_SUPERVISED=cron-verify-owed {doit} cron-run verify-owed -- {doit} verify-owed >> {root}/logs/verify-owed.log 2>&1"
 path = "{doit}"
 sig = '\bdoit verify-owed\b'
 owner = "thinker"
