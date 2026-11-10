@@ -102,7 +102,7 @@ def test_verifier_never_waives():
         literals = set(re.findall(r"""["'](owed-[a-z]+|spec-[a-z]+|shipped|decision|unblocked)["']""", code))
         check(literals - {"owed-verifier", "owed-sweeper"} <= allowed, f"{name} names no waiving type: {literals}")
         check("owed-waived" not in code, f"{name} never names owed-waived in code")
-    check(not re.search(r"\bemit\(|\.write\(|open\(", re.sub(r'"""[\s\S]*?"""', "", (HERE / "owed_asks.py").read_text())),
+    check(not re.search(r"\bemit\(|\.write\(|\bopen\(", re.sub(r'"""[\s\S]*?"""', "", (HERE / "owed_asks.py").read_text())),
           "owed_asks appends and writes nothing at all")
     try:
         verifier._emit("owed-waived", "L-spec-7001", criterion="AC1", reason="x")
@@ -181,3 +181,89 @@ test_non_exhausted_open_ask_still_stripped()
 import shutil
 shutil.rmtree(str(TMP), ignore_errors=True)
 print(f"owed_asks: {N} checks pass")
+
+
+def test_inventories():
+    import dispatch
+    import subprocess
+    from unittest.mock import patch
+    cases = [
+        ('credential', 'Read production SQL', 'Operator: grant SELECT on fixture', 'due'),
+        ('api-token', 'Requires an approved API token to observe the endpoint', '', 'due'),
+        ('missing-account', 'Log in as staff at https://fixture.invalid', 'no review account', 'due'),
+        ('present-account', 'Log in as staff at https://fixture.invalid', 'no review account', 'due'),
+        ('decision', 'Read repository output', 'Operator ruling needed', 'failed'),
+        ('approval', 'Read repository output', 'Operator: approve this change', 'correcting'),
+        ('real-world', 'Read repository output', 'Operator: purchase this item', 'due'),
+        ('sql-wrapper', 'Read production SQL through existing read-only wrapper', 'no browser here', 'due'),
+        ('local-dependency', 'Run repository tests', 'missing node_modules', 'due'),
+        ('closed', 'Log in as staff at https://fixture.invalid', 'no review account', 'met'),
+        ('waived', 'Read production SQL', 'Operator: grant SELECT on fixture', 'waived'),
+        ('dropped', 'Read production SQL', 'Operator: grant SELECT on fixture', 'dropped'),
+        ('unshipped', 'Read production SQL', 'Operator: grant SELECT on fixture', 'unshipped'),
+        ('callback-fault', 'Log in as staff at https://fixture.invalid', 'no review account', 'due'),
+        ('browser-executable', 'Run Playwright against an anonymous local fixture', 'missing chromium', 'due'),
+    ]
+    with tempfile.TemporaryDirectory(prefix='credential-inventory-') as tmp:
+        root = pathlib.Path(tmp)
+        (root/'content').mkdir()
+        (root/'events').mkdir()
+        evs = []
+        expected_credentials, expected_operator = set(), set()
+        for i, (name, observation, why, state) in enumerate(cases):
+            sid = f'L-spec-{9950+i}'
+            (root/'content'/f'{sid}.md').write_text('AC1 [backend]: '+observation)
+            base = dict(subject=sid, project=name)
+            def event(event_type, actor, seconds, **fields):
+                return dict(base, type=event_type, actor=actor, ts=(NOW+timedelta(seconds=seconds)).isoformat(), **fields)
+            evs.append(event('owed-ac','spec-writer',-100,criterion='AC1',wake_at=iso(days=-1)))
+            if state != 'unshipped':
+                evs.append(event('shipped','executor',-90))
+            evs.append(event('owed-unobservable','owed-sweeper',-80,criterion='AC1',capability='operator-action',why=why))
+            evs += [event('owed-routed','sweep',-70+j,criterion='AC1',route='operator-action') for j in range(2)]
+            if state in ('failed','correcting','met','waived'):
+                evs.append(event('owed-'+('failed' if state=='correcting' else state),'operator',-60,
+                                 criterion='AC1',evidence='$ fixture\nobserved',reason='fixture',kind='unmet'))
+            if state == 'correcting':
+                evs.append(event('owed-corrective','operator',-50,criterion='AC1',corrective='L-spec-9999'))
+            if state == 'dropped':
+                evs.append(event('spec-killed','thinker',-40))
+            if name in ('credential','api-token','missing-account','callback-fault'):
+                expected_credentials.add(sid)
+            if name in ('credential','decision','approval','real-world'):
+                expected_operator.add(sid)
+        evs.append(dict(evs[0]))
+        evs.append(dict(evs[0],subject='L-spec-9998',actor='builder'))
+        calls = []
+        def accounts(project):
+            calls.append(project)
+            if project == 'callback-fault':
+                raise OSError('fixture stat failure')
+            return project == 'present-account'
+        with patch.object(dispatch,'CONTENT',root/'content'):
+            creds = owed_asks.credential_list(evs,NOW,accounts=accounts)
+            assert len(calls) == len(set(calls))
+            assert {r['spec'] for r in creds} == expected_credentials, creds
+            assert next(r for r in creds if r['spec'] == 'L-spec-9951')['credential'] == 'API token'
+            assert all(r['why']=='no review account' for r in creds if r['credential']=='review account')
+            ops = owed_asks.operator_open(evs,NOW)
+            assert {r['spec'] for r in ops} == expected_operator, ops
+            assert creds == owed_asks.credential_list(evs,NOW,accounts=accounts)
+            assert ops == owed_asks.operator_open(evs,NOW)
+            print('credential inventory',[(r['spec'],r['criterion'],r['credential'],r['why']) for r in creds])
+            print('operator inventory',[(r['spec'],r['criterion']) for r in ops])
+        # The existing CLI emits exactly one JSON aggregate, with no row messages.
+        for event in evs:
+            data=dict(event)
+            actor=data.pop('actor')
+            with (root/'events'/f'L-{actor}-fixture.jsonl').open('a') as f:
+                f.write(json.dumps(data)+'\n')
+        env=dict(os.environ,DOIT_ROOT=str(root),HOME=str(root/'home'),DOIT_READ_CACHE='0')
+        result=subprocess.run(['/usr/bin/python3',str(HERE/'owed_asks.py')],env=env,capture_output=True,text=True)
+        assert result.returncode==0,result.stderr
+        assert len(result.stdout.splitlines())==1
+        assert isinstance(json.loads(result.stdout),list)
+        print('credential CLI: one aggregate; no writes or notifications')
+
+
+test_inventories()

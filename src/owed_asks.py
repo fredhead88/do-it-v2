@@ -76,6 +76,10 @@ def _last_why(spec_evs, criterion):
 def _asks_for(spec_evs, now):
     out = []
     for r in owed.checks(spec_evs, now):
+        relabels = [e for e in spec_evs if e.get('route') == 'relabel'
+                    and e.get('criterion') == r['criterion'] and e.get('need')]
+        if relabels and relabels[-1]['need'] == 'unobservable':
+            continue
         cap = r.get("last_unobservable_capability")
         if cap in (None, "elapsed") or r["status"] not in OPEN_STATUSES:
             continue
@@ -85,6 +89,47 @@ def _asks_for(spec_evs, now):
             continue
         out.append((r, cap))
     return out
+
+
+def operator_open(evs, now):
+    """All open operator acts, including failed/correcting and exhausted rows."""
+    rows = {}
+    for history in _by_spec(evs).values():
+        for row in owed.checks(history, now):
+            if row['status'] not in owed_routes.OPEN:
+                continue
+            ask = row.get('why') or row.get('ask') or ''
+            if (owed_routes.classify_ask(ask)['owner'] != 'operator'
+                    and row.get('next_owner') != 'operator'):
+                continue
+            rows[row['spec'], row['criterion']] = dict(spec=row['spec'], criterion=row['criterion'],
+                                                       ask=_plain(ask, row['spec']))
+    return [rows[key] for key in sorted(rows)]
+
+
+def credential_list(evs, now, *, accounts=None):
+    """One stable credential-name aggregate, without opening any credential file."""
+    import prod_browser
+    opened = [r for history in _by_spec(evs).values() for r in owed.checks(history, now)
+              if r['status'] in owed_routes.OPEN]
+    present = prod_browser.account_inventory((r.get('project') for r in opened), accounts)
+    rows = {}
+    for row in opened:
+        text = owed_routes.spec_text(row)
+        block = owed_routes.criterion_text(row, text)
+        label = owed_routes.need(row, text)
+        auth = owed_routes.authenticated(block)
+        if auth and not present.get(row.get('project')):
+            credential, why = 'review account', 'no review account'
+        elif label == 'credential' and not auth:
+            named = re.search(r'\bapi (token|key)\b', block, re.I)
+            credential = 'API ' + named.group(1).lower() if named else 'approved read-only access'
+            why = 'The observation requires explicitly named authorization'
+        else:
+            continue
+        rows[row['spec'], row['criterion']] = dict(spec=row['spec'], criterion=row['criterion'],
+                                                  credential=credential, why=why)
+    return [rows[key] for key in sorted(rows)]
 
 
 def queue(evs, now):
@@ -153,4 +198,4 @@ def render(rows):
 if __name__ == "__main__":
     from datetime import datetime, timezone
     import fold
-    print(render(queue(fold.read_events(), datetime.now(timezone.utc))) or "no open asks")
+    print(json.dumps(credential_list(fold.read_events(), datetime.now(timezone.utc)), sort_keys=True))
