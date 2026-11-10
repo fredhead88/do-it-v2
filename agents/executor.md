@@ -357,8 +357,8 @@ A standing driver `autodispatch-failed` needs Executor/operator handling or a ne
 ## Sonnet trial
 
 The Executor runs on `claude-sonnet-5-5`.
-A judgment call (a hold whose reason starts `undetermined:`, a merge ruling, or a question needing a decision) goes to an Opus seat sub-agent (`claude-opus-5-5`), and its outcome is appended as a `lesson ... axis=K`.
-The trial is measured by `doit health --json` using `tokens_per_live_spec.claude`, read at trial start and again 14 days later, with both readings in a `lesson` line.
+A judgment call (a hold whose reason starts `undetermined:`, a merge ruling, or a question needing a decision) goes to an Opus seat sub-agent (`claude-opus-5-5`), and its outcome is recorded in the existing report or decision context.
+The trial is measured by `doit health --json` using `tokens_per_live_spec.claude`, read at trial start and again 14 days later, with both readings in the existing trial report (axis=K). A lesson is warranted only by dysfunction and its workaround.
 A measured rise in Claude tokens per live spec ends the trial.
 
 
@@ -451,20 +451,26 @@ confirms a fresh keepalive-started poller using the restored source. A refused
 revert retains the current installation with the same bounded loop recovery.
 Repository reversion does not restore a runtime installation.
 
-## Lessons (operator rule, 2026-09-22)
+## Lessons (operator rule, 2026-09-22; problem field added 2026-09-24)
 
-The system is being dialled in, and the record of what to change is the ledger, not anyone's
-memory. **At the moment** you hit a refusal you did not expect, a stall, a spawn that produced
-nothing, a workaround, a rule that contradicted a tool, or a pattern that clearly saved time or
-tokens, append one line before you move on:
+A lesson records dysfunction: the system failed to do its own job, so you had to work around
+it, wait for it, or redo work. Append at that moment. Working patterns and status readings
+are not lessons; record routine judgments and successful measurements in their report or decision.
 
-`doit append lesson <subject> "text=<what happened and what it cost>" axis=T|K|Q verdict=working|not-working fix=<brief path | L-charter-NNNN:Rn | open> ref=<file:line of the evidence>`
+`doit append lesson <subject> "text=<what failed and what it cost>" axis=T|K|Q verdict=not-working fix=<brief path | L-charter-NNNN:Rn | open> problem=<slug> [statement=<what goes wrong and why, only when minting a new slug>] "workaround=<what you did instead>" cost_min=<measured minutes | unknown> [cost_tokens=<n>] ref=<file:line of the evidence>`
 
-`axis`: T = time to production, K = tokens, Q = quality. One line, the measurement, no essay. The
-digest (`scripts/lessons_digest.py`) collects every one into
-`docs/sessions/do-it-v2-lessons-log.md` for the operator's review. An escalation, correction or
-brief you append is already harvested; a `lesson` is for what those do not say — the *why* and the
-*what to change*.
+`axis`: T = time to production, K = tokens, Q = quality. `problem=` names the durable problem:
+reuse an existing slug or mint one with `statement=`. `ref=` points to the evidence, never an
+invented source. Record measured costs with units; unknown is not zero. A missing or unmatched
+slug or missing workaround never blocks the append; historical lessons remain accepted.
+
+The register (`doit problems`) and `$DOIT_ROOT/content/problems.md` retain the occurrence record.
+The hourly digest (`scripts/lessons_digest.py`) packages a named problem with at least three
+occurrences on two subjects within 14 days into one requirement-less brief for Thinker triage,
+at most two briefs a UTC day. It excludes `unassigned`, `stuck-over-1h` and working verdicts.
+Later occurrences update that brief's cumulative recurrence line; the lessons log is a short
+repeat-offenders list. The Thinker diagnoses and decides what reaches the operator. An escalation,
+correction or brief already records its event; add a lesson only for dysfunction it does not say.
 
 ## Waiting on the Thinker (operator rule, 2026-10-11)
 

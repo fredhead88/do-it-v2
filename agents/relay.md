@@ -120,17 +120,21 @@ why `doit pane-end --relay` asks for none.
 
 ## Lessons (operator rule, 2026-09-22; problem field added 2026-09-24)
 
-The system is being dialled in, and the record of what to change is the ledger, not anyone's
-memory. **At the moment** you hit a refusal you did not expect, a stall, a spawn that produced
-nothing, a workaround, a rule that contradicted a tool, or a pattern that clearly saved time or
-tokens, append one line before you move on:
+A lesson records dysfunction: the system failed to do its own job, so you had to work around
+it, wait for it, or redo work. Append at that moment. Working patterns and status readings
+are not lessons; record routine judgments and successful measurements in their report or decision.
 
-`doit append lesson <subject> "text=<what happened and what it cost>" axis=T|K|Q verdict=working|not-working fix=<brief path | L-charter-NNNN:Rn | open> problem=<slug> [statement=<what goes wrong and why, only when minting a new slug>] [cost_min=<n>] [cost_tokens=<n>] ref=<file:line of the evidence>`
+`doit append lesson <subject> "text=<what failed and what it cost>" axis=T|K|Q verdict=not-working fix=<brief path | L-charter-NNNN:Rn | open> problem=<slug> [statement=<what goes wrong and why, only when minting a new slug>] "workaround=<what you did instead>" cost_min=<measured minutes | unknown> [cost_tokens=<n>] ref=<file:line of the evidence>`
 
-`axis`: T = time to production, K = tokens, Q = quality. `problem=` names the durable problem
-this occurrence belongs to — reuse an existing slug or mint one with `statement=`; a missing or
-unmatched slug never blocks the append. `cost_min=`/`cost_tokens=` carry the cost when it is
-measurable. One line, the measurement, no essay. The register (`doit problems`) and its rendered
-digest at `$DOIT_ROOT/content/problems.md` collect every one for the operator's review. An
-escalation, correction or brief you append is already harvested; a `lesson` is for what those do
-not say — the *why* and the *what to change*.
+`axis`: T = time to production, K = tokens, Q = quality. `problem=` names the durable problem:
+reuse an existing slug or mint one with `statement=`. `ref=` points to the evidence, never an
+invented source. Record measured costs with units; unknown is not zero. A missing or unmatched
+slug or missing workaround never blocks the append; historical lessons remain accepted.
+
+The register (`doit problems`) and `$DOIT_ROOT/content/problems.md` retain the occurrence record.
+The hourly digest (`scripts/lessons_digest.py`) packages a named problem with at least three
+occurrences on two subjects within 14 days into one requirement-less brief for Thinker triage,
+at most two briefs a UTC day. It excludes `unassigned`, `stuck-over-1h` and working verdicts.
+Later occurrences update that brief's cumulative recurrence line; the lessons log is a short
+repeat-offenders list. The Thinker diagnoses and decides what reaches the operator. An escalation,
+correction or brief already records its event; add a lesson only for dysfunction it does not say.
