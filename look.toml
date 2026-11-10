@@ -87,7 +87,7 @@ upload_manifest = "/opt/albert-scott/docs/do-it/ledger/upload-manifest.jsonl"
 # look.toml (or revert its commit) to undo it. No root-local off switch exists.
 # Rollback: revert enforcement first, then this merge; saved state is inert.
 [admission]
-mode = "enforce"  # Thinker 2026-11-04 13:00Z: enforce during the merge push (load 20-36 starved rehearsals). 2026-11-10: kept (load still peaks 30-36 under 10 builders); revisit when load stays under 20
+mode = "observe"  # Thinker 2026-11-10 12:2xZ: back to the tested default (test_tick AC11 pins observe); load is managed by the builder seat cap instead
 mem_floor_gb = 6
 mem_hard_stop_gb = 8
 mem_swap_hard_stop_gb = 12
