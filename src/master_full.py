@@ -2,7 +2,7 @@
 """Bounded master guard scheduling and collection; never changes lane state."""
 import argparse
 import ast
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import io
 import json
@@ -21,6 +21,21 @@ import base_red as br
 SHA = re.compile(r"[a-f0-9]{40}")
 COVERED = ["pg-parity", "pytest"]
 MAX_BYTES = 8 * 1024 * 1024
+EXPIRY_AGE = timedelta(hours=24)
+SHARD_NAME = re.compile(r"pytest — shard (\d+) of (\d+)")
+# Failures that say nothing about the run itself: never a reason to expire an intent.
+TRANSIENT = frozenset({
+    "GitHub API failed", "missing GitHub API pages", "invalid GitHub API page",
+    "invalid GitHub API rows", "GitHub log quota unavailable",
+    "selection artifact quota unavailable", "selection artifact unavailable or oversized"})
+
+
+class Undetermined(ValueError):
+    """The answer could not be established; the intent stays pending."""
+
+
+class Ambiguous(ValueError):
+    """More than one run satisfies the intent."""
 
 
 def _now():
@@ -49,6 +64,121 @@ def _save(path, state):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _transient(error):
+    if isinstance(error, (OSError, subprocess.SubprocessError, Undetermined)):
+        return True
+    return isinstance(error, ValueError) and str(error) in TRANSIENT
+
+
+def _bound(text, size=300):
+    return _clean(text)[:size]
+
+
+def _stamp(value):
+    return br._time(value).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _run(owner, rid):
+    """One run by id: the document, None for a proven 404, ValueError otherwise."""
+    rc, out, err = br.ghlimit.run(["gh", "api", f"repos/{owner}/actions/runs/{rid}"], wait=False)
+    if rc:
+        if rc != 75 and "HTTP 404" in (err or ""):
+            return None
+        raise Undetermined("run lookup failed: " + _bound(err or f"exit {rc}", 100))
+    try:
+        doc = json.loads(out)
+    except ValueError:
+        raise Undetermined("run lookup unparsable") from None
+    if not isinstance(doc, dict) or str(doc.get("id")) != str(rid):
+        raise Undetermined("run lookup returned a different run")
+    return doc
+
+
+def accept(project, repo, owner, pending):
+    """The run id this intent dispatched, None when provably absent, else ValueError."""
+    full = pending["kind"] == "full"
+    wanted = "full" if full else "selected"
+    try:
+        sent = br._time(pending["sent_at"])
+        path = (f"repos/{owner}/actions/workflows/python-tests.yml/runs?event=workflow_dispatch"
+                f"&branch=master&created=>={_stamp(sent)}&per_page=100")
+        listing = br._api(path, "workflow_runs")
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        pending["last_reason"] = _bound("run listing unreadable: " + str(error))
+        raise Undetermined(pending["last_reason"]) from None
+    accepted, dropped, unread = [], [], []
+    for run in listing:
+        rid = str(run.get("id", ""))
+        try:
+            fresh = (rid.isdigit() and rid not in pending["before_ids"]
+                     and run.get("event") == "workflow_dispatch" and run.get("head_branch") == "master"
+                     and br._time(run["created_at"]) >= sent)
+        except (ValueError, KeyError, TypeError):
+            fresh = False
+        if not fresh:
+            continue
+        try:
+            selection = _artifact(owner, rid)
+        except (OSError, subprocess.SubprocessError) as error:
+            unread.append(f"{rid}: artifact {type(error).__name__}")
+            continue
+        except ValueError as error:
+            if _transient(error):
+                unread.append(f"{rid}: {error}")
+            else:
+                dropped.append(f"{rid}: artifact {error}")
+            continue
+        except (KeyError, TypeError, zipfile.BadZipFile, zlib.error, UnicodeError) as error:
+            dropped.append(f"{rid}: artifact {type(error).__name__}")
+            continue
+        mode = selection.get("mode") if isinstance(selection, dict) else None
+        reason = selection.get("reason") if isinstance(selection, dict) else None
+        if mode == wanted and (not full or reason == "suite-full"):
+            accepted.append(run)
+        else:
+            dropped.append(f"{rid}: mode={mode} reason={reason}")
+    notes = unread + dropped
+    if notes:
+        pending["last_reason"] = _bound("dropped " + "; ".join(notes), 1000)
+    elif "last_reason" in pending:
+        pending["last_reason"] = ""
+    if unread:
+        raise Undetermined(pending["last_reason"])
+    exact = [r for r in accepted if r.get("head_sha") == pending["sha"]]
+    chosen = exact or accepted
+    if len(chosen) > 1:
+        pending["last_reason"] = _bound("ambiguous runs " + ", ".join(str(r["id"]) for r in chosen))
+        raise Ambiguous("dispatch acceptance ambiguous")
+    return str(chosen[0]["id"]) if chosen else None
+
+
+def _descendant(repo, base, head):
+    if not (isinstance(base, str) and SHA.fullmatch(base)):
+        return False
+    try:
+        return base in br.window_gate.git(repo, "rev-list", "--first-parent", head).stdout.split()
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
+def _shards(jobs):
+    """Pytest shard jobs, minus a skipped shard numbered past the count in its own name."""
+    result = []
+    for job in jobs:
+        name = job.get("name", "")
+        if not name.startswith("pytest — shard "):
+            continue
+        parsed = SHARD_NAME.fullmatch(name)
+        if parsed and job.get("conclusion") == "skipped" and int(parsed[1]) > int(parsed[2]):
+            continue
+        result.append(job)
+    return result
+
+
+def _shard_text(shards):
+    return _bound("; ".join(f"{j.get('name')}: {j.get('conclusion')}" for j in shards), 300)
 
 
 def _expression(source, context):
@@ -229,7 +359,8 @@ def _collect(project, repo, owner, pending, run):
     fields = dict(run_ids=[rid], suite=pending["inputs"]["suite"], covered=[],
                   green=False, undetermined=[], url=f"https://github.com/{owner}/actions/runs/{rid}")
     ids, complete = [], False
-    if actual != pending["sha"]:
+    if actual != pending["sha"] and not (pending["kind"] == "full"
+                                         and _descendant(repo, pending["sha"], actual)):
         fields["undetermined"].append("master advanced before dispatch acceptance")
     elif run.get("conclusion") not in {"success", "failure"}:
         fields["undetermined"].append("run terminal state is " + _clean(run.get("conclusion")))
@@ -247,10 +378,10 @@ def _collect(project, repo, owner, pending, run):
             fields["covered"] = snapshot["kinds_covered"]
             fields["undetermined"] = snapshot["undetermined"]
             jobs = br._api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
-            partial = [j for j in jobs if j.get("name", "").startswith("pytest — shard ")
-                       and j.get("conclusion") not in {"success", "failure"}]
+            partial = [j for j in _shards(jobs) if j.get("conclusion") not in {"success", "failure"}]
             if partial:
-                fields["undetermined"].append(f"{len(partial)} pytest shards did not execute completely")
+                fields["undetermined"].append(f"{len(partial)} pytest shards did not execute completely: "
+                                               + _shard_text(partial))
             ids = sorted(set(i for k in br.KINDS for i in snapshot["ids"][k]))
             unexpected = [i for i in ids if br.id_kind(i) not in COVERED]
             if unexpected:
@@ -274,7 +405,10 @@ def _collect(project, repo, owner, pending, run):
             fields["undetermined"] = [why for p in parsed for why in p["undetermined"]]
             jobs = br._api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
             executed = {"success", "failure"}
-            shards = [j for j in jobs if j.get("name", "").startswith("pytest — shard ")]
+            shards = _shards(jobs)
+            partial = [j for j in shards if j.get("conclusion") not in executed]
+            if partial:
+                fields["undetermined"].append("pytest shards did not execute completely: " + _shard_text(partial))
             if (not any(j.get("name") == "pytest" and j.get("conclusion") in executed for j in jobs)
                     or not shards or any(j.get("conclusion") not in executed for j in shards)
                     or not any("SUMMARY pytest_baseline_gate.py check:" in text for _, text in members)):
@@ -300,6 +434,83 @@ def _collect(project, repo, owner, pending, run):
     row = dict(type=event, project=project, sha=actual, complete=complete, ids=ids, **fields)
     if pending["kind"] == "full": _question(project, row)
     return row
+
+
+def _old(pending, now):
+    return now - br._time(pending["sent_at"]) > EXPIRY_AGE
+
+
+def _note(pending, text, path, state):
+    text = _bound(text, 1000)
+    if pending.get("last_reason") != text:
+        pending["last_reason"] = text
+        _save(path, state)
+
+
+def _expire(project, pending, slug, now, path, state):
+    event = "master-full-run" if pending["kind"] == "full" else "selected-canary"
+    if not any(r.get("type") == event and r.get("expired_intent") == pending["sent_at"]
+               for r in br._nightly_rows(project)):
+        br._append(event, project, pending["sha"], complete=False, ids=[], green=False, covered=[],
+                   undetermined=[f"intent expired: {slug}"], run_ids=[],
+                   suite=pending["inputs"]["suite"], expired_intent=pending["sent_at"],
+                   last_reason=_bound(pending.get("last_reason") or ""))
+    pending["expired"] = {"at": now.astimezone(timezone.utc).isoformat(), "reason": slug}
+    _save(path, state)
+
+
+def _advance(project, repo, owner, pending, state, path, now, result):
+    """Move one unresolved intent to accepted, collected or expired; doubt leaves it pending."""
+    try:
+        if not pending.get("run_id"):
+            try:
+                rid = accept(project, repo, owner, pending)
+            except Ambiguous as error:
+                _save(path, state)
+                if _old(pending, now):
+                    return _expire(project, pending, "ambiguous-runs", now, path, state)
+                raise error
+            except ValueError:
+                _save(path, state)
+                raise
+            if rid is None:
+                _save(path, state)
+                if _old(pending, now):
+                    return _expire(project, pending, "no-run-found", now, path, state)
+                raise ValueError("dispatch acceptance pending: " + (pending.get("last_reason") or "no run yet"))
+            pending["run_id"] = rid
+            pending["last_reason"] = ""
+            _save(path, state)
+        try:
+            run = _run(owner, pending["run_id"])
+        except ValueError as error:
+            _note(pending, str(error), path, state)
+            raise
+        if run is None:
+            _note(pending, "run " + pending["run_id"] + " not found", path, state)
+            return _expire(project, pending, "run-missing", now, path, state)
+        if run.get("status") != "completed":
+            _note(pending, "run status is " + _clean(run.get("status")), path, state)
+            if _old(pending, now):
+                return _expire(project, pending, "run-not-completed", now, path, state)
+            return
+        try:
+            row = _collect(project, repo, owner, pending, run)
+        except ValueError as error:
+            _note(pending, str(error), path, state)
+            if not _transient(error) and _old(pending, now):
+                return _expire(project, pending, "collection-unprovable", now, path, state)
+            raise
+        if row is None:
+            return
+        state["pending"].remove(pending)
+        result["collected"] = True
+        result["undetermined"].extend(row["undetermined"])
+        _save(path, state)
+    except (OSError, subprocess.SubprocessError, KeyError, TypeError, RuntimeError, zipfile.BadZipFile,
+            zlib.error, UnicodeError) as error:
+        _note(pending, f"{type(error).__name__}: {error}", path, state)
+        raise
 
 
 def tick(project):
@@ -328,40 +539,10 @@ def tick(project):
             # Collection is independent of current workflow eligibility and SHA.
             runs = br._api(f"repos/{owner}/actions/runs?per_page=100", "workflow_runs")
             for pending in list(state["pending"]):
+                if pending.get("expired"):
+                    continue
                 try:
-                    matches = [r for r in runs if r.get("name") == "Python Tests"
-                               and r.get("event") == "workflow_dispatch" and r.get("head_branch") == "master"
-                               and str(r.get("id", "")).isdigit()
-                               and str(r["id"]) not in pending["before_ids"]
-                               and br._time(r["created_at"]) >= br._time(pending["sent_at"])]
-                    if pending.get("run_id"):
-                        matches = [r for r in runs if str(r.get("id")) == pending["run_id"]]
-                    else:
-                        candidates = []
-                        for run in matches:
-                            try:
-                                selection = _artifact(owner, str(run["id"]))
-                                wanted = "full" if pending["kind"] == "full" else "selected"
-                                if isinstance(selection, dict) and selection.get("mode") == wanted:
-                                    candidates.append(run)
-                            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile,
-                                    subprocess.SubprocessError, zlib.error, UnicodeError):
-                                continue
-                        matching_sha = [r for r in candidates if r.get("head_sha") == pending["sha"]]
-                        matches = matching_sha or candidates
-                    # A unique newly observed run is necessary but not sufficient:
-                    # artifacts and logs below must also prove the requested mode.
-                    if len(matches) != 1:
-                        raise ValueError("dispatch acceptance pending or ambiguous")
-                    pending["run_id"] = str(matches[0]["id"])
-                    _save(path, state)
-                    row = _collect(project, repo, owner, pending, matches[0])
-                    if row is None:
-                        continue
-                    state["pending"].remove(pending)
-                    result["collected"] = True
-                    result["undetermined"].extend(row["undetermined"])
-                    _save(path, state)
+                    _advance(project, repo, owner, pending, state, path, now, result)
                 except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError,
                         zipfile.BadZipFile, zlib.error, UnicodeError) as error:
                     result["undetermined"].append(_clean(error))
