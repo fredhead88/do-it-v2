@@ -356,6 +356,41 @@ def _record_held_skips(events, specs, *, reporter=None):
                                            subject=sid, reason=reason, ts=dispatch.now()))
 
 
+HOLD_REASONS = {}  # item -> reason of the latest fresh-check hold, read by run_steps
+
+
+def _fresh_hold(step, dispatcher):
+    """Re-read the ledger right before preparation; True means do not start."""
+    import attempts
+    import bundle_wait
+    import nextstep
+    import project_scope
+    import start_check
+    HOLD_REASONS.pop(step.item, None)
+    fresh = _launch_events()
+    if fresh is None:
+        print(f'hold {step.item}: fresh ledger read failed; not preparing', file=sys.stderr)
+        HOLD_REASONS[step.item] = 'undetermined: fresh ledger read failed'
+        return True
+    role, now = ROUTINE_ROLES[step.action], getattr(dispatcher, 'now', fold.NOW)
+    main = None
+    if role == 'grader':
+        project = project_scope.subject_project(fresh, step.item)
+        mains = getattr(dispatcher, 'mains', None) or {}
+        main = mains[project] if project in mains else (
+            bundle_wait.project_main(project, root=fold.ROOT) if project else None)
+    refused = start_check.refusal(role, step.item, fresh, now=now, root=fold.ROOT, main_sha=main)
+    if refused is not None:
+        HOLD_REASONS[step.item] = 'not-ready:' + refused.reason
+        return True
+    own = [e for e in fresh if e.get('subject') == step.item]
+    if attempts.history(nextstep._grader_history(own)[0] if role == 'grader' else own,
+                        dict(subject=step.item, ts=step.since), role, now=now).live:
+        HOLD_REASONS[step.item] = 'not-ready:duplicate-dispatch'
+        return True
+    return False
+
+
 def launch(step, *, dispatcher):
     """Launch precisely one tick-owned routine Step; failures remain standing."""
     import autodispatch
@@ -419,6 +454,8 @@ def launch(step, *, dispatcher):
         if review_browser.hold(step, options, dry_run=getattr(dispatcher, 'dry_run', False)):
             return None
     if getattr(dispatcher, 'dry_run', False):
+        return None
+    if step.action in ROUTINE_ROLES and step.action != 'audit' and _fresh_hold(step, dispatcher):
         return None
     if step.action == 'merge':
         import merge_queue
@@ -747,7 +784,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                         if role in slots:
                             slots[role] -= 1
                     else:
-                        out.append(f'hold {step.item}: standing dispatch failure')
+                        out.append(f'hold {step.item}: ' + (HOLD_REASONS.pop(step.item, None)
+                                                       or 'standing dispatch failure'))
                 except ValueError as exc:
                     if reporter:
                         reporter.fail(step.item, exc, phase='launch')

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from types import SimpleNamespace
 sys.path.insert(0, sys.argv[1])
-import attempts, autodispatch, build_runner, dispatch, fold, grader_packet, lane_rules, nextstep, spawns, tick
+import attempts, autodispatch, build_runner, dispatch, fold, grader_packet, lane_rules, nextstep, spawns, start_check, tick
 root = pathlib.Path(os.environ['DOIT_ROOT'])
 m = json.loads((root / 'fixture.json').read_text())
 sid, wt = m['sid'], root / 'worktrees/demo' / m['sid'].lower()
@@ -79,7 +79,11 @@ def ordinary(dry_run=False, legacy=True, late_refusal=False):
         child = real_popen([sys.executable, '-c', 'pass'], **kw)
         assert child.wait(timeout=10) == 0
         return child
-    with patch.object(subprocess, 'Popen', side_effect=checker), patch.object(dispatch, 'now', return_value=clock.isoformat()):
+    # A late refusal models evidence changing after the launch's fresh pre-check
+    # passed, so that check is held clear and only dispatch can refuse.
+    fresh_clear = (patch.object(start_check, 'refusal', return_value=None) if late_refusal
+                   else patch.object(tick, 'HOLD_REASONS', {}))
+    with patch.object(subprocess, 'Popen', side_effect=checker), patch.object(dispatch, 'now', return_value=clock.isoformat()), fresh_clear:
         out = tick.run_steps(evs, specs, clock, dispatcher=runner, dry_run=dry_run, steps=selected)
     if legacy:
         out += autodispatch.redispatch_dead(evs, specs, clock, runner=runner,
