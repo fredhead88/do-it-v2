@@ -1172,8 +1172,10 @@ def advance(repo, main, old, new, window, kept, dropped, runs, urls, entries, da
     replaced = git(repo, "rev-parse", f"refs/heads/{main}").stdout.strip()
     git(repo, "update-ref", f"refs/heads/{main}", new, old)       # old value asserted
     branch_of = {s: b for s, b, _ in entries}
+    import window_migrations
+    batch = window_migrations.batch_record(repo, old, new, window, kept)
     for s in kept:
-        ev("shipped", s, sha=new, branch=branch_of[s], window=window,
+        ev("shipped", s, sha=new, branch=branch_of[s], window=window, **batch,
            **({"rechained": True} if s in rechained else {}))
     ev("window-verified", window, sha=new, verified_on=old, replaced=replaced,
        **({"after": after} if after else {}), runs=urls, kept=kept, dropped=dropped,
@@ -1965,13 +1967,8 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     if enabled and any(s in migrations for s in dropped) and any(s in migrations for s in live):
         escalate(window, "migration ordering after owner removal is unsafe; remainder pending", "undetermined")
         return 2
-    rechained = set()
-    if enabled:
-        # Only merges reachable from the final candidate count as shipped re-chains.
-        for sha in git(repo, "rev-list", "--first-parent", f"{base}..{cand}").stdout.splitlines():
-            message = git(repo, "show", "-s", "--format=%s", sha).stdout.strip()
-            if message.endswith("(mechanical re-chain)"):
-                rechained.update(s for s in live if message.startswith(f"merge({s}):"))
+    import window_migrations
+    rechained = window_migrations.rechained_specs(repo, base, cand, live) if enabled else set()
     if train:
         wait_predecessor(train)
     try:

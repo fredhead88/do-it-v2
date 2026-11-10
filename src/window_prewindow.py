@@ -248,8 +248,12 @@ def select(repo, base, main, entries, events, content, *, on=None):
     Unreadable master leaves admission to CI. A window-local clash stays queued,
     while a branch defect against master alone needs a rebuild.
     """
-    reader, kept, drops, grants, dependencies, migration_specs = Trees(repo), [], [], {}, {}, set()
+    import window_migrations
+    reader, kept, drops, grants, dependencies = Trees(repo), [], [], {}, {}
     prefix = base
+    entries, held = window_migrations.canonical(repo, base, entries, events, content)
+    for spec, why in sorted(held.items()):
+        print(f'gate-window: prewindow deferred {spec}: migration order: {why}')
     try:
         master = on or git(repo, 'rev-parse', '--verify', 'refs/heads/' + main + '^{commit}').stdout.strip()
         master_paths = reader.read(master)
@@ -277,37 +281,31 @@ def select(repo, base, main, entries, events, content, *, on=None):
             dependency = prerequisite(spec, text, events)
             if dependency and dependency not in grants and not merged_dependency(repo, dependency, master, events):
                 raise Deferred('dependency-hold waits_for=' + dependency + ' is not merged or earlier in this window')
-            for owner, other in grants.items():
-                clash = overlap(grant, other)
-                if clash:
-                    raise Deferred('Writes overlaps ' + owner + ': ' + clash[0] + ' / ' + clash[1])
+            clashes = [(owner, overlap(grant, other)) for owner, other in grants.items()]
+            clashes = [(owner, found) for owner, found in clashes if found]
             try:
-                tree = alone if prefix == master else merge_tree(repo, prefix, sha)
+                tree = alone if prefix == master else merge_tree(repo, prefix, sha, entry=entry)
             except ValueError as exc:
+                if clashes:
+                    raise Deferred('Writes overlaps ' + clashes[0][0] + ': ' + ' / '.join(clashes[0][1])) from exc
                 raise Deferred('merge with earlier window members: ' + str(exc)) from exc
+            # Peer migrations legitimately share bookkeeping files; only the
+            # canonical stack/resolver may prove that combination safe.
+            if clashes and not window_migrations.bookkeeping_overlap(
+                    repo, base, kept, entry, [owner for owner, _ in clashes]):
+                raise Deferred('Writes overlaps ' + clashes[0][0] + ': ' + ' / '.join(clashes[0][1]))
             paths = reader.read(tree)
             try:
                 graph = candidate_revisions(reader, paths, master_has_versions
                                             or any(p.startswith(VERSIONS) for p in previous))
             except ValueError as exc:
                 raise Deferred('Alembic window combination: ' + str(exc)) from exc
-            prior_graph = revisions(reader, previous, require_single_head=False)
-            added_migrations = graph.keys() - prior_graph.keys()
-            if added_migrations and migration_specs:
-                ancestors, current = set(), dependency
-                while current and current not in ancestors:
-                    ancestors.add(current)
-                    current = dependencies.get(current)
-                if not migration_specs <= ancestors:
-                    raise Deferred('Alembic migrations must be ordered by waits_for and re-chained')
             # Use merge parents only as ancestry inputs to the next merge-tree.
             prefix = git(repo, '-c', 'user.name=doit-prewindow', '-c',
                          'user.email=doit-prewindow@localhost', 'commit-tree', tree,
                          '-p', prefix, '-p', sha, '-m', 'prewindow admission').stdout.strip()
             kept.append(entry)
             grants[spec], dependencies[spec] = grant, dependency
-            if added_migrations:
-                migration_specs.add(spec)
         except Deferred as exc:
             print(f'gate-window: prewindow deferred {spec}: {exc}')
         except (ValueError, OSError, UnicodeError, RecursionError, subprocess.SubprocessError) as exc:
