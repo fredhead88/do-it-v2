@@ -471,9 +471,32 @@ def already_carried(source_id):
     return hits[-1] if hits else None
 
 
+def _spec_revision_events(spec_id):
+    # scan_events is project-neutral but enumerates actor files, not revisions.
+    # Stable chronology preserves registration-before-failure within a spawn,
+    # even when both events have the same second-resolution timestamp.
+    return sorted(scan_events(lambda e: e.get("subject") == spec_id
+                              and e.get("type") in ("spec-written", "spec-shape-failed")),
+                  key=lambda e: str(e.get("ts", "")))
+
+
 def spec_written(spec_id):
-    hits = scan_events(lambda e: e.get("type") == "spec-written" and e.get("subject") == spec_id)
+    hits = [e for e in _spec_revision_events(spec_id) if e["type"] == "spec-written"]
     return hits[-1] if hits else None
+
+
+def _refuse_oversize_revision(spec_id):
+    """Consume the current writer's recorded finding, never remeasure old text."""
+    events = _spec_revision_events(spec_id)
+    written = next((i for i in range(len(events) - 1, -1, -1)
+                    if events[i]["type"] == "spec-written"), None)
+    if written is None:
+        return
+    for event in events[written + 1:]:
+        for finding in event.get("findings", []):
+            if re.fullmatch(r"oversize: \d+ > \d+", finding):
+                raise CarryFailed(f"carry: {spec_id} — {finding}; return the unit "
+                                  "to the Planner for re-carving")
 
 
 def spawn_status(spec_id):
@@ -583,6 +606,7 @@ def _restamp_spec_written(spec_id, ev):
     `dispatch.py`'s own `events_for` appended on the first dispatch, so without
     this a fixed defect would go on permanently refusing a later builder
     dispatch. A field absent from `ev` is simply omitted, never guessed."""
+    _refuse_oversize_revision(spec_id)
     argv = [str(doit_bin()), "append", "spec-written", spec_id]
     for k in ("path", "footprint", "ac_count", "ac_types", "requirement_ids",
              "owed_ac_count", "unknown_count"):
@@ -625,6 +649,7 @@ def _shape_gate(spec_id, path, slot, charter, repo, project, ev):
     returns — when the spec is still `shape.check`-blocked after both the fix
     and the rework, or when the packet-build call or the rework dispatch fails
     outright."""
+    _refuse_oversize_revision(spec_id)
     text = pathlib.Path(path).read_text()
     if not shape.check(text)["block"]:
         return []
@@ -668,6 +693,7 @@ def _shape_gate(spec_id, path, slot, charter, repo, project, ev):
     if spec_written(spec_id) is None:
         raise CarryFailed(f"carry: {spec_id} rework spawn returned status "
                           f"{spawn_status(spec_id)} — no spec written")
+    _refuse_oversize_revision(spec_id)
     reworked = shape.check(pathlib.Path(path).read_text())
     if reworked["block"]:
         raise CarryFailed(f"carry: {spec_id} still fails spec-shape validation after rework — "

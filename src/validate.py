@@ -17,6 +17,27 @@ HERE = pathlib.Path(__file__).resolve().parent
 AGENTS = HERE.parent / "agents"
 
 
+# SD19 derivation (retrospective ledger read, not a runtime measurement):
+# 2026-11-01 <= ts < 2026-11-08T05:54:01; distinct bad-cut/shipped subjects
+# 35/227, current content bodies measured in UTF-8 bytes, none missing.
+# Bad-cut median/p90: 36843/73577; shipped: 29933/51992 (nearest-rank p90).
+# Candidate bytes: above bad-cut/shipped (denominators 35/227):
+# 37000:17/67; 40000:14/54; 51000:7/24; 60000:5/11; 73000:4/4.
+# Choose 51000 near charter shipped p90 51 KB: retains 203/227 (89.4%) shipped
+# bodies, flags 7/35 (20%) bad-cut bodies. 37000/40000 reject 29.5%/23.8% of
+# shipped bodies; 60000/73000 allow more of the oversized tail. Not an optimal
+# classifier: correlation is not causation or proof of the charter outcome bar.
+# Raw shipped count differs from charter's frozen 225; cohorts overlap and
+# current-body sizes can reflect rewrites. Do not claim exact reproduction.
+SPEC_SIZE_CEILING = 51000
+
+
+def spec_size(spec_text: str) -> str | None:
+    """Measure the complete supplied text; only writer registration enforces it."""
+    size = len(spec_text.encode("utf-8"))
+    return f"oversize: {size} > {SPEC_SIZE_CEILING}" if size > SPEC_SIZE_CEILING else None
+
+
 def spec_shape(spec_text):
     """L-spec-0195/R3, AC1: a spec the tools cannot read is bounced BEFORE a builder
     is ever dispatched against it, never discovered only at dispatch time
