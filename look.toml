@@ -19,7 +19,7 @@ train_depth = 2
 # DOIT_WINDOW_MAX_MERGES overrides the controller.
 
 [merge_queue]
-branch_refresh_per_day = 3
+branch_refresh_per_day = 6  # Thinker 2026-11-10 13:0xZ: 3 -> 6. Grading now refreshes the branch before every grade (L-spec-2283), and main moves 15-30 times a day, so 3 ran out by midday (2154 daily-limit 11:50Z). Revert to 3 when bundles are requested on main moves (L-spec-2154).
 batch_cap = 15
 batch_cap_floor = 6
 member_verify_parallel = 4   # L-spec-2012: concurrent alone-tree CI verifications after a red window
