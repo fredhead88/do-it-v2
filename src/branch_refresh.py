@@ -568,13 +568,37 @@ def before_refusal(runtime, a, reason):
         return None
 
 
+def rework_pending(events, subject):
+    """True when a rework decision is newer than the subject's newest DONE build-done."""
+    def when(e):
+        try:
+            return datetime.fromisoformat(str(e.get('ts', '')).replace('Z', '+00:00'))
+        except ValueError:
+            return None
+    done = rework = None
+    for e in events:
+        if e.get('subject') != subject:
+            continue
+        t = when(e)
+        if t is None:
+            continue
+        if e.get('type') == 'build-done' and e.get('status') == 'DONE':
+            done = t if done is None or t > done else done
+        elif e.get('type') == 'decision' and e.get('rework') == 'yes':
+            rework = t if rework is None or t > rework else rework
+    return rework is not None and (done is None or rework > done)
+
+
 def dispatch_preflight(runtime, a, cwd, events, fail):
     operation_time = datetime.now(timezone.utc)
     # Initial, unbuilt branches retain the existing builder admission contract.
     completed = any(e.get('subject') == a.subject and e.get('type') == 'build-done'
                     and e.get('status') == 'DONE' for e in events)
     # An applicable build-timeout is incomplete work: never adopted, recut or re-gated.
-    if not completed or __import__('wip_resume').applicable_timeout(events, a.subject):
+    # So is a rework decision newer than the last DONE hand-in: the builder owes a change,
+    # so adopting the old branch would swallow the rework and a refused recut would strand it.
+    if (not completed or __import__('wip_resume').applicable_timeout(events, a.subject)
+            or rework_pending(events, a.subject)):
         return False
     if git(cwd, 'merge-base', '--is-ancestor', a.effective_base_sha, 'HEAD', check=False).returncode == 0:
         return True

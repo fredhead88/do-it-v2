@@ -530,3 +530,37 @@ class TestAC8(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestReworkPendingPreflight(unittest.TestCase):
+    """A rework newer than the last DONE hand-in is never swallowed by a recut (Thinker 2026-11-10)."""
+    SID = 'L-spec-9790'
+
+    def rows(self, *items):
+        return [dict(subject=self.SID, ts=ts, type=t, **extra) for ts, t, extra in items]
+
+    def test_rework_pending_ordering(self):
+        done = ('2026-11-10T10:00:00+00:00', 'build-done', dict(status='DONE'))
+        rework = ('2026-11-10T11:00:00Z', 'decision', dict(rework='yes'))
+        regrade = ('2026-11-10T12:00:00+00:00', 'decision', dict(regrade='yes'))
+        later_done = ('2026-11-10T13:00:00+00:00', 'build-done', dict(status='DONE'))
+        self.assertTrue(br.rework_pending(self.rows(done, rework), self.SID))
+        self.assertTrue(br.rework_pending(self.rows(done, rework, regrade), self.SID))
+        self.assertFalse(br.rework_pending(self.rows(done, rework, later_done), self.SID))
+        self.assertFalse(br.rework_pending(self.rows(done, regrade), self.SID))
+        self.assertFalse(br.rework_pending(self.rows(rework)[:0], self.SID))
+        other = [dict(r, subject='L-spec-1') for r in self.rows(done, rework)]
+        self.assertFalse(br.rework_pending(other, self.SID))
+
+    def test_preflight_dispatches_builder_instead_of_recut(self):
+        events = self.rows(('2026-11-10T10:00:00+00:00', 'build-done', dict(status='DONE')),
+                           ('2026-11-10T11:00:00+00:00', 'decision', dict(rework='yes')))
+        runtime = SimpleNamespace(ROOT=Path('/nonexistent'), spec_path=lambda _: Path('/nonexistent'))
+        a = SimpleNamespace(project='do-it-v2', subject=self.SID, role='builder', effective_base_sha='0' * 40)
+        failures = []
+        with patch('branch_refresh.recut') as recut, patch('branch_refresh.git') as git:
+            self.assertFalse(br.dispatch_preflight(runtime, a, Path('/nonexistent'), events,
+                                                   lambda *x, **k: failures.append((x, k))))
+        recut.assert_not_called()
+        git.assert_not_called()
+        self.assertEqual(failures, [])
