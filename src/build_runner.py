@@ -37,7 +37,7 @@ import verification
 SOURCE = pathlib.Path(__file__).resolve().parent.parent
 PRIVATE_PG = SOURCE / "scripts" / "private-pg.sh"
 WALL_CAP = 30 * 60
-VERSION = "2"
+VERSION = "3"
 TAIL_CAP = 65536
 DIRECTORY_CAP = 5 * 1024 * 1024
 PROD_DATA_UNAVAILABLE = "cannot-observe: observed-data check needs a production read-only DSN; none supplied"
@@ -49,27 +49,37 @@ _SHORT_TMP_NAME = re.compile(r"dr-([1-9][0-9]{0,9})-[a-z0-9]{8}")
 
 def _tmp_backing_root():
     return (scratch.sub("runner-tmp") if SHORT_TMP_BACKING_ROOT is None
-            else pathlib.Path(SHORT_TMP_BACKING_ROOT)).resolve()
+            else pathlib.Path(SHORT_TMP_BACKING_ROOT)).absolute()
 
 
 def short_tmpdir():
-    """Publish only an alias on /tmp; all payload stays on scratch."""
-    backing = _tmp_backing_root() / f"dr-{os.getpid()}-{secrets.token_hex(4)}"
+    """Allocate a short canonical directory on scratch, never a tmpfs alias."""
+    root = _tmp_backing_root()
+    if root != root.resolve():
+        raise Undetermined("symlinked runner temporary root")
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+        raise Undetermined("unsafe runner temporary root")
+    backing = root / f"dr-{os.getpid()}-{secrets.token_hex(4)}"
+    socket_path = backing / ("s" * 20) / ".s.PGSQL.65535"
+    if len(os.fsencode(socket_path)) >= 107:
+        raise Undetermined("runner temporary root too long; configure shorter real scratch root")
     backing.mkdir(mode=0o700)
-    alias = SHORT_TMP_ROOT.absolute() / backing.name
     try:
         backing.chmod(0o700)
-        alias.symlink_to(backing)
     except BaseException:
         backing.rmdir()
         raise
-    return alias
+    return backing
 
 
 def _tmp_pair(alias, backing):
-    """Snapshot a validated pair (including interrupted, unpaired residue)."""
+    """Snapshot a real allocation or legacy pair, including unpaired residue."""
     result = []
     for path, link in ((alias, True), (backing, False)):
+        if link and alias == backing:
+            result.append(None)
+            continue
         try:
             info = path.lstat()
         except FileNotFoundError:
@@ -130,7 +140,7 @@ def sweep_short_tmpdirs(root=None, *, backing_root=None, proc_root=pathlib.Path(
     try:
         root = pathlib.Path(root if root is not None else SHORT_TMP_ROOT).absolute()
         backing_root = pathlib.Path(backing_root) if backing_root is not None else _tmp_backing_root()
-        if root.is_symlink() or backing_root.is_symlink():
+        if root != root.resolve() or backing_root != backing_root.resolve():
             raise OSError("symlinked discovery root")
         backing_root = backing_root.resolve()
         names = {p.name for base in (root, backing_root) for p in base.iterdir()

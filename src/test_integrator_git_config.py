@@ -14,7 +14,7 @@ import merge_gate as gate
 
 class IntegratorConfigTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='integrator-config-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='ig-', dir='/var/tmp')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.repo = self.root / 'integrator'
@@ -89,6 +89,7 @@ class IntegratorConfigTests(unittest.TestCase):
                         GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='core.worktree',
                         GIT_CONFIG_VALUE_0=str(self.root / 'injected-tree')), \
              patch.object(runner.scratch, 'sub', side_effect=sub), \
+             patch.object(runner.fold, 'ROOT', self.root / 'doit'), \
              patch.object(runner, 'SHORT_TMP_ROOT', aliases), \
              patch.object(runner, 'SHORT_TMP_BACKING_ROOT', backing), \
              patch.object(runner, '_provision', return_value={}):

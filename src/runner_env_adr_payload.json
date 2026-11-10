@@ -1,0 +1,88 @@
+{
+  "cohort": {
+    "admission": "frozen normalized snapshot; rejected rows excluded by probe admission, corrections not new attempts",
+    "audit_sha256": "b2bfd5fb7b2759589efd93f1d508546a404b1386c1449801dfa4d11e48c828f1",
+    "cutoff": "2026-11-08T05:58:29.611194+00:00",
+    "manifest_sha256": "a1df347d83ac012c4b1ae3df60a4a0a630c08f5000577bf5ccd92ff1fa403ad5",
+    "projection": "sanitized categorical fields recovered from referenced ledger_files; diagnostic feature flags only; unknown attribution retained",
+    "projects": "all",
+    "snapshot_sha256": "0877d62a232b61b59b8a9d74b322c562c13545ed60f61dc2e938bab740fc9f6e",
+    "start": "2026-11-01T00:00:00+00:00",
+    "units": "one verdict per grader attempt; criterion, setup and launch rows separate",
+    "corrections": [
+      {
+        "source": "L-operator-0001.jsonl:41",
+        "source_sha256": "acf9f8ad54cfe2fff56c8eaa62176b34a376ee0bca3fb704193c33cc91636b3d",
+        "target": "L-executor-0001.jsonl:564",
+        "ts": "2026-09-23T19:59:03+00:00"
+      },
+      {
+        "source": "L-operator-local.jsonl:808",
+        "source_sha256": "fe39905506623ce3d71e2dc896a2a330f1355bc92cdb86e38dc461d391f6fbf5",
+        "target": "L-operator-local.jsonl:806",
+        "ts": "2026-10-25T03:54:38+00:00"
+      },
+      {
+        "source": "L-operator-local.jsonl:809",
+        "source_sha256": "1c1084a435fa2ccaa518faa45f8b422a92d77b972890aefad43b75385192ac1e",
+        "target": "L-operator-local.jsonl:807",
+        "ts": "2026-10-25T03:54:38+00:00"
+      }
+    ],
+    "rejected_counted_type_rows_in_window": 0
+  },
+  "denominators": {
+    "verdict_references": 537,
+    "failed_grade_attempts": 170,
+    "passed_grade_attempts": 367,
+    "unknown_outcome": 0,
+    "criterion_observations": 96,
+    "setup_failures": 90,
+    "launch_failures": 1232
+  },
+  "ranking": [
+    {
+      "cause": "insufficient-causal-evidence",
+      "count": 168,
+      "classification": "unresolved"
+    },
+    {
+      "cause": "explicit-assertion-or-missing-implementation",
+      "count": 1,
+      "classification": "criterion-failure"
+    },
+    {
+      "cause": "temporary-alias",
+      "count": 1,
+      "classification": "runner-environment"
+    }
+  ],
+  "per_project": {
+    "albert-scott": 119,
+    "do-it-v2": 51
+  },
+  "named_fixes": [
+    {
+      "cause": "temporary-alias",
+      "regressions": [
+        "RunnerEnvironmentTests.test_ac2",
+        "RunnerEnvironmentTests.test_ac3",
+        "RunnerEnvironmentTests.test_ac4"
+      ]
+    }
+  ],
+  "placement": "real directories on canonical scratch only; overlong roots undetermined; no tmpfs payload or alias fallback",
+  "observation_tables": {
+    "rejected-criterion": {
+      "unresolved": 94,
+      "criterion-failure": 1,
+      "runner-environment": 1
+    },
+    "evidence-bundle-failed": {
+      "unresolved": 90
+    },
+    "spawn-failed": {
+      "unresolved": 1232
+    }
+  }
+}

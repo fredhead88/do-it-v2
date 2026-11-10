@@ -32,9 +32,11 @@ class BuildRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.top = pathlib.Path(self.temp.name)
         self.aliases = self.top / "aliases"
-        self.backing = self.top / "backing"
+        # Explicit private disk root: the suite's inherited TMPDIR can be long.
+        backing = tempfile.TemporaryDirectory(prefix="rbt-", dir="/var/tmp")
+        self.addCleanup(backing.cleanup)
+        self.backing = pathlib.Path(backing.name).resolve()
         self.aliases.mkdir()
-        self.backing.mkdir()
         self.root = self.top / "root"
         self.repo = self.root / "repos" / "demo"
         self.repo.mkdir(parents=True)
@@ -498,7 +500,7 @@ class BuildRunnerTests(unittest.TestCase):
                         "venv-alembic", "venv-python",
                         str(expected) + os.pathsep + self.env["PATH"]])
                     tmp = pathlib.Path(output[-1])
-                    self.assertEqual(tmp.parent, self.aliases)
+                    self.assertEqual(tmp.parent, self.backing)
                     self.assertRegex(tmp.name, r"^dr-[1-9][0-9]*-[a-z0-9]{8}$")
                     self.assertFalse(os.path.lexists(tmp))
                 # The next config must run again even if its git tip is unchanged.
@@ -967,8 +969,8 @@ class ShortTmpdirTests(unittest.TestCase):
         self.stack.enter_context(patch.object(build_runner.fold, 'ROOT', self.top / 'ledger'))
         self.aliases = pathlib.Path(self.stack.enter_context(
             tempfile.TemporaryDirectory(prefix="drt-", dir="/tmp")))
-        self.backing = self.top / ("scratch-backing-" + "x" * 100)
-        self.backing.mkdir()
+        self.backing = pathlib.Path(self.stack.enter_context(
+            tempfile.TemporaryDirectory(prefix="rb-", dir="/var/tmp"))).resolve()
         self.production_root = build_runner.SHORT_TMP_ROOT
         self.stack.enter_context(patch.multiple(build_runner, SHORT_TMP_ROOT=self.aliases,
                                                 SHORT_TMP_BACKING_ROOT=self.backing))
@@ -985,7 +987,7 @@ class ShortTmpdirTests(unittest.TestCase):
 
     def allocate(self):
         alias = build_runner.short_tmpdir()
-        return alias, pathlib.Path(os.readlink(alias))
+        return alias, alias.resolve()
 
     def remove(self, alias, backing):
         build_runner._remove_tmp_pair(alias, backing, build_runner._tmp_pair(alias, backing))
@@ -997,20 +999,20 @@ class ShortTmpdirTests(unittest.TestCase):
     def test_ac1(self):
         self.assertEqual(self.production_root, pathlib.Path("/tmp"))
         allocated = []
-        for case in ("first", "consecutive", "delete-reallocate", "long-inherited", "long-scratch"):
+        for case in ("first", "consecutive", "delete-reallocate", "long-inherited"):
             with self.subTest(case=case), patch.dict(os.environ,
                     TMPDIR="/ignored/" + "a" * 200, TMP="/ignored/" + "b" * 200,
                     TEMP="/ignored/" + "c" * 200,
                     DOIT_SCRATCH=str(self.top / ("long-scratch-" + "d" * 180))):
-                # Also exercise the real scratch.sub selection with a long root.
-                with patch.object(build_runner, "SHORT_TMP_BACKING_ROOT", None):
-                    alias, backing = self.allocate()
+                alias, backing = self.allocate()
                 self.assertNotIn(alias, allocated)
                 allocated.append(alias)
-                self.assertEqual(alias.parent, self.aliases)
+                self.assertEqual(alias.parent, self.backing)
                 self.assertRegex(alias.name, rf"^dr-{os.getpid()}-[a-z0-9]{{8}}$")
                 self.assertEqual(backing.name, alias.name)
-                self.assertEqual(backing.parent, pathlib.Path(os.environ["DOIT_SCRATCH"]) / "runner-tmp")
+                self.assertEqual(backing.parent, self.backing)
+                self.assertEqual(alias, backing)
+                self.assertFalse(alias.is_symlink())
                 nested = alias / ("s" * 20)
                 nested.mkdir()
                 sockpath = nested / ".s.PGSQL.65535"
@@ -1039,22 +1041,28 @@ class ShortTmpdirTests(unittest.TestCase):
                 self.assertFalse(backing.exists())
         marker = self.aliases / "unowned"
         marker.write_text("keep")
-        with patch.object(pathlib.Path, "symlink_to", side_effect=FileExistsError("occupied")):
-            with self.assertRaises(FileExistsError):
+        with patch.object(pathlib.Path, "chmod", side_effect=OSError("permission failure")):
+            with self.assertRaises(OSError):
                 build_runner.short_tmpdir()
         self.assertEqual(list(self.backing.iterdir()), [])
         self.assertEqual(marker.read_text(), "keep")
         marker.unlink()
-        # A real exclusive-publication collision preserves the unowned alias.
+        # A real allocation collision preserves the unowned entry.
         name = f"dr-{os.getpid()}-01234567"
-        occupied = self.aliases / name
+        occupied = self.backing / name
         occupied.write_text("unowned")
         with patch.object(build_runner.secrets, "token_hex", return_value="01234567"):
             with self.assertRaises(FileExistsError):
                 build_runner.short_tmpdir()
         self.assertEqual(occupied.read_text(), "unowned")
-        self.assertFalse((self.backing / name).exists())
+        self.assertTrue(occupied.is_file())
         occupied.unlink()
+        # A long scratch configuration refuses before allocation, never aliases.
+        with patch.object(build_runner, "SHORT_TMP_BACKING_ROOT", None), \
+                patch.dict(os.environ, DOIT_SCRATCH=str(self.top / ("long-" + "d" * 120))):
+            with self.assertRaisesRegex(build_runner.Undetermined, "too long"):
+                build_runner.short_tmpdir()
+            self.assertEqual(list(build_runner._tmp_backing_root().iterdir()), [])
         self.evidence("AC1", allocations=len(allocated), socket_bind=True, bytes_written_read=1048576,
                       scratch_backed=True, publication_rollback=True)
 
@@ -1062,7 +1070,7 @@ class ShortTmpdirTests(unittest.TestCase):
         env = kw["env"]
         self.assertEqual(env["TMPDIR"], env["TMP"])
         self.assertEqual(env["TMPDIR"], env["TEMP"])
-        self.assertEqual(pathlib.Path(env["TMPDIR"]).parent, self.aliases)
+        self.assertEqual(pathlib.Path(env["TMPDIR"]).parent, self.backing)
         if "clone" in argv:
             pathlib.Path(argv[-1]).mkdir()
         return ""
@@ -1355,7 +1363,7 @@ class ShortTmpdirTests(unittest.TestCase):
                 holder = None
                 try:
                     alias = pathlib.Path(owner.stdout.readline().strip())
-                    self.assertEqual(alias.parent, self.aliases)
+                    self.assertEqual(alias.parent, self.backing)
                     backing = alias.resolve()
                     if kind != "unused":
                         end = time.monotonic() + 10
@@ -1368,7 +1376,7 @@ class ShortTmpdirTests(unittest.TestCase):
                     if holder:
                         (self.proc / str(holder)).symlink_to(pathlib.Path("/proc") / str(holder))
                         self.assertEqual(self.sweep()["retained"], 1)
-                        self.assertTrue(alias.is_symlink() and backing.is_dir())
+                        self.assertTrue(not alias.is_symlink() and alias == backing and backing.is_dir())
                         self.assertEqual((backing / "marker").read_text(), "keep")
                         os.kill(holder, signal.SIGTERM)
                         # The subreaper below adopts it; waitpid proves it is dead.

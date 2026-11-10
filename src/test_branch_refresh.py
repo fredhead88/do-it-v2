@@ -22,7 +22,7 @@ import fold
 
 class Fixture(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory(prefix='branch-refresh-test-')
+        temp = tempfile.TemporaryDirectory(prefix='br-scratch-', dir='/var/tmp')
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         isolated = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}

@@ -151,7 +151,7 @@ def publish():
 
 class RetryRoundTripTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='retry1851-')
+        self.temp = tempfile.TemporaryDirectory(prefix='rt-', dir='/var/tmp')
         self.addCleanup(self.temp.cleanup)
         self.top = Path(self.temp.name)
         self.root = self.top / 'root'
