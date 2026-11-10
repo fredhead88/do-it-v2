@@ -59,10 +59,13 @@ _REAL_OPEN = open
 
 
 def allow_dependency_reads(stack):
-    """Permit only the new read-only dependency lookup under the scratch root."""
+    """Permit only the read-only dependency lookup and start-refusal lock read under the scratch root."""
     content = dispatch.CONTENT
     def read_only(file, mode='r', *args, **kwargs):
-        if not Path(file).is_relative_to(content) or mode not in ('r', 'rb'):
+        # The shared start refusal observes the subject lock under state/.
+        if (not (Path(file).is_relative_to(content) or Path(file).is_relative_to(Path(fold.ROOT) / 'state')
+                    or str(file) == '/proc/locks')
+                or mode not in ('r', 'rb')):
             raise AssertionError('unexpected filesystem access')
         return _REAL_OPEN(file, mode, *args, **kwargs)
     for hook in ('builtins.open', 'io.open', 'pathlib.Path.open'):
@@ -371,6 +374,7 @@ class NextStepTests(unittest.TestCase):
                     ns.classify_failure('ENOSPC', 1, self.rules),
                     ns.flow_counts(events, specs, now, self.rules, waves))
         expected = calls()
+        import health_alarms, start_check  # lazy import of the lock reader reads the environment
         class NoEnvironment:
             def fail(self, *args, **kwargs):
                 raise AssertionError('environment read')
@@ -378,8 +382,11 @@ class NextStepTests(unittest.TestCase):
         with ExitStack() as stack:
             for name in ('io.open', 'builtins.open', 'pathlib.Path.open', 'subprocess.run',
                          'time.time', 'lane_rules.load', 'lane_rules.due',
-                         'dispatch.spec_wave', 'fold.spec_state', 'fold.owed_due'):
+                         'fold.spec_state', 'fold.owed_due'):
                 stack.enter_context(patch(name, side_effect=AssertionError(name)))
+            # The shared start refusal calls spec_wave; it stays call-through, and the
+            # file-open hooks above still fail any file read it would make.
+            stack.enter_context(patch('dispatch.spec_wave', wraps=dispatch.spec_wave))
             allow_dependency_reads(stack)
             stack.enter_context(patch.object(os, 'environ', NoEnvironment()))
             stack.enter_context(patch.object(fold, 'NOW', NOW.replace(year=2040)))
