@@ -104,8 +104,10 @@ class LaneNotReadyTests(unittest.TestCase):
         self.report(2, 'duplicate still open', new, old)
 
     def test_ac2_other_failures_unchanged(self):
+        # 'spec-shape' left this list with L-spec-2318, which holds spec-shape
+        # refusals before any packet instead of reporting them as failures.
         cases = [('spawn-failed', reason) for reason in
-                 ('preflight:worktree-missing', 'timeout', '', 'spec-shape',
+                 ('preflight:worktree-missing', 'timeout', '',
                   'fold: recorded-and-ignored spawn-failed by builder')]
         cases += [('merge-gate-rework', 'AssertionError'),
                   ('autodispatch-failed', 'Connection refused')]
