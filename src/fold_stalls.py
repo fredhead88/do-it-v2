@@ -340,7 +340,7 @@ def step_row(step, limits, now):
     if step.state == 'hold':
         rule = ('undetermined' if reason.startswith('undetermined:') else
                 'dependency-held' if reason.startswith('held:') else
-                'wave-held' if reason.startswith('wave') else 'idle')
+                'wave-held' if reason.startswith('wave') or reason == 'not-ready:wave-order' else 'idle')
     else:
         rule = {'merge-gate': 'gate', 'merge-direct': 'merge'}.get(step.action, step.action)
     limit = 0 if rule == 'undetermined' else limits[rule]['limit_min']

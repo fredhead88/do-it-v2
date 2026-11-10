@@ -39,7 +39,7 @@ EVENT_STAGES = {'spec-written': 'planned', 'build-started': 'building',
 PIPELINE = {'written', 'building', 'blocked', 'graded', 'reviewing'}
 OWED_STATES = {'shipped-owed-evidence', 'shipped-owed-due', 'shipped-owed-expired'}
 FAILURES = {'merge-gate-undetermined', 'merge-gate-rework', 'spawn-failed', 'autodispatch-failed'}
-NOT_READY_PREFIXES = ('wave-order', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')
+NOT_READY_PREFIXES = ('wave-order', 'spec-shape', 'bundle-pending', 'duplicate-dispatch', 'dispatch-in-progress')
 RETRIES = {'build-started', 'spawn-started', 'queue-add', 'decision', 'spec-written'}
 AUDIT_GRACE_MIN = 30
 ACTIONS: dict[str, str] = {}
@@ -332,7 +332,18 @@ def _retry_result(c, trigger, role, *, dispatched=False):
         fields.update(retry_hold=True, retry_owner='tick', clears='next_retry_at=' + h.next_retry_at.isoformat())
     elif h.n_failed:
         reason = f'retry due: {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
+    if role in {'builder', 'reviewer'} and not fields.get('retry_hold'):
+        refused = _start_refusal(c, role)
+        if refused is not None:
+            return _result(trigger, 'not-ready:' + refused.reason, retry_hold=True,
+                           retry_owner='tick', clears=refused.clears, **fields)
     return _result(trigger, reason, **fields)
+
+
+def _start_refusal(c, role):
+    """The shared early refusal for a builder or reviewer start; read-only."""
+    import start_check
+    return start_check.refusal(role, c['sid'], c.get('events', c['evs']), now=c['now'], root=fold.ROOT)
 
 
 def _rebuild(c):
@@ -1032,6 +1043,10 @@ def _base_refresh_hold(c, failure):
         return _hold(sid, 'spec', 'building', failure, detail,
                      'new authorized trigger or operator decision' if history.exhausted
                      else 'next_retry_at=' + str(history.next_retry_at), 'executor' if history.exhausted else 'tick')
+    refused = _start_refusal(c, 'builder')
+    if refused is not None:
+        return _hold(sid, 'spec', 'building', failure, 'not-ready:' + refused.reason,
+                     refused.clears, 'tick')
     ignored = sum(_base_receipt(e) for e in evs)
     reason += f'; {ignored} base transport refusal(s) excluded from builder retry budget; recut daily bound applies'
     return Step(sid, 'spec', 'building', 'action', 'build', 'tick', _source(failure),
@@ -1070,6 +1085,11 @@ def _choose(c, rows, owners):
     for row in rows:
         if row['name'] in {'wave-held', 'dependency-held'}:
             label = 'dependency' if row['name'] == 'dependency-held' else 'wave'
+            if label == 'wave':
+                refused = _start_refusal(c, 'builder')
+                if refused is not None and refused.reason == 'wave-order':
+                    return _hold(sid, 'spec', stage, event, 'not-ready:wave-order',
+                                 refused.clears, 'tick', row['since'])
             return _hold(sid, 'spec', stage, event,
                          label + ': ' + row.get('reason', 'held'),
                          str(row.get('blocker')) + ' shipped', 'tick', row['since'])
