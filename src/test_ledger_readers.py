@@ -95,6 +95,8 @@ ALLOW = {
     ('base_red.py', '_nightly_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up (additional classified hit).',
     ('base_red.py', '_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up.',
     ('dispatch.py', 'alloc'): 'Raw glob applies only to generic directories; event allocations use ledger_files.names.',
+    ('dispatch.py', '_ledger_lines'): 'L-spec-2209 hand-in check snapshots live ledger line counts before its independent writer runs.',
+    ('dispatch.py', '_merge_new_rows'): 'L-spec-2209 hand-in check imports only rows appended by its independent writer into the active ledger view.',
     ('flow_health.py', 'main'): 'Requires a listable events directory with a regular jsonl file before judging; decoded events use fold.read_events.',
     ('ledger_files.py', '_accessible'): 'The virtual file layer itself; raw file access is confined here.',
     ('ledger_files.py', '_indexes'): 'The virtual file layer itself; raw file access is confined here.',
