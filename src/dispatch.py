@@ -11,6 +11,8 @@ import models  # noqa: E402
 import grader_packet
 import coupled_tests
 import panes, spawns, scratch, cpu_share  # noqa: E402 — panes: proc_start/alive; spawns: dup-dispatch/cancel/clear
+from spawns import (LedgerView, dispatch_view, current_events, _active_view,
+                    coverage_changes, with_dispatch_view as _with_dispatch_view)
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
 EVENTS, CONTENT = ROOT / "events", ROOT / "content"
 
@@ -31,6 +33,12 @@ BUILDER_DENY = ["Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(*--no-v
 
 sha = lambda s: hashlib.sha256(s.encode() if isinstance(s, str) else s).hexdigest()[:16]
 now = lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+def subject_project(subject):
+    """Retain the public resolver override seam without its default reread."""
+    if fold.subject_project is not _default_subject_project:
+        return fold.subject_project(subject)
+    return __import__("project_scope").subject_project(current_events(), subject)
 
 # Kept in parity with prod_runner.redact without its import cycle or head truncation.
 _FAILURE_REDACTIONS = (
@@ -60,6 +68,12 @@ def frontmatter(role):
 def subject_ids(prefix):
     """The ids of that kind the LEDGER owns. A spec id can exist as a subject with no content file — three did, from a charter whose specs were never written out — and §2.8's max+1 is over the ids that exist, not over the files that happen to. Allocating over files alone re-issues such an id, and the second `spec-written` lands on a subject the fold has already resolved to terminal: it never renders, the Executor never picks it up, and an append-only ledger cannot take it back."""
     out = []
+    if _active_view.get() is not None:
+        for event in current_events():
+            match = re.fullmatch(rf"{re.escape(prefix)}(\d+)", event.get("subject") or "")
+            if match:
+                out.append(int(match.group(1)))
+        return out
     for name, lines in ledger_files.iter_sources(EVENTS) if EVENTS.exists() else []:
         for line in lines:
             if prefix not in line:
@@ -88,7 +102,8 @@ def alloc(d, prefix, suffix):
 def emit(dst, base, type_, /, *, strict=False, **kv):
     ledger_write_guard.check(dst)  # Refusal must escape, never become an ignored event.
     if type_ == "escalation-blocking" and kv.get("kind") == "owed-expired":
-        kv, refused = __import__("owed_asks").guard_expiry(base.get("subject"), kv)
+        kv, refused = __import__("owed_asks").guard_expiry(base.get("subject"), kv,
+                                                       events=current_events() if _active_view.get() is not None else None)
         if refused:
             return refused
     e = {**kv, **base, "v": 1, "ts": now(), "type": type_}
@@ -109,7 +124,16 @@ def emit(dst, base, type_, /, *, strict=False, **kv):
     line = json.dumps(e, sort_keys=True, default=str)
     with open(dst, "a") as fh:
         fh.write(line + "\n")
-    assert line in dst.read_text().splitlines(), f"append to {dst} did not land"
+    lines = dst.read_text().splitlines()
+    assert line in lines, f"append to {dst} did not land"
+    view = _active_view.get()
+    if view is not None:
+        # Decode the committed bytes: default=str and compact/projection must
+        # agree with the reference reader; caller-provided metadata is untrusted.
+        event = __import__("ledger_compact").compact(json.loads(line))
+        event["actor"] = fold.actor_of(dst.name)
+        event["_src"] = f"{dst.name}:{len(lines) - lines[::-1].index(line)}"
+        view.committed(event)
     return None
 
 RETRY_MINUTES = (5, 15, 45, 120)
@@ -351,7 +375,6 @@ def run_codex_exec(cmd, packet, cwd, timeout):
         return __import__("wip_resume").run_group(cpu_share.niced(cmd), packet, cwd, cpu_share.launch_env(env, ROOT), timeout)
     return subprocess.run(cpu_share.niced(cmd), input=packet, capture_output=True, text=True, cwd=cwd, env=cpu_share.launch_env(env, ROOT), timeout=timeout)
 
-
 CODEX_PREAMBLE = """You are running a DO-IT role on the CODEX backend. The role contract below is your
 standing rulebook; obey it exactly. Codex-specific differences from the contract's wording:
 - There is no StructuredOutput tool and no Agent tool. Ignore any "Seat route" instructions
@@ -359,7 +382,6 @@ standing rulebook; obey it exactly. Codex-specific differences from the contract
   must be the single JSON object the output schema describes, and it is captured for you.
 - Never print or copy a credential, token, DSN or .env content. Never run `claude -p`.
 """
-
 
 def codex_quota(now=None):
     """The ChatGPT plan's weekly window as the newest Codex rollout last reported it: {used_percent, resets_at, credits} or None when no rollout carries rate_limits. A window whose resets_at has passed reads as 0% used (it has rolled over)."""
@@ -398,7 +420,6 @@ def codex_quota(now=None):
                 stack.extend(o)
     return None
 
-
 def _quota_cap_file():
     """Operator-set cap shared by every launcher (cron, panes, waiters), which
     do not all inherit one environment: first number in state/codex-quota-cap."""
@@ -410,14 +431,12 @@ def _quota_cap_file():
         return None
     return None
 
-
 def codex_quota_refusal(quota):
     """Why the codex backend must not spend, or None. The cap (default 85% of the weekly window, env DOIT_CODEX_QUOTA_CAP) keeps the plan's overflow credits unspent: past it the spawn refuses BEFORE running, and the contract's seat fallback takes it."""
     cap = float(os.environ.get("DOIT_CODEX_QUOTA_CAP") or _quota_cap_file() or "85")
     if quota and quota.get("used_percent") is not None and float(quota["used_percent"]) >= cap:
         return f"codex quota precheck: weekly window {quota['used_percent']}% used >= cap {cap}%"
     return None
-
 
 # OpenAI Structured Outputs subset (retrieved 2026-10-25):
 # https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas
@@ -430,7 +449,6 @@ _STRICT_DROP = ("if", "then", "else", "not", "allOf", "dependentRequired", "depe
                 "dependencies", "patternProperties", "default", "$comment", "examples",
                 "unevaluatedProperties", "propertyNames", "contains", "minContains", "maxContains",
                 "uniqueItems", "minProperties", "maxProperties", "unevaluatedItems")
-
 
 def strict_schema(s):
     """OpenAI strict-mode copy of a contract schema (Thinker 2026-10-12): drop conditionals and other keywords strict mode refuses; every object closes (additionalProperties false) and lists every property as required, an originally-optional one becoming nullable. The ORIGINAL schema still validates the card afterwards, after `unnull` strips those nulls."""
@@ -462,7 +480,6 @@ def strict_schema(s):
         o["additionalProperties"] = False
     return o
 
-
 def unnull(obj, schema):
     """Drop the nulls `strict_schema` forced onto originally-optional keys."""
     if not isinstance(schema, dict):
@@ -474,7 +491,6 @@ def unnull(obj, schema):
     if isinstance(obj, list):
         return [unnull(x, schema.get("items") or {}) for x in obj]
     return obj
-
 
 def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, effort=None):
     """The codex backend (pilot S1). `codex exec` reads the packet on stdin, enforces the contract's schema itself (`--output-schema`), writes the final object to `-o` (no `doit validate` loop, no transcription — pilot S18/S28), and streams events as JSONL, from which turns, tokens and the thread id are read. Codex does not echo the model it ran, so `model_used` is the flag it was given and the event says `model_observed: false`. Cost is unpriced on the plan (null). L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved, absolute write destination (`None` for a non-writing role) — `main` computes it once, before any spend, and hands it here so nothing serving this seat ever has to ask or infer it."""
@@ -547,22 +563,18 @@ def run_codex(spawn, role, model, schema_path, packet, cwd, timeout, path=None, 
            "codex_quota": codex_quota() or quota}
     return SeatResult(json.dumps(env), r.returncode, r.stderr)
 
-
 SEAT = ROOT / "seat"
-
 
 class SeatResult:
     """The same three fields main() reads off a subprocess result."""
     def __init__(self, stdout, returncode=0, stderr=""):
         self.stdout, self.returncode, self.stderr = stdout, returncode, stderr
 
-
 class Unserved(Exception):
     """R6/L-spec-0189: nobody claimed this seat within DOIT_SEAT_CLAIM_SEC of the packet appearing on disk. Raised only by `run_seat`, and only before the terminal- result wait would otherwise run out the full role timeout — a packet nobody serves must fail loudly long before that, not wait out up to 90 minutes (the builder's own cap) indistinguishable, on the ledger, from a spawn that WAS served and ran long."""
     def __init__(self, spawn, claim_path, elapsed):
         self.spawn, self.claim_path, self.elapsed = spawn, claim_path, elapsed
         super().__init__(f"{spawn}: unserved after {elapsed:.0f}s — no {claim_path} on disk")
-
 
 def _window_min_override(spec_text):
     """L-spec-0269, Planner amendment SD22: a spec's own leading `window_min: N` line, read WITHOUT requiring the `---`-delimited block `carry.frontmatter_ charter`/`carry._frontmatter_value` demand — no live spec opens that way (§6). Scans only the lines before the first line starting with `## `. Returns the int on the first matching `^window_min:\\s*(\\d+)\\s*$` line, else `None` on no such line, no match, or (defensively) an unparseable value — never an exception."""
@@ -582,11 +594,9 @@ def _window_min_override(spec_text):
                 return None
     return None
 
-
 def spec_path(subject):
     """The one definition of a spec-writer's canonical write destination (R5, L-spec-0321): `window_min`'s fallback and `main`'s spec-writer default both call this instead of repeating the literal. `.absolute()` is defensive, not decorative — a set-but-empty DOIT_ROOT bypasses `os.environ.get`'s default, which would otherwise leave CONTENT (and this) relative."""
     return (CONTENT / f"{subject}.md").absolute()
-
 
 def window_min(role, subject, events, *, backend="seat"):
     """L-spec-0269: the window a role's spawn is offered under. A non-`seat` backend (`run_claude`/`run_codex`) gets the flat, unbumped role cap unless the spec head says `window_min: N` — `Unserved`/claiming is a seat-only concept. On `backend="seat"`: `grader`/ `reviewer` get 45 minutes instead of their own cap when the subject's newest `spec-written` event's `ac_types` names `observed-data` or (reserved) `live-db`; that base is then raised, never lowered, to the subject's own leading `window_min:` line when one is present and larger; the result is capped at 240 regardless. No `spec-written` event and no readable `content/<subject>.md` degrades cleanly to the plain base — never an exception (§4, §6)."""
@@ -621,7 +631,6 @@ def window_min(role, subject, events, *, backend="seat"):
         base = override
     return min(base, 240)
 
-
 def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger=None, base=None, role=None,
              view=None, clock=None, sleep=None):
     """The seat path (D116 by another route). Where `claude -p` is banned as metered — the Albert Scott rule, spec 572 — the spawn runs as an interactive session's seat-billed sub-agent instead. This function does not spawn: it writes the packet and the line that WOULD have run to `$R/seat/<spawn>.*`, prints where the result is expected, and waits for `<spawn>.result.json` — the same JSON envelope `claude -p --output-format json` prints (is_error, structured_output, usage, total_cost_usd, num_turns, session_id, modelUsage, permission_denials). Every after-the-fact check in main() then runs unchanged, and the ledger records `spawn_path: seat` so the two routes are distinguishable forever. R6/L-spec-0269: the same loop also tracks whether `<spawn>.claimed` has ever appeared on disk — written ONLY by `scripts/seat/claim.sh` (O_EXCL; this function never writes it, ADR-0028-2). Two clocks, not one: at `DOIT_SEAT_CLAIM_SEC` (default 300) seconds unclaimed, this function no longer raises — it appends one non-terminal `seat-stale{spawn, role, subject, age_s}` (via `emit`, when `ledger` and `base` are both given; never a second one on the same call) and keeps waiting. It gives up for real — raising `Unserved`, exactly as before — only once `window` seconds have passed with no claim (`window` defaults to `timeout` when omitted, so a caller supplying neither keeps a single-clock, back-compat wait). Once a claim IS observed, the wait-for-result deadline becomes `timeout` seconds counted from the claim instant, not from this call's start — a claim landing at the edge of the window still gets the whole cap to finish. L-spec-0262 (SWP2/SWP3): `path` is the writing role's already-resolved, absolute write destination (`None` for a non-writing role), computed once by `main` before any spend. It rides on `cmd.json["path"]` and, for a writing role, prefixes the packet text itself with `WRITE PATH: <path>\n\n` — so a relay pane or the Planner reads its destination off disk and never asks or infers it (the direct cause of a packet expiring unserved). R8/L-spec-0437: `view`, when not `None`, is the grader-only isolated filesystem view a gated block in `main()` already built. The SAME `packet_text` also lands at `view/seat/<spawn>.packet.md` (a copy, proven byte-identical — AC5), and `cmd.json`'s `"cwd"` — and the status line's own `cwd` — become `view/tree`, never this call's `cwd` parameter: the pane that reads `cmd.json` must land inside the view, not the real worktree. `view=None` (every other role/backend, and the codex->seat fallback) reproduces the prior behaviour byte-for-byte (AC9)."""
@@ -630,7 +639,6 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
     sleep = sleep or time.sleep
     SEAT.mkdir(parents=True, exist_ok=True)
     packet_text = f"WRITE PATH: {path}\n\n{packet}" if path else packet
-    (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     if ledger is not None and base is not None:
         emit(ledger, {**base, "spawn": spawn}, "seat-queued")
     cwd_out = cwd
@@ -639,7 +647,12 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
         (view / "seat").mkdir(parents=True, exist_ok=True)
         (view / "seat" / f"{spawn}.packet.md").write_text(packet_text)
         cwd_out = str(view / "tree")
-    (SEAT / f"{spawn}.cmd.json").write_text(json.dumps({"cmd": cmd, "cwd": cwd_out, "path": path}, indent=1))
+    # Fallback may already have a visible packet: replace complete command metadata atomically.
+    command = SEAT / f"{spawn}.cmd.json"
+    pending = command.with_suffix(".json.tmp")
+    pending.write_text(json.dumps({"cmd": cmd, "cwd": cwd_out, "path": path}, indent=1))
+    pending.replace(command)
+    (SEAT / f"{spawn}.packet.md").write_text(packet_text)
     want, bare = SEAT / f"{spawn}.result.json", SEAT / f"{spawn}.output.json"
     window = timeout if window is None else window
     print(json.dumps({"seat": spawn, "packet": str(SEAT / f"{spawn}.packet.md"),
@@ -686,7 +699,6 @@ def run_seat(spawn, cmd, packet, cwd, timeout, path=None, *, window=None, ledger
            "model_observed": observed is not None}
     return SeatResult(json.dumps(env))
 
-
 def poke():
     """D117: every wrapper ends by running one tick, so latency is a poke, not an interval. The ROOT's map rules first: a tick can only spawn a claude-p Executor, and a root whose Executor is a pane must never be poked into `claude -p` (pilot S32 — one wrapper without DOIT_NO_POKE in its shell cost $2.09 metered and three unserved 30-minute spawns). The variable stays as the second guard, never the only one."""
     if os.environ.get("DOIT_NO_POKE"):
@@ -697,7 +709,6 @@ def poke():
     subprocess.Popen([sys.executable, str(HERE / "tick.py")], start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-
 def file_adr(kind, title, body, base):
     """§2.7: every ADR carries the ids that caused it and a retirement condition."""
     p = alloc(CONTENT, "L-adr-", ".md")
@@ -705,7 +716,6 @@ def file_adr(kind, title, body, base):
                  f"Caused by: {base['subject']} · {base['spawn']}\n"
                  f"Retire when: {base['subject']} is reverted or superseded.\n")
     return p.stem
-
 
 def write_card(out, subject, spawn):
     """content/L-card-NNNN.md from the card object, fifteen lines or fewer (§5.10)."""
@@ -737,29 +747,15 @@ def write_card(out, subject, spawn):
     path.with_suffix(".json").write_text(json.dumps(full, indent=1))
     return path
 
-
-def coverage_changes(checkers):
-    """A checker whose coverage note differs from the last recorded one marks its prior passes stale."""
-    import fold
-    last = {e.get("checker"): e.get("coverage_note") for e in fold.read_events()
-            if e.get("type") == "checker-coverage-change"}
-    return [("checker-coverage-change", dict(checker=c["id"], version=c["version"],
-                                             coverage_note=c["coverage_note"]))
-            for c in checkers if last.get(c["id"]) != c["coverage_note"]]
-
-
 PINNED_BASE_RE = re.compile(r"^PINNED_BASE_SHA:[ \t]*([^\r\n]*)\r?$", re.M)
 PINNED_BASE_EXPLICIT_RE = re.compile(r"^PINNED_BASE_SHA_EXPLICIT: true$", re.M)
-
 
 def _pinned_base_in(text):
     m = PINNED_BASE_RE.search(text)
     return m.group(1).rstrip() if m else None
 
-
 def _pinned_base_explicit_in(text):
     return bool(PINNED_BASE_EXPLICIT_RE.search(text))
-
 
 def pinned_base(packet_path):
     """R7/Target 4: the exact bytes following the literal prefix `PINNED_BASE_SHA: ` on a packet file's own line (trailing whitespace stripped); `None` against a file carrying no such line, and `None` against an unreadable path."""
@@ -769,7 +765,6 @@ def pinned_base(packet_path):
         return None
     return _pinned_base_in(text)
 
-
 def pinned_base_explicit(packet_path):
     """R7/Target 4: `True` only when the same packet file also carries a line reading exactly `PINNED_BASE_SHA_EXPLICIT: true`; `False` against a file with no such line, a differently-valued one, or an unreadable path."""
     try:
@@ -778,11 +773,10 @@ def pinned_base_explicit(packet_path):
         return False
     return _pinned_base_explicit_in(text)
 
-
-def commit_shape_events(subject, status, pinned, ready_sha, worktree):
-    """R7/Target 5, AC7-AC9: COMMIT-SHAPE, scoped to a rework round — a prior `build-done` already on this subject's own event stream — whose card `status == "DONE"`. Round one (no prior `build-done` at all, whatever this round's status) and a `BLOCKED` round produce neither event. Otherwise counts `git rev-list --count <pinned>..<ready_sha>` in `worktree`: exactly `1` clears; `0`, `2+`, or an unreadable `ready_sha` rejects, naming the count (or `"unreadable"`) and the pinned base. Returns a list of at most one `(type, kv)` tuple — never emitted itself; the caller's own loop does that, same as every other event this function's sibling steps produce."""
+def commit_shape_events(subject, status, pinned, ready_sha, worktree, *, events=None):
+    """Check COMMIT-SHAPE on DONE rework rounds against prior build-done events."""
     import fold
-    specs, *_ = fold.fold(fold.read_events())
+    specs, *_ = fold.fold(current_events(events))
     if not any(e["type"] == "build-done" for e in specs.get(subject, {"evs": []})["evs"]):
         return []
     if status != "DONE":
@@ -799,8 +793,7 @@ def commit_shape_events(subject, status, pinned, ready_sha, worktree):
     return [("rejected-criterion", dict(criterion="COMMIT-SHAPE",
                                         why=f"{count_desc} commits above {pinned}"))]
 
-
-def events_for(role, out, a, base):
+def events_for(role, out, a, base, *, events=None):
     """Output object → the events the contract names. Declarations become events typed by the term."""
     decl = [(d["term"], {k: v for k, v in d.items() if k != "term"}) for d in out.get("declarations", [])]
     qs = [("question", q) for q in out.get("escalations", [])]
@@ -825,7 +818,7 @@ def events_for(role, out, a, base):
             warn_findings = warn_fn(pathlib.Path(a.path).read_text()) if warn_fn else []
             if warn_findings:
                 import fold
-                seen = {(e.get("subject"), e.get("finding")) for e in fold.read_events()
+                seen = {(e.get("subject"), e.get("finding")) for e in current_events(events)
                         if e.get("type") == "spec-lint-warning"}
                 for f in warn_findings:
                     if (a.subject, f) not in seen:
@@ -854,11 +847,11 @@ def events_for(role, out, a, base):
         if out["could_not_run"] and not any(t == "gate-infra" for t, _ in decl):
             ev.append(("gate-infra", dict(line="could_not_run")))
         # A re-grade that finds a standing rejection met clears it — the grader may clear (fold.EMITS), and without this a rework could never reach accepted. A confirmed verdict found everything met, the done-condition included — a rejection the packet no longer names (round one's DONE-COND) cannot outlive it, or the Executor reworks forever. Seen on the first real chain. R7/Target 6: COMMIT-SHAPE is the one standing rejection this loop never clears — only a builder's own next conforming rework does (AC13).
-        ev += spawns.clear_events(vs, out, a.subject, ev[0][1]["confirmed"], base.get("spawn"))   # L-spec-0755/R3(c)
-        ev += coverage_changes(out["checkers"])
+        ev += spawns.clear_events(vs, out, a.subject, ev[0][1]["confirmed"], base.get("spawn"), events=current_events(events))   # L-spec-0755/R3(c)
+        ev += coverage_changes(out["checkers"], events=current_events(events))
         # L-spec-0482/R12.b: the circuit breaker. A `cannot-assess` row on a criterion nobody declared owed (the shared `fold.verdict_owed_criteria` helper — never a second, drifting read of `owed-ac`) rides on the `verdict` event as `missing_capability`, and opens the SAME capability-hold the preflight opens (`dispatch.py`'s own `grading-preflight-failed` branch, `source="preflight"` there, `source="verdict"` here) — one `escalation-blocking` per capability with no hold already open. An absent, `"unknown"`, or out-of-`CAPABILITIES` value all coerce to `capability:unknown:<SPEC>` (Assumptions): a hold subject is always `capability:<one of ten>` or `capability:unknown:<SPEC>`, never a raw model string (security_path).
         import fold, grading_env, routing
-        events = fold.read_events()
+        events = current_events(events)
         owed_criteria = fold.verdict_owed_criteria(events, a.subject) | set(routing.ruled_criteria(events, a.subject))
         missing_capability, tooling_criteria = [], []
         for v in vs:
@@ -932,7 +925,7 @@ def events_for(role, out, a, base):
             bd_kv["base_sha_explicit"] = True
         bd_kv.update(__import__("build_readiness").build_done_fields(out))
         ev.append(("build-done", bd_kv))
-        ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd)
+        ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd, events=current_events(events))
         for d in out["deviations"]:
             e = dict(deviation=d["type"], what=d["what"])   # `type` is the event's (found on the first real build)
             if d["type"] == "significant":      # owes an ADR; the wrapper files it from `why`
@@ -946,7 +939,6 @@ def events_for(role, out, a, base):
     elif role in ("owed-sweeper", "owed-verifier"):
         ev.extend(__import__('owed_verdicts').events(out['results'], a.subject))
     return ev + qs + decl
-
 
 def _parse_env(path):
     """KEY=value pairs from an `.env` file: last occurrence wins, a `#`-prefixed or key-less line is not a declaration, matching outer quotes are stripped. Values are never further trimmed or case-folded (L-spec-0194 Constraints — every byte/value comparison downstream is raw equality). `{}` when `path` is not a file."""
@@ -966,11 +958,9 @@ def _parse_env(path):
         out[key] = val
     return out
 
-
 def readonly_dsn(project_checkout):
     """The value bound to SUPABASE_DB_URL_RO in <project_checkout>/.env, or None when the file or the key is absent. A local file read only — never a subprocess, never a network call (L-spec-0194 Constraints)."""
     return _parse_env(pathlib.Path(project_checkout) / ".env").get("SUPABASE_DB_URL_RO")
-
 
 def provision_worktree_env(worktree, project_checkout):
     """Copies the checkout's operator-placed read-only DSN into `<worktree>/.env` under the name every `live_db` test reads, SUPABASE_DB_URL — refusing, never guessing, whenever the value could instead be a mislabeled read-write credential (L-spec-0194 security_path). Returns on the first matching step: "absent" — the checkout carries no SUPABASE_DB_URL_RO; nothing written. "refused" — the RO value byte-equals some OTHER checkout key whose name contains DB_URL; OR `<worktree>/.env` already exists holding different bytes; OR the worktree's own `.gitignore` does not cover `.env` (a later `git add -A` there would commit it). "readonly" — `<worktree>/.env` already holds exactly this one line (idempotent, no write), or now does after writing it, mode 0o600. The one subprocess this runs, `git check-ignore`, decides the last step only; its stdout/stderr are discarded and never logged, and the DSN value is never passed to it (Constraints — the narrow, named subprocess exception)."""
@@ -997,7 +987,6 @@ def provision_worktree_env(worktree, project_checkout):
     dest.chmod(0o600)
     return "readonly"
 
-
 def provision_sweep_env(sweep_dir, project_checkout):
     """L-spec-9004 OC1 — like provision_worktree_env above, but for a private per-sweep-batch scratch directory (`scratch.sub("sweeps") / <sweep-id>`) rather than a builder/grader worktree. Reuses that function's DSN-resolution and DSN-collision refusal byte-for-byte, and replaces only the destination-safety gate: a scratch directory, by scratch.root()'s own invariant, is never inside a git work tree, so provision_worktree_env's require-git-ignored gate would refuse every call here, always (nothing to check-ignore into). The risk for THIS destination class runs the other way — this credential landing in a future `git add -A`/commit — so the gate refuses instead when `sweep_dir` itself, or any ancestor of it, holds a `.git` entry. Returns the same four-string vocabulary: "absent" — the checkout carries no SUPABASE_DB_URL_RO; nothing written. "refused" — the RO value byte-equals some OTHER checkout key whose name contains DB_URL; OR `sweep_dir` (or an ancestor) holds a `.git` entry; OR `<sweep_dir>/.env` already exists holding different bytes. "readonly" — `<sweep_dir>/.env` already holds exactly this one line (idempotent, no rewrite), or now does after writing it, mode 0o600. A pure filesystem function — no subprocess, no network at all (security_path — more restrictive than provision_worktree_env, which runs exactly one subprocess, `git check-ignore`, that this gate does not need)."""
     sweep_dir, project_checkout = pathlib.Path(sweep_dir), pathlib.Path(project_checkout)
@@ -1018,7 +1007,6 @@ def provision_sweep_env(sweep_dir, project_checkout):
     dest.chmod(0o600)
     return "readonly"
 
-
 def held_capability(all_ev, subject, required):
     """L-spec-0481/R12.3: the first open hold (`grading_env.CAPABILITIES` order) covering one of `required` for `subject` — its own hold-subject string (`capability:NAME` or `capability:NAME:SUBJECT`, SD-R12-6a: the two spec-local capabilities only cover THIS subject, never another spec's identical failure). `None` when nothing open covers it."""
     import fold, grading_env
@@ -1033,7 +1021,6 @@ def held_capability(all_ev, subject, required):
         if local in holds:  # a verdict-sourced hold is spec-local for every capability
             return local
     return None
-
 
 def grading_budget(all_ev, subject):
     """L-charter-0042 R10(b)/(c): a `role=grader` dispatch is refused, before any spend, when (b) some criterion has been rejected by a grader in two-or-more grader verdict rounds since it was last cleared, or (c) a fourth-or-later grader run is attempted with no qualifying regrade newer than the newest prior run. Pure — reads only events whose `subject == subject`; no ledger write. Redefines "same reason" against the ledger's own shape (measured 2026-09-25..27) rather than the charter's original why-text-matching draft, which was dead code on the exact case (L-spec-0173: ~10 straight AC1 rejections, each `why` distinct, each preceded by its own `build-done`, no `criterion-cleared` ever) it was written to catch — a rework alone never resets either rule."""
@@ -1083,7 +1070,6 @@ def grading_budget(all_ev, subject):
             return f"cap:{len(starts)}"
     return None
 
-
 def _room_need_gb(role, toml_path=None):
     """L-charter-0042/L-spec-0486, R15d: 5GB for a builder, 2GB for a grader — `look.toml`'s `[thresholds] room_builder_gb`/`room_grader_gb` override either default; `toml_path` is the same injection point `look.load_toml` already offers, never edited by this spec."""
     import look
@@ -1115,8 +1101,8 @@ def ensure_room(path, need_gb):
 from dispatch_builder import pending_conflict_rework
 import dispatch_builder
 
-def builder_worktree_preflight(a, cwd, ledger, base, fail):
-    return dispatch_builder.worktree_preflight(sys.modules[__name__], a, cwd, ledger, base, fail)
+def builder_worktree_preflight(a, cwd, ledger, base, fail, *, events=None):
+    return dispatch_builder.worktree_preflight(sys.modules[__name__], a, cwd, ledger, base, fail, events=events)
 
 def builder_effective_base(a, fail):
     return dispatch_builder.effective_base(sys.modules[__name__], a, fail)
@@ -1149,6 +1135,7 @@ def unaudited(evs):
     return f'unaudited: {sid} is Planner-written and has no spec-auditor spawn-done'
 
 
+@_with_dispatch_view
 def main(a):
     """Every unexpected backend-path exception gets a terminal ledger event."""
     a._dispatch_crash = None
@@ -1164,6 +1151,7 @@ def main(a):
         vars(a).pop('_dispatch_builder', None)
 
 
+@_with_dispatch_view
 def _main(a):
     import fold; ledger_write_guard.check(EVENTS)
     kind, tmin, usd = ROLES[a.role]
@@ -1174,7 +1162,7 @@ def _main(a):
         sys.exit(f"dispatch: --packet {a.packet!r} is not a file — nothing allocated, nothing spent")
     packet = a._packet if hasattr(a, "_packet") else sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text()
     if a.cwd is None:
-        project = a.project if a.project is not None else fold.subject_project(a.subject)
+        project = a.project if a.project is not None else subject_project(a.subject)
         try:
             cwd = spawns.default_cwd(a.role, a.subject, project, ROOT)
         except ValueError as exc:
@@ -1207,7 +1195,7 @@ def _main(a):
             return False
         import fold
         clock = datetime.fromisoformat(now())
-        events = fold.read_events()
+        events = current_events()
         detail = _failure_detail(text)
         fields = dict(role=a.role, backend=meta.get("backend", "unknown"), attempt=spawn, detail=detail)
         if classification == "infra":
@@ -1288,7 +1276,7 @@ def _main(a):
     sys.path.insert(0, str(HERE))
     import fold
     # L-spec-0755/R2: duplicate/conflicting dispatch refused before any spend; lock held until the start event lands.
-    inherited = fold.read_events()
+    inherited = current_events()
     clock = datetime.fromisoformat(now())
     retry_state = infra_gate(inherited, a.subject, a.role, clock)
     unknown_hold = _machine_hold(inherited, a.subject, a.role)
@@ -1321,7 +1309,7 @@ def _main(a):
             fail(f"{a.subject}: builder packet carries no PINNED_BASE_SHA line — "
                  "refusing role=builder before any spend", reason="no-pinned-base")
         a.pinned_base_sha_explicit = _pinned_base_explicit_in(packet)
-        all_ev = fold.read_events()
+        all_ev = current_events()
         if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
         # L-spec-0276/R3 Target 4(a): a builder must not run ahead of an unmerged, unsettled earlier plan wave on the SAME charter. No resolvable charter, no plan file, or no unit matching this spec's own footprint is `wave_note="undetermined"` on `build-started` below — never a refusal (SD6: "the unit boundary is not this check's call").
@@ -1342,7 +1330,7 @@ def _main(a):
         else:
             wave_note = "undetermined"
         # L-spec-0276/R3 Target 4(b): the effective project of this dispatch (--project, else --cwd's basename — already computed as base["project"]) disagrees with `fold.subject_project(subject)`, when the latter is known.
-        subj_project = fold.subject_project(a.subject)
+        subj_project = subject_project(a.subject)
         if subj_project is not None and subj_project != base["project"]:
             fail(f"{a.subject} is recorded under project={subj_project!r}; this dispatch is "
                  f"project={base['project']!r} — refusing role=builder before any spend",
@@ -1360,7 +1348,7 @@ def _main(a):
     # L-spec-0435 (R10(b)/(c)): the FIRST thing done for role=grader (Assumptions
     # §6) — ahead of D120, write_path, window_min, spawn-started, any backend.
     if a.role == "grader":
-        grading_ev = fold.read_events()
+        grading_ev = current_events()
         reason = grading_budget(grading_ev, a.subject)
         if reason:
             # The newest matching escalation-blocking, IF no decision/unblocked (any shape) on the subject is newer than it — Constraints/ Assumptions §7: dedup is scoped to (subject, kind, reason) and lasts only while unresolved, never forever, so a resolved-but- not-fixed block re-surfaces instead of wedging silently (AC14).
@@ -1392,17 +1380,17 @@ def _main(a):
         need_gb = _room_need_gb(a.role)
         room_path = scratch.root()
         if ensure_room(room_path, need_gb):
-            look._clear("disk-room", a.role, "room again", fold.read_events(), fold.ROOT)
+            look._clear("disk-room", a.role, "room again", current_events(), fold.ROOT)
         else:
             free_gb = shutil.disk_usage(room_path).free / 2**30
             look.emit_once("disk-room", a.role, "thinker",
                            {"free_gb": free_gb, "need_gb": need_gb, "path": str(room_path)},
-                           fold.read_events())
+                           current_events())
             fail(f"no room: {free_gb:.1f}GB free, need {need_gb}GB at {room_path} — "
                  f"refusing role={a.role} before any spend", reason="disk")
     g_bundle = None
     if a.role == "grader":
-        g_bundle = grader_packet.gate(fold.read_events(), a.subject, packet,
+        g_bundle = grader_packet.gate(current_events(), a.subject, packet,
             lambda kind, **kv: emit(ledger, base, kind, **kv), fail)
     # L-spec-0481/R12.3-R12.6: hold-check, then provision+prove in the spawn's OWN view/cwd, before any spend — scoped to the entry points this unit builds (Entry points a/b/c): a grader on the seat backend (its view is built here, before dsn_role, so preflight proves inside the SAME sandbox/env the run uses); a grader resolving to a non-seat backend (claude-p/codex) whose own required() is non-empty — there is something to prove and no view anywhere to prove it in — is refused before any spend (AC12(iii)); a non-seat grader requiring nothing is untouched (nothing for the missing view to have blocked); and a reviewer of any backend (read-only, against its cwd — never a view).
     import grading_env, routing
@@ -1412,9 +1400,11 @@ def _main(a):
     if a.role == "grader":  # L-spec-8034/R12.g: route before either refusal check (AC6); owed-ac wins (Assumption 8)
         g_spec_text, g_verify_text = [p.read_text() if p.is_file() else "" for p in (
             CONTENT / f"{a.subject}.md", CONTENT / f"verify-{a.subject}-grader.sh")]
-        g_explicit_owed = routing.explicit_owed_ids(fold.read_events(), a.subject)
+        g_explicit_owed = routing.explicit_owed_ids(current_events(), a.subject)
         g_computed_routes = {c: v for c, v in grading_env.route(g_spec_text, g_verify_text, gproject).items() if c not in g_explicit_owed}
-        g_events = fold.read_events()
+        # Output selection retains the admission snapshot even as the shared
+        # view incorporates routing writes and the post-backend refresh.
+        g_events = current_events().copy()
         g_rejected = fold.standing_rejects([e for e in g_events if e.get("subject") == a.subject])
         for crit, cap, to in routing.diff_routes(g_computed_routes, routing.latest_routed_events(g_events, a.subject), standing_rejects=g_rejected):
             emit(ledger, base, "criterion-routed", criterion=crit, capability=cap, to=to)
@@ -1428,14 +1418,14 @@ def _main(a):
     if grader_seat or a.role == "reviewer":
         g_required = g_required_grader if a.role == "grader" else grading_env.required(
             "reviewer", "", "", gproject, mcp_config=bool(a.mcp_config), review_account=(ROOT / f"review-account-{gproject}").exists())
-        held_subj = held_capability(fold.read_events(), a.subject, g_required)
+        held_subj = held_capability(current_events(), a.subject, g_required)
         if held_subj:
             fail(f"{a.subject}: an open hold covers {held_subj} — refusing role={a.role} before any spend",
                  reason=f"held:{held_subj.split(':')[1]}")
         if grader_seat:
             if not a.project:
                 fail("grader dispatch needs --project to build the view — not spent")
-            build_done = next((e for e in reversed(fold.read_events())
+            build_done = next((e for e in reversed(current_events())
                                if e.get("subject") == a.subject and e.get("type") == "build-done"), None)
             if build_done is None or not build_done.get("ready_sha"):
                 fail(f"{a.subject} has no build-done with a ready_sha — nothing to grade")
@@ -1464,7 +1454,7 @@ def _main(a):
                 emit(ledger, base, "grading-preflight-failed", role=a.role, capability=cap, reason=reason)
             for cap, _ in failures:
                 subj = f"capability:{cap}:{a.subject}" if cap in grading_env.SPEC_LOCAL else f"capability:{cap}"
-                if subj not in fold.capability_holds(fold.read_events()):
+                if subj not in fold.capability_holds(current_events()):
                     cap_base = {**base, "subject": subj}
                     emit(ledger, cap_base, "capability-hold", capability=cap, spec=a.subject, source="preflight")
                     emit(ledger, cap_base, "escalation-blocking", kind="capability-hold", owner="thinker",
@@ -1481,7 +1471,7 @@ def _main(a):
             sys.exit(1)
         if grading_view is not None:
             grading_env.write_grading_env(grading_view)
-    prior = next((e for e in fold.read_events() if e.get("type") == "spawn-failed"
+    prior = next((e for e in current_events() if e.get("type") == "spawn-failed"
                   and e.get("packet_sha256") == meta["packet_sha256"]
                   and e.get("contract_sha256") == meta["contract_sha256"]
                   and str(e.get("why", "")).startswith(("is_error", "contamination"))
@@ -1541,7 +1531,7 @@ def _main(a):
         dsn_role = ("none" if sweep_manifest["kind"] == "repo" else
                     provision_sweep_env(cwd, ROOT / "repos" / a.project) if a.project else "absent")
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
-    wm = window_min(a.role, a.subject, fold.read_events(), backend=backend)
+    wm = window_min(a.role, a.subject, current_events(), backend=backend)
     waiter_pid = os.getpid()
     waiter_kv = dict(window_min=wm, waiter_pid=waiter_pid, waiter_host=socket.gethostname(),
                      waiter_proc_start=panes.proc_start(waiter_pid))
@@ -1575,6 +1565,7 @@ def _main(a):
     start_head = getattr(a, "start_head", None)   # set by builder admission, after any resume rebase
 
     def timed_out(exc, on_seat, tail=""):
+        _active_view.get().after_backend = True
         note = __import__("wip_resume").on_timeout(sys.modules[__name__], a, cwd, ledger, base, spawn, start_head, exc, on_seat) if builder else ""
         fail(f"timeout after {a.timeout or tmin} min{tail}" + (f"; {note}" if note else ""), reason="timeout", backend_failure=True, exit_code=124)
     try:
@@ -1589,8 +1580,11 @@ def _main(a):
     except subprocess.TimeoutExpired as exc:
         timed_out(exc, seat)
     except (Unserved, spawns.Cancelled) as e:
+        _active_view.get().after_backend = True
         spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
                                     spawn, grading_view)
+    finally:
+        _active_view.get().after_backend = True
     try:
         res = json.loads(r.stdout)
     except ValueError:
@@ -1606,6 +1600,7 @@ def _main(a):
         cmd[cmd.index("--model") + 1] = fb["model"]
         meta.update(backend=backend, spawn_path=backend, model_requested=fb["model"],
                     backend_fallback=True, fallback_from="codex")
+        _active_view.get().after_backend = False
         try:
             r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view) if seat \
@@ -1613,8 +1608,11 @@ def _main(a):
         except subprocess.TimeoutExpired as exc:
             timed_out(exc, seat, f" (on the fallback backend {backend})")
         except (Unserved, spawns.Cancelled) as e:
+            _active_view.get().after_backend = True
             spawns.unserved_or_cancelled(e, lambda why, reason=None: fail(why, reason=reason, backend_failure=True),
                                         spawn, grading_view)
+        finally:
+            _active_view.get().after_backend = True
         try:
             res = json.loads(r.stdout)
         except ValueError:
@@ -1625,7 +1623,7 @@ def _main(a):
     used = next(iter(res.get("modelUsage") or {}), None)
     meta.update(model_used=used, model_observed=bool(used) and res.get("model_observed", True),
                 model_match=(used == mm["model"]) if used and mm["model"] else None,
-                first_on_model=models.first_on_model(fold.read_events(), meta["contract_sha256"], used) if used else None)
+                first_on_model=models.first_on_model(current_events(), meta["contract_sha256"], used) if used else None)
     meta.update(model=used, cost_usd=res.get("total_cost_usd"),
                 input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
                 cache_read=u.get("cache_read_input_tokens"), cache_creation=u.get("cache_creation_input_tokens"),
@@ -1740,6 +1738,7 @@ def cli_version():
 
 
 import fold
+_default_subject_project = fold.subject_project
 fold.EMITS["worktree-recreated"] = {"builder"}
 fold.REQUIRED["worktree-recreated"] = ("worktree", "branch")
 fold.EMITS["manual-dispatch"] = set().union(*fold.EMITS.values()) | {"operator"}

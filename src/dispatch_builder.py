@@ -5,7 +5,7 @@ import subprocess
 from datetime import datetime
 
 
-def worktree_preflight(runtime, a, cwd, ledger, base, fail):
+def worktree_preflight(runtime, a, cwd, ledger, base, fail, *, events=None):
     """Recreate conventional missing checkouts, then prove root and branch."""
     # Standalone five-argument callers have no dispatch base context. Real
     # dispatches use this existing admission seam for all builder git checks.
@@ -38,7 +38,7 @@ def worktree_preflight(runtime, a, cwd, ledger, base, fail):
     if branch.returncode or branch.stdout.strip() != a.subject.lower():
         fail("builder worktree is not on its expected branch", reason="preflight:wrong-branch")
     if dispatched:
-        runtime.builder_branch_preflight(a, cwd, __import__("fold").read_events(), fail)
+        runtime.builder_branch_preflight(a, cwd, runtime.current_events(events), fail)
         a.start_head = __import__("wip_resume").head_of(worktree)   # this attempt's start, for WIP scoping
     __import__("builder_deps").prepare(worktree, runtime.ROOT, runtime.ROOT / "repos" / (a.project or ""), subject=a.subject)
 
