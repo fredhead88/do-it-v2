@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fold  # noqa: E402
 import plain  # noqa: E402
+import charter_carry  # noqa: E402
 
 # `brief.PROVING_PATH` — L-charter-0046's `proving-core` (L-spec-0471), a
 # different, concurrent charter, not yet built at this spec's tip. Guarded for
@@ -277,6 +278,8 @@ def _charter_next(cid, state, mine, now, briefs, steps=None, admitted=()):
         return "nothing — withdrawn", "nobody"
     if state == "L2-complete":
         return _DONE
+    if state == "carried":
+        return "nothing — carried", "nobody"
     types = {e.get("type") for e in admitted}
     if state != "unknown" and "charter-filed" in types and not types.intersection(
             ("plan-written", "cut-written")):
@@ -311,6 +314,8 @@ def _charter_core(cid, events, root, now, specs, charters, steps=None):
     title = _content_title(root, cid)
     pl = plain.line(cid, root)
     ph = plain.phrase("charter", state)
+    if state == "carried":
+        ph = f"closed, carried into {c.get('carried_to')}"
     mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
     admitted = charters.get(cid, {}).get("evs", ())
     next_text, next_owner = _charter_next(cid, state, mine, now, c.get("briefs", 0), steps,
@@ -325,6 +330,10 @@ def _charter_core(cid, events, root, now, specs, charters, steps=None):
 
     if state == "retracted":
         expected_done, expected_done_why = None, "withdrawn"
+    elif state == "carried":
+        closed = charter_carry.carried_close(evs)
+        expected_done = _iso(fold.ts(closed["ts"])) if closed is not None else None
+        expected_done_why = None
     elif state == "L2-complete":
         closed = _newest(evs, "charter-closed") or _newest(evs, "tree-reaped")
         expected_done = _iso(fold.ts(closed["ts"])) if closed is not None else (
@@ -347,7 +356,43 @@ def _charter_core(cid, events, root, now, specs, charters, steps=None):
     children = _spec_children_rows(mine, root, steps)
     return {"title": title, "plain": pl, "state": state, "phrase": ph,
             "next": {"text": next_text, "owner": next_owner}, "timeline": timeline,
-            "spend": spend, "children": children, "mine": mine, "last_change": _last_change(evs)}
+            "spend": spend, "children": children, "mine": mine, "last_change": _last_change(evs),
+            "carries": _carries(cid, charters, specs, now)}
+
+
+def _carries(cid, charters, specs, now):
+    """What this charter carries: each carried source, its `why`, and the failure
+    records the final target holds for it (structured, then rendered by `render`)."""
+    me = charters.get(cid)
+    if me is None:
+        return []
+    rows = []
+    for sid, src in sorted(charters.items()):
+        if src.get("state") != "carried" or sid == cid:
+            continue
+        direct = src.get("carried_to") == cid
+        chained = me.get("state") != "carried" and \
+            charter_carry.final_target(src.get("carried_to"), charters) == cid
+        if not (direct or chained):
+            continue
+        asked = charter_carry.request(src["evs"]) or {}
+        recs = [{"source": r.get("source"), "spec": r.get("spec"), "criterion": r.get("criterion"),
+                 "failed_src": r.get("failed_src"), "status": charter_carry.record_status(r, specs, now)}
+                for r in charter_carry.records(me["evs"]) if r.get("source") == sid]
+        rows.append({"id": sid, "why": charter_carry.text(asked.get("why", "")), "records": recs})
+    return rows
+
+
+def _goal_charter_state(cid, charters):
+    """SD11a: a carried charter reads as its final target's state, so a goal is
+    done only when the work it moved to is. A withdrawn, missing or looping
+    target leaves it `carried`, which is live and never done."""
+    state = charters[cid]["state"]
+    if state != "carried":
+        return state
+    final = charter_carry.final_target(charters[cid].get("carried_to"), charters)
+    sub = charters.get(final, {}).get("state")
+    return sub if sub and sub not in ("retracted", "carried") else "carried"
 
 
 def _spec_children_rows(mine, root, steps=None):
@@ -397,7 +442,8 @@ def _charter_dossier(item_id, events, root, now, specs, charters, steps=None):
             "catch_me_up": catch_me_up,
             "status": {"state": core["state"], "phrase": core["phrase"]},
             "next": core["next"], "timeline": core["timeline"], "spend": core["spend"],
-            "children": core["children"]}
+            "children": core["children"],
+            **({"carries": core["carries"]} if core["carries"] else {})}
 
 
 def _linked_charter_ids(charters, goal_id):
@@ -424,7 +470,7 @@ def _goal_dossier(item_id, events, root, now, specs, charters, steps=None):
     pl = plain.line(item_id, root)
 
     linked_all = _linked_charter_ids(charters, item_id)
-    states_all = [charters[cid]["state"] for cid in linked_all]
+    states_all = [_goal_charter_state(cid, charters) for cid in linked_all]
     gstate = plain.goal_state(states_all)
     ph = plain.phrase("goal", gstate)
 
@@ -432,9 +478,17 @@ def _goal_dossier(item_id, events, root, now, specs, charters, steps=None):
     charter_cores = {cid: _charter_core(cid, events, root, now, specs, charters, steps)
                       for cid in non_retracted}
 
-    next_cid = next((cid for cid in linked_all if charters[cid]["state"] not in
+    next_cid = next((cid for cid in linked_all if _goal_charter_state(cid, charters) not in
                      ("retracted", "L2-complete")), None)
-    if next_cid is not None:
+    if next_cid is not None and charters[next_cid]["state"] == "carried":
+        # The goal's next follows the work, which now lives in the final target.
+        final = charter_carry.final_target(charters[next_cid].get("carried_to"), charters)
+        if final in charters and charters[final]["state"] not in ("retracted", "carried"):
+            final_core = charter_cores.get(final) or _charter_core(final, events, root, now, specs, charters, steps)
+            next_text, next_owner = final_core["next"]["text"], final_core["next"]["owner"]
+        else:
+            next_text, next_owner = "carried into a charter that is not going ahead — needs a new home", "thinker"
+    elif next_cid is not None:
         next_text, next_owner = charter_cores[next_cid]["next"]["text"], \
             charter_cores[next_cid]["next"]["owner"]
     else:
@@ -467,7 +521,7 @@ def _goal_dossier(item_id, events, root, now, specs, charters, steps=None):
                           "waiting_on": f"{core['next']['text']} ({core['next']['owner']})",
                           "specs": core["children"]})
 
-    n, k, j = _charter_buckets([charters[cid]["state"] for cid in non_retracted])
+    n, k, j = _charter_buckets([_goal_charter_state(cid, charters) for cid in non_retracted])
     middle = f"Where it stands: {ph}; {n} of {n + k + j} specs proven, {k} being built, {j} waiting"
     catch_me_up = _catch_me_up(pl["text"], middle, (next_text, next_owner))
 
@@ -531,7 +585,7 @@ def goals(events, root, *, folded=None):
             seen.append(gid)
     out = []
     for gid in sorted(seen):
-        states = [charters[cid]["state"] for cid in _linked_charter_ids(charters, gid)]
+        states = [_goal_charter_state(cid, charters) for cid in _linked_charter_ids(charters, gid)]
         state = plain.goal_state(states)
         out.append({"id": gid, "title": _goal_title(gid, events, root),
                     "state": state, "phrase": plain.phrase("goal", state)})
@@ -563,6 +617,12 @@ def render(d):
         lines.append(f"  metered: ${sp['metered_usd']:.2f}")
     if sp.get("metered_unmeasured"):
         lines.append(f"  metered_unmeasured: {sp['metered_unmeasured']}")
+    if d.get("carries"):
+        lines.append("Carries:")
+        for c in d["carries"]:
+            lines.append(f"  {c['id']}: {c['why'] or 'no reason recorded'}")
+            for r in c["records"]:
+                lines.append(f"    failed check: {r['spec']} {r['criterion']} ({r['failed_src']}) — {r['status']}")
     if d["children"]:
         lines.append("Children:")
         for c in d["children"]:

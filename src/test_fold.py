@@ -3114,7 +3114,7 @@ _collected_charter_states = _charter_state_literals(_fold_fn)
 _offending_charter = _collected_charter_states - set(fold.CHARTER_STATES)
 assert not _offending_charter, \
     f'a charter["state"] literal is {_offending_charter}, not in fold.CHARTER_STATES'
-assert _collected_charter_states == {"retracted", "L2-complete", "L1-complete", "open"}, \
+assert _collected_charter_states == {"retracted", "carried", "L2-complete", "L1-complete", "open"}, \
     _collected_charter_states
 print("spec-states-ast ok")
 

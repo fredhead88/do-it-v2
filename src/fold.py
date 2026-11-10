@@ -17,11 +17,8 @@ ignored (§9.2), which leaves an audit trail of the attempt.
 import collections, heapq, json, os, pathlib, re, sys, ledger_files
 from datetime import datetime, timedelta, timezone
 
-import freeze
-import owed, routing
-import proving
-import ledger_compact
-import ledger_cache, ledger_write_guard
+import freeze, owed, routing, proving, charter_carry
+import ledger_compact, ledger_cache, ledger_write_guard
 
 
 def _ledger_excepthook(exc_type, value, traceback, previous=sys.excepthook):
@@ -689,6 +686,8 @@ REQUIRED["grader-pane-started"] = ("pane", "spawn_ids")
 REQUIRED["charter-proving"] = ("reason", "deadline")
 REQUIRED["charter-closed"] = ("reason",)
 REQUIRED["charter-reopened"] = ("spec", "criterion", "failed_src")
+REQUIRED["charter-carried"] = ("carried_to", "why")
+REQUIRED["carried-check-failed"] = ("source", "spec", "criterion", "failed_src")
 REQUIRED["owed-waived"] = ("criterion", "reason")
 REQUIRED["owed-routed"] = ("criterion", "route")
 REQUIRED["owed-quarantined"] = ("criterion", "reason", "spec_sha256")
@@ -817,6 +816,8 @@ def required_reason(e):
         return escalation_required_reason(e, escalation_ok)
     if (reason := typed_required_reason(e)) or t in ('charter-replan', 'charter-replan-held', 'charter-replan-released'):
         return reason
+    if reason := charter_carry._close_problem(e):
+        return reason
     fields = REQUIRED.get(t)
     if fields:
         missing = []
@@ -879,6 +880,8 @@ def admits(event: dict, actor: str, prior: list[dict] | None = None) -> str | No
     if allowed is not None and actor not in allowed:
         return (f"actor mismatch: {actor!r} may not emit {kind!r} "
                 f"(allowed: {sorted(allowed)})")
+    if reason := charter_carry._close_request_problem(event, prior):
+        return reason
     if kind == "owed-ac" and actor not in OWED_DECLARERS and prior is not None:
         criterion = event.get("criterion")
         declared = bool(criterion) and any(
@@ -1747,6 +1750,9 @@ def fold(events):
         if cid in retracted:
             c["state"] = "retracted"
             c["proving"] = None
+        elif (carried := charter_carry.carried_close(c["evs"])) is not None:
+            c["state"] = "carried"
+            c.update(carried_to=carried["carried_to"], proving=None)
         # An operational charter (S25/S35: a deploy, a drill) has NO specs — its
         # deliverable is a record. `all()` over an empty set is True, so such a
         # charter closes on the operator's l1-complete + the sweep fixpoint + a
@@ -2388,8 +2394,10 @@ def append(argv: list[str], strict: bool = False) -> dict:
     if e["type"] == "owed-ac" and actor not in OWED_DECLARERS:
         prior = fold(events())[3].get(e["subject"], [])
     reason = check_append(e, actor, prior)
-    if reason and (strict or required_reason(e)):
+    if reason and (strict or required_reason(e) or e["type"] == "charter-carried"):
         raise SystemExit(f"refused: {e['type']} by {actor}: {reason}. Nothing was written. (R3)")
+    if carry_refusal := charter_carry._append_problem(e, events):
+        raise SystemExit(f"refused: {carry_refusal}. Nothing was written. (L-spec-2138)")
     if strict and actor == "thinker" and e["type"] in ("owed-met", "owed-failed"):
         evidence = e.get("evidence")
         if isinstance(evidence, str) and os.path.isabs(evidence) and not os.path.exists(evidence):
@@ -2464,6 +2472,7 @@ if __name__ == "__main__":
             if e.get("subject") == sys.argv[2]:
                 print(json.dumps({**{k: v for k, v in e.items() if k != "_src"}, "src": e["_src"]}, sort_keys=True))
     elif cmd == "states":
+        if "--counts" in sys.argv[2:]: sys.exit(charter_carry._print_counts(charters))
         for sid, s in sorted({**specs, **charters}.items()):
             print(f"{sid}\t{s['state']}")
     elif cmd == "spend":                     # retro step 9: read-only, never writes board.md
@@ -2499,4 +2508,4 @@ SPEC_STATES = (
 
 # All 6 charter states this Plan's own SD1 names. `fold()` assigns all six —
 # `"proving"`/`"reopened"` land via `fold-proving-state` (L-spec-0472).
-CHARTER_STATES = ("open", "L1-complete", "proving", "reopened", "L2-complete", "retracted")
+CHARTER_STATES = ("open", "L1-complete", "proving", "reopened", "L2-complete", "carried", "retracted")

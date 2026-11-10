@@ -1334,6 +1334,72 @@ def _record_next_step_held(events, specs, steps, now):
             raise RuntimeError(refusal)
 
 
+def _carry_failures(cid, target, charters, specs, ev, carry_new):
+    """Record each unrecorded blocking unmet failure of `cid`'s specs on the final
+    target, one Thinker brief per record (no `requirement`: it never holds a close).
+    Standing and fresh failures alike; a closed target is recorded on just the same."""
+    import charter_carry, look
+    final = charter_carry.final_target(target, charters)
+    final_c = charters.get(final)
+    if final_c is None:
+        return
+    mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
+    known = final_c["evs"] + carry_new.get(final, [])
+    for row in charter_carry.failures(charters[cid]["evs"], known, mine, fold.NOW):
+        if _committed(charter_carry.record(tick_path(), final, cid, row)) is not None:
+            continue
+        carry_new.setdefault(final, []).append({"type": "carried-check-failed", "source": cid, **row})
+        key = f"{final}|{cid}|{row['spec']}|{row['criterion']}|{row['failed_src']}"
+        _committed_brief(look.emit_once("proving-check-failed", key, "thinker",
+                                        {"source": cid, **row}, ev))
+
+
+def _carry_pass(charters, specs, ev, pending, carry_new):
+    """The tick's carried bookkeeping. `pending` collects the sources it closed
+    this pass. A failure on one charter never stops the next."""
+    import charter_carry, look
+    errors = []
+    # Validate every request against the folded view first, then resolve chains on
+    # a view where each valid pending source already reads carried: two sources
+    # closed in one pass must still land their records on the same final target.
+    valid = {}
+    for cid, c in charters.items():
+        req = charter_carry.request(c["evs"]) if c["state"] != "carried" else None
+        if req is None:
+            continue
+        target = req.get("carried_to")
+        problem = charter_carry.target_problem(cid, target, charters)
+        if problem:
+            try:
+                _committed_brief(look.emit_once(charter_carry.INVALID_TARGET, f"{cid}|{target}|{req.get('_src')}",
+                                                "thinker", {"source": cid, "carried_to": target,
+                                                            "problem": problem}, ev))
+            except Exception as e:
+                errors.append(f"{cid}: {e}")
+        else:
+            valid[cid] = req
+    view = {**charters, **{cid: {**charters[cid], "state": "carried", "carried_to": req["carried_to"]}
+                           for cid, req in valid.items()}}
+    for cid, c in charters.items():
+        try:
+            if c["state"] == "carried":
+                _carry_failures(cid, c.get("carried_to"), view, specs, ev, carry_new)
+                continue
+            if cid not in valid:
+                continue
+            req = valid[cid]
+            target = req.get("carried_to")
+            pending.add(cid)
+            _carry_failures(cid, target, view, specs, ev, carry_new)
+            why = charter_carry.text(req.get("why", ""))[:240]
+            _committed(dispatch.emit(tick_path(), {}, "charter-closed", subject=cid, label="carried",
+                                     carried_to=target, reason=f"remaining work carried into {target}: {why}"))
+        except Exception as e:
+            errors.append(f"{cid}: {e}")
+    if errors:
+        raise RuntimeError("; ".join(errors))
+
+
 def _record():
     """One flock-guarded fold+lane+append — the shared core `main()` and
     `wait()` both run under the IDENTICAL non-blocking lock (this module's own
@@ -1507,8 +1573,17 @@ def _record_pass():
     proving_error = None
     try:
         import proving, look  # noqa: PLC0415 — lazy, matches this file's own convention
+        # L-spec-2138/carried-close, SD4/SD6/SD17: BEFORE the proving and reopen
+        # branches, because a charter being carried may itself be proving or
+        # reopened. A valid pending carry is closed here and skips those branches;
+        # one the target cannot take stays on its normal branch and alarms once.
+        carry_pending, carry_new = set(), {}
+        try:
+            _carry_pass(charters, specs, ev, carry_pending, carry_new)
+        except Exception as e:
+            proving_error = f"carry: {e}"
         for cid, c in charters.items():
-            if c["state"] in ("proving", "reopened"):
+            if c["state"] in ("proving", "reopened") and cid not in carry_pending:
                 mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
                 title = next((e.get("title") for e in reversed(c["evs"])
                               if e.get("type") == "charter-filed" and e.get("title")), cid)
@@ -1555,8 +1630,17 @@ def _record_pass():
                                       "charter review complete or not owed")
                         _committed(dispatch.emit(tick_path(), {}, "charter-closed", subject=cid,
                                       label=label, reason=reason))
+                        # SD9a: the target that owes no review hears of its carried
+                        # failures once, AFTER the close; the close itself is untouched.
+                        import charter_carry
+                        if charter_carry.owes_no_review(c["evs"]):
+                            seen = c["evs"] + carry_new.get(cid, [])
+                            lines = charter_carry.record_lines(seen, specs, fold.NOW)
+                            if lines:
+                                _committed_brief(look.emit_once(charter_carry.FAILURES_AT_CLOSE, cid, "thinker",
+                                                                {"records": lines}, ev))
     except Exception as e:
-        proving_error = f"{e}"
+        proving_error = f"{proving_error}; {e}" if proving_error else f"{e}"
     # L-charter-0042/L-spec-0427, R1: the tick dispatches. LAST guarded step
     # before the Executor rows are read, on the SAME `ev`/`specs` — no re-read sits
     # between here and Steps (Boundaries), so an event `run()` appends

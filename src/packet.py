@@ -6,7 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
-import verification, base_refresh, coupled_tests, effective_writes, wip_resume, sweep_need
+import verification, base_refresh, coupled_tests, effective_writes, wip_resume, sweep_need, charter_carry
 from packet_base import current_tip, _effective_base, builder_pin, pinned_baseline
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -1163,7 +1163,7 @@ def p_charter_reviewer(c):
         f"4. The sweep's fixpoint result: reached {fp['ts'] if fp else 'NOT REACHED'}.",
         f"5. The review account for this app: {review_account(c)}. Read-only or write-scoped; "
         "never delete, never money.",
-    ]
+    ] + charter_carry.review_items(c.evs, c.specs, fold.NOW)
 
 _AC_ANY = re.compile(r"^\s*\**AC(\d+)\s*\[")  # group added (L-spec-0435): same
 # anchor shape `criterion_block` already matched — `_drop_owed_blocks` below
