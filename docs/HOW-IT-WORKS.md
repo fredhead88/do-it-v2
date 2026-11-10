@@ -128,7 +128,7 @@ Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` 
   24 hours (verdict_fresh_hours). Reject undetermined, malformed, stale or future-dated evidence.
 
 ## Branch refresh
-Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 6/spec/day.
+Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 3/spec/day.
 - `src/direct_merge.py`: merge_one handles one do-it-v2 queue row: refuse overlapping dirty paths,
   gate, require unchanged main/branch shas, merge --no-ff, then emit shipped. A moved ref requires
   re-gating; a failed merge is aborted. cli_gate uses doit gate. Queue selection and tick wiring

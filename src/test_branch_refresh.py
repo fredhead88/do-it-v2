@@ -233,7 +233,7 @@ class TestAC4(Fixture):
         self.git('reset', '--hard', self.start, cwd=self.tree)
         with patch('branch_refresh.before_refusal') as before, \
              patch('branch_refresh.refresh') as refresh, \
-             patch('branch_refresh.refresh_before_grade', return_value={'state': 'refreshed'}) as recut:
+             patch('branch_refresh.recut', return_value={'state': 'recut'}) as recut:
             with self.assertRaisesRegex(Refused, 'branch-recut'):
                 db.branch_preflight(runtime, a, self.tree, self.events, fail)
             before.assert_not_called()
@@ -241,7 +241,7 @@ class TestAC4(Fixture):
             self.assertIsInstance(recut.call_args.kwargs['now'], datetime)
         runtime.pending_conflict_rework = lambda *_: True
         with patch('branch_refresh.before_refusal', return_value={'state': 'conflict'}), \
-             patch('branch_refresh.refresh_before_grade', return_value={'state': 'conflict'}):
+             patch('branch_refresh.recut', return_value={'state': 'conflict'}):
             db.branch_preflight(runtime, a, self.tree, self.events, fail)
         self.signed('AC4', reasons=sorted(br.REFUSALS), pin_preserved=True, current_packet_admitted=True,
                     no_builder_on_refresh=True, authorized_recovery_preserved=True)

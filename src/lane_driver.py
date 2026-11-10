@@ -86,16 +86,6 @@ def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=Non
     wt = fold.ROOT / 'worktrees' / project / sid.lower()
     if not wt.is_dir():
         raise ValueError(f'worktree {wt} missing')
-    if role == 'grader':
-        import branch_refresh
-        import packet_base
-        build = branch_refresh._grade_build(sid)
-        if build.get('status') == 'DONE':
-            repo = fold.ROOT / 'repos' / project
-            main = packet_base._effective_branch(repo, project, dispatch.spec_path(sid), sid)
-            outcome = branch_refresh.refresh_before_grade(repo, sid.lower(), main, sid)
-            if outcome.get('state') not in {'current', 'refreshed'}:
-                raise ValueError('refresh before grade: ' + outcome.get('reason', 'undetermined'))
     argv = ['doit', 'packet', role, sid, '--worktree', str(wt)]
     if role == 'builder':
         import packet as packets

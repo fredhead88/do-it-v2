@@ -43,88 +43,6 @@ def _contained(path, directory):
     return candidate
 
 
-def build_key(build):
-    """Bind refresh authority to this occurrence of the completed build."""
-    payload = {k: v for k, v in build.items() if k != 'actor'}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-
-
-def grading_build(events, subject, *, pending=False):
-    """Derive refreshed identity without mutating the historical build record.
-
-    Adoption is accounting, not readiness. Only its matching terminal gate
-    outcome can authorize packet/dispatch readers. The runner alone can use
-    the pending adoption's comparison base to publish that new evidence.
-    """
-    build = _latest(events, subject, 'build-done') or {}
-    if build.get('status') != 'DONE':
-        return build
-    own = [e for e in events if e.get('subject') == subject]
-    index = next(i for i in range(len(own) - 1, -1, -1) if own[i] is build)
-    later = own[index + 1:]
-    # Across ledger files, equal timestamps can place adoption before the
-    # completed build. The source-bound key identifies that exact occurrence.
-    receipts = [e for i, e in enumerate(own)
-                if e.get('type') == 'branch-refreshed' and e.get('refresh_id')
-                and (i > index or e.get('build_key') == build_key(build))]
-    if not receipts:
-        return build
-    receipt = receipts[-1]
-    position = next(i for i, e in enumerate(own) if e is receipt)
-    try:
-        previous = build.get('ready_sha')
-        for adoption in receipts:
-            if not _same_sha(adoption.get('from_sha'), previous):
-                raise ValueError('unrelated refresh adoption')
-            previous = adoption.get('to_sha')
-        if (any(e.get('type') in {'build-started', 'spec-written', 'spec-amended'} for e in later)
-                or receipt.get('build_key') != build_key(build)
-                or receipt.get('project') != build.get('project')
-                or receipt.get('spec_sha256') != evidence_revision.digest(
-                    (root() / 'content' / f'{subject}.md').read_text())
-                or receipt.get('checks') != 'pass'
-                or any(not re.fullmatch(r'[0-9a-f]{40}', receipt.get(k, ''))
-                       for k in ('from_sha', 'to_sha', 'base_sha'))):
-            raise ValueError('invalidated refresh identity')
-        project, branch = receipt['project'], receipt['branch']
-        if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', project)
-                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', branch)):
-            raise ValueError('invalid refresh ref')
-        repo = root() / 'repos' / project
-        env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-        tip = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify',
-                              'refs/heads/' + branch + '^{commit}'],
-                             env=env, capture_output=True, text=True, timeout=30)
-        if tip.returncode or tip.stdout.strip() != receipt['to_sha']:
-            raise ValueError('refresh tip moved')
-        terminal = next((e for e in reversed(own[position + 1:])
-                         if e.get('type') == 'branch-refresh-skipped'
-                         and e.get('refresh_id') == receipt['refresh_id']
-                         and e.get('reason') in {'grade-refresh-success', 'grade-refresh-failed'}), None)
-        if terminal is None:
-            if not pending:
-                raise ValueError('refresh gate pending')
-        elif (terminal.get('reason') != 'grade-refresh-success' or terminal.get('gate') != 0
-              or any(terminal.get(k) != receipt.get(k)
-                     for k in ('to_sha', 'base_sha', 'build_key', 'spec_sha256'))):
-            raise ValueError('refresh gate failed')
-        return {**build, 'ready_sha': receipt['to_sha'], 'base_sha': receipt['base_sha'],
-                '_refresh': terminal or receipt}
-    except (OSError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-        raise ValueError('refresh identity unavailable') from exc
-
-
-def refreshed_base(context):
-    if getattr(context.a, 'role', None) != 'grader':
-        return None
-    build = grading_build(getattr(context, 'evs', ()), context.a.subject)
-    if not build.get('_refresh'):
-        return None
-    if context.a.base_sha and context.a.base_sha != build['base_sha']:
-        raise ValueError('refreshed base mismatch')
-    return build['base_sha']
-
-
 def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runner_version=None):
     """Matched event, original JSON and parsed bundle, or None if unprovable."""
     import build_runner
@@ -137,7 +55,7 @@ def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runn
     try:
         if not evidence_revision.current(events, subject, event):
             return None
-        build = grading_build(events, subject, pending=identity is not None)
+        build = _latest(events, subject, 'build-done')
         # Stable identity excludes build time; freshness still requires evidence
         # published after the latest build, including a rebuild at the same SHA.
         if build and (not build.get('ts') or not event.get('ts')
@@ -154,11 +72,6 @@ def bundle_for(events, subject, ready_sha, *, criteria=None, identity=None, runn
         if hashlib.sha256(raw).hexdigest() != event["bundle_sha256"]:
             return None
         data = json.loads(raw)
-        authority = build.get('_refresh') if build else None
-        if authority and authority.get('reason') == 'grade-refresh-success' and (
-                event.get('bundle_sha256') != authority.get('bundle_sha256')
-                or event.get('bundle_key') != authority.get('bundle_key')):
-            return None
         if data["spec"] != subject or not _same_sha(data["sha"], ready_sha):
             return None
         if data.get("spec_sha256") is not None:
@@ -252,7 +165,7 @@ def source_text(context, text):
 
 def packet_items(context, items):
     context._grader_redaction = None
-    build = grading_build(context.evs, context.a.subject) or context.last('build-done') or {}
+    build = context.last("build-done") or {}
     bundle = bundle_for(context.evs, context.a.subject, build.get("ready_sha"))
     if bundle is None:
         return items
@@ -280,7 +193,7 @@ def evidence_state(events, subject, *, main_sha=None):
     A pending identity does not discard a selected event: dispatch still proves
     the full bundle with bundle_for, independently of this advisory result.
     """
-    build = grading_build(events, subject)
+    build = _latest(events, subject, "build-done") or {}
     ready = build.get("ready_sha")
     evidence = [e for e in events if e.get('subject') == subject
                 and e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
@@ -326,11 +239,7 @@ def evidence_state(events, subject, *, main_sha=None):
 
 def gate(events, subject, packet, emit, fail):
     """Called after budget/commit/disk gates and before routing, on every backend."""
-    try:
-        selection = evidence_state(events, subject)
-    except ValueError as exc:
-        fail(str(exc), reason='refresh-not-ready')
-        return None
+    selection = evidence_state(events, subject)
     ready, bundle_event, failed = selection.ready_sha, selection.bundle_event, selection._failed
     failure_newer = failed is not None
     bundle = bundle_for(events, subject, ready) if bundle_event else None

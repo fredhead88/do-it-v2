@@ -4,10 +4,8 @@ from datetime import datetime, timezone, timedelta
 import fcntl
 import fnmatch
 import json
-import math
 import os
 from pathlib import Path
-import resource
 import subprocess
 import tempfile
 import time
@@ -279,321 +277,8 @@ def restore_artifacts(snapshots):
             path.chmod(mode)
 
 
-def red_on_master(repo, main, tests):
-    """Compare test files with main's bytes in an isolated, detached clone.
-
-    A missing file, unsupported identifier or unavailable runner is absence of
-    evidence, never a green baseline. Reuse preflight's runner/environment
-    policy, including its total test budget and process-group timeout cleanup.
-    """
-    import re
-    import spec_preflight as preflight
-    repo = Path(repo).resolve()
-    project = repo.name
-    if (project not in {'do-it-v2', 'albert-scott'}
-            or not isinstance(main, str)
-            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', main)
-            or not isinstance(tests, (list, tuple, set, frozenset))):
-        return None
-    if any(not isinstance(identifier, str) or not preflight.SAFE_TEST.fullmatch(identifier)
-           or '::' in identifier for identifier in tests):
-        return None
-    identifiers = list(dict.fromkeys(tests))
-    deadline = time.monotonic() + preflight.TEST_CAP_S
-    try:
-        with tempfile.TemporaryDirectory(prefix='red-on-master-') as name:
-            allocation = Path(name)
-            env = preflight._environment(allocation)
-            tree = allocation / 'checkout'
-            def run(argv, *, cwd=None, cap=120):
-                remaining = min(cap, deadline - time.monotonic())
-                if remaining <= 0:
-                    raise subprocess.TimeoutExpired(argv, 0)
-                return preflight._process(argv, cwd=cwd, env=env, timeout=remaining)
-            resolved = run(['git', '-C', str(repo), 'rev-parse', '--verify',
-                            '--end-of-options', main + '^{commit}'])
-            if resolved.returncode or not re.fullmatch(r'[0-9a-f]{40}', resolved.stdout.strip()):
-                return None
-            base = resolved.stdout.strip()
-            cloned = run(['git', '-c', 'core.hooksPath=' + os.devnull, 'clone',
-                          '--local', '--no-hardlinks', '--no-checkout', str(repo), str(tree)])
-            if cloned.returncode:
-                return None
-            detached = run(['git', '-c', 'core.hooksPath=' + os.devnull, 'checkout',
-                            '--detach', base], cwd=tree)
-            if detached.returncode:
-                return None
-            for identifier in identifiers:
-                path = (tree / identifier).resolve()
-                if not path.is_relative_to(tree.resolve()) or not path.is_file():
-                    return None
-            failures = []
-            for identifier in identifiers:
-                argv = (['/usr/bin/python3', identifier] if project == 'do-it-v2' else
-                        ['/opt/albert-scott/.venv/bin/python', '-m', 'pytest', '-q',
-                         '-p', 'no:cacheprovider', identifier])
-                result = run(argv, cwd=tree, cap=preflight.TEST_CAP_S)
-                # pytest reserves non-1 exits for collection/runner failures;
-                # signals and script setup failures are also undetermined.
-                if (result.returncode not in (0, 1)
-                        or result.returncode and re.search(
-                            r'(?m)^(?:ModuleNotFoundError|ImportError|SyntaxError):',
-                            result.stdout + result.stderr)):
-                    return None
-                if result.returncode:
-                    failures.append(identifier)
-            return failures
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-
-
-def children_cpu():
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return usage.ru_utime + usage.ru_stime
-
-
-def adoption_cpu(started):
-    delta = children_cpu() - started
-    if not math.isfinite(delta) or delta < 0:
-        raise ValueError('invalid child CPU counter delta')
-    return delta
-
-
-def grade_adoption(events, spec, branch):
-    import grader_packet
-    import evidence_revision
-    build = grader_packet._latest(events, spec, 'build-done') or {}
-    return dict(refresh_id=evidence_revision.new_invocation_id(), branch=branch.removeprefix('refs/heads/'),
-                build_key=grader_packet.build_key(build),
-                spec_sha256=evidence_revision.digest((fold.ROOT / 'content' / f'{spec}.md').read_text()))
-
-
-def grade_terminal(spec, project, authority, after, base, bundle, gate):
-    import hashlib
-    facts = dict(**authority, to_sha=after, base_sha=base, gate=gate, project=project)
-    if gate == 0:
-        raw = Path(bundle).read_bytes()
-        facts.update(bundle_sha256=hashlib.sha256(raw).hexdigest(),
-                     bundle_key=json.loads(raw).get('bundle_key'))
-    emit('branch-refresh-skipped', spec,
-         reason='grade-refresh-failed' if gate else 'grade-refresh-success', **facts)
-
-
-def _grade_build(spec):
-    """Read completed-build admission with refresh's existing ledger reader."""
-    import grader_packet
-    return grader_packet._latest(ledger_cache.tail_refresh(), spec, 'build-done') or {}
-
-
-MARKERS = ('rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD')
-HOLD_REASONS = frozenset({'uncommitted-state', 'daily-limit', 'invalid-daily-limit', 'open-builder-dispatch',
-                          'integrator-holds-branch', 'adoption-state-changed', 'invalid-branch', 'main-branch',
-                          'rebase-undetermined', 'cherry-pick-undetermined', 'commit-shape-or-metadata'})
-CONFLICT_REASONS = frozenset({'migration-or-fingerprint'})
-PENDING_WAIT_S = 120
-OUTCOME_WAIT_S = 10
-_TASK_TERMINAL = ('grade-refresh-failed', 'grade-refresh-success')
-
-
-def dirty_report(tree):
-    """Read-only tracked/untracked path list and operation markers; never alters the tree."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
-    def read(*args):
-        done = subprocess.run(['git', '--no-optional-locks', '-C', str(tree), *args], env=env,
-                              capture_output=True, text=True, timeout=120)
-        if done.returncode:
-            raise subprocess.SubprocessError('git ' + args[0] + ' failed')
-        return done.stdout
-    fields = read('status', '--porcelain=v1', '-z', '--untracked-files=all').split('\0')
-    paths, skip = [], False
-    for field in fields:
-        if skip:
-            skip = False
-            continue
-        if len(field) < 4:
-            continue
-        paths.append(field[3:])
-        skip = field[0] in 'RC' or field[1] in 'RC'
-    markers = []
-    for name in MARKERS:
-        path = Path(read('rev-parse', '--path-format=absolute', '--git-path', name).strip())
-        if path.exists():
-            markers.append(name)
-    return dict(tree=str(tree), paths=paths, markers=markers)
-
-
-def gate_outcome(events, spec, tip):
-    """pending/failed/success for the refresh adoption of this exact tip; None if none."""
-    receipt = None
-    status = None
-    for event in events:
-        if event.get('subject') != spec:
-            continue
-        kind = event.get('type')
-        if kind in INVALIDATORS:
-            receipt = status = None
-        elif kind == 'branch-refreshed' and event.get('to_sha') == tip and event.get('refresh_id'):
-            receipt, status = event, 'pending'
-        elif (receipt and kind == 'branch-refresh-skipped' and event.get('reason') in _TASK_TERMINAL
-              and event.get('refresh_id') == receipt['refresh_id'] and event.get('to_sha') == tip):
-            failed = event['reason'] == 'grade-refresh-failed' or event.get('gate')
-            status = 'failed' if failed else ('failed' if status == 'failed' else 'success')
-    return status
-
-
-def _busy(repo, spec):
-    common = Path(value(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir'))
-    with (common / ('branch-refresh-' + spec + '.lock')).open('a') as stream:
-        try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        return False
-
-
-def _concurrent_outcome(events, spec, tip):
-    """What the attempt we waited on persisted for this tip, or None."""
-    own = [e for e in events if e.get('subject') == spec]
-    start = max((i for i, e in enumerate(own) if e.get('reason') == 'attempt-started' and e.get('tip') == tip),
-                default=-1)
-    for event in reversed(own[start + 1:]):
-        if event.get('type') in INVALIDATORS:
-            return None
-        if event.get('type') == 'conflict-rework' and event.get('tip') == tip:
-            return dict(state='conflict', reason=event.get('recut_reason') or 'conflict',
-                        paths=event.get('paths') or [], to_sha=tip)
-        if event.get('hold_state') and event.get('tip') == tip:
-            return dict(state=event['hold_state'], reason=event.get('reason'), to_sha=tip)
-    return None
-
-
-def _file_ids(ids):
-    import spec_preflight
-    files = []
-    for identifier in ids:
-        name = str(identifier).split('::')[0]
-        if not spec_preflight.SAFE_TEST.fullmatch(name):
-            return None
-        files.append(name)
-    return files
-
-
-def refresh_before_grade(repo, branch, main, spec, *, events=None, now=None, _again=False, _recut_first=False):
-    """Checked refresh at the launch boundary; never launch a backend here."""
-    import re
-    import grader_packet
-    repo = Path(repo).resolve()
-    tip = None
-    def stopped(reason, state='undetermined', **facts):
-        extra = {k: facts[k] for k in ('failing_ids', 'red_on_master') if k in facts}
-        emit('branch-refresh-skipped', spec, reason=reason, hold_state=state, tip=tip, **extra)
-        return dict(state=state, reason=reason, **facts)
-    def conflict(reason, **facts):
-        return dict(state='conflict', reason=reason, to_sha=tip, **facts)
-    if not isinstance(spec, str) or not re.fullmatch(r'L-spec-\d+', spec):
-        raise ValueError('invalid refresh spec')
-    try:
-        if (not isinstance(branch, str) or not isinstance(main, str)
-                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]*', main)):
-            return stopped('invalid-branch')
-        ref = branch if branch.startswith('refs/heads/') else 'refs/heads/' + branch
-        if git(repo, 'check-ref-format', ref, check=False).returncode:
-            return stopped('invalid-branch')
-        # A caller arriving during another attempt waits for it and consumes
-        # its persisted outcome; the reservation alone is never a verdict.
-        contended = _busy(repo, spec)
-        if contended:
-            with lock(repo, spec):
-                pass
-        def read_history():
-            fresh = ledger_cache.tail_refresh()
-            return [*events, *fresh] if events is not None else fresh
-        history = read_history()
-        tip = value(repo, 'rev-parse', '--verify', ref + '^{commit}')
-        base = value(repo, 'rev-parse', '--verify', '--end-of-options', main + '^{commit}')
-        status = gate_outcome(history, spec, tip)
-        deadline = time.monotonic() + PENDING_WAIT_S
-        while status == 'pending' and time.monotonic() < deadline:
-            contended = True
-            time.sleep(0.2)
-            history = read_history()
-            status = gate_outcome(history, spec, tip)
-        if status == 'pending':
-            return stopped('gate-pending')
-        if status == 'failed':
-            return conflict('merge-gate')
-        identity = None
-        if git(repo, 'merge-base', '--is-ancestor', base, tip, check=False).returncode == 0:
-            identity = grader_packet.grading_build(history, spec)
-            if not grader_packet._same_sha(identity.get('ready_sha'), tip):
-                return stopped('build-tip-mismatch')
-            return dict(state='refreshed' if contended and status == 'success' else 'current',
-                        to_sha=tip, base_sha=identity.get('base_sha'))
-        if contended:
-            # The first caller classifies after releasing the reservation:
-            # give it a bounded moment to persist, never grade on silence.
-            end = time.monotonic() + OUTCOME_WAIT_S
-            found = _concurrent_outcome(history, spec, tip)
-            while not found and time.monotonic() < end:
-                time.sleep(0.2)
-                history = read_history()
-                found = _concurrent_outcome(history, spec, tip)
-            return found or stopped('attempt-no-outcome')
-        if _recut_first:
-            # Completed-builder redispatch keeps the established recut (pins, backup tag).
-            outcome = recut(repo, branch, main, spec, now=now, defer_checks=True)
-        else:
-            outcome = refresh(repo, branch, main, spec, events=events, now=now, defer_checks=True)
-        if not _recut_first and outcome.get('state') == 'skipped' and outcome.get('reason') == 'multiple-commits':
-            outcome = recut(repo, branch, main, spec, now=now, defer_checks=True)
-        state, reason = outcome.get('state'), outcome.get('reason')
-        if state in {'refreshed', 'recut'}:
-            if outcome.get('gate') != 0:
-                return conflict('merge-gate')
-            if _recut_first:
-                return {**outcome, 'state': 'refreshed'}
-            fresh = ledger_cache.tail_refresh()
-            ready = grader_packet.grading_build(fresh, spec)
-            if grader_packet.bundle_for(fresh, spec, ready.get('ready_sha')) is None:
-                return stopped('refreshed-evidence-unavailable')
-            return {**outcome, 'state': 'refreshed'}
-        if state == 'conflict':
-            return conflict(reason or 'conflict', paths=outcome.get('paths') or [])
-        if state == 'checks-failed':
-            ids = list(outcome.get('failing_ids') or [])
-            if ids == ['merge-gate']:
-                return conflict('merge-gate')
-            files = _file_ids(ids) if ids else None
-            if files is None or {'checks-undetermined', 'checks-modified-tree'} & set(ids):
-                return stopped('checks-undetermined', state='hold', failing_ids=ids)
-            red = red_on_master(repo, main, sorted(set(files)))
-            if red is None:
-                return stopped('red-on-master-undetermined', state='hold', failing_ids=ids)
-            if set(files) <= set(red):
-                return stopped('failing-on-master', state='hold', failing_ids=ids, red_on_master=red)
-            branch_only = [i for i, f in zip(ids, files) if f not in red]
-            rework(spec, branch, history, paths=[], tip=tip, recut_reason='checks-failed',
-                   failing_ids=branch_only, rebased_sha=outcome.get('rebased_sha'))
-            return conflict('checks-failed', failing_ids=branch_only)
-        if state == 'skipped' and reason in CONFLICT_REASONS:
-            rework(spec, branch, history, paths=[], tip=tip, recut_reason='conflict', reason=reason)
-            return conflict(reason)
-        if state == 'skipped' and reason == 'already-current' and not _again:
-            return refresh_before_grade(repo, branch, main, spec, events=events, now=now, _again=True,
-                                        _recut_first=_recut_first)
-        if state == 'skipped' and reason in HOLD_REASONS:
-            facts = {}
-            if reason == 'uncommitted-state':
-                facts['dirty'] = [dirty_report(t) for t in holders(repo, ref)]
-            return stopped(reason, state='hold', **facts)
-        return stopped(reason or state or 'missing-outcome')
-    except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
-        return stopped('refresh-undetermined')
-
-
-def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=False):
+def refresh(repo, branch, main, spec, *, events=None, now=None):
     """Return refreshed/conflict/checks-failed/skipped; never dispatch a role."""
-    cpu_started = children_cpu()
     import re
     if not re.fullmatch(r'L-spec-\d+', spec):
         raise ValueError('invalid refresh spec')
@@ -644,8 +329,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=Fal
         if count >= limit:
             return skip('daily-limit')
         # A committed ledger reservation counts conflicts/crashes as attempts too.
-        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=str(day),
-             tip=before, ts=now.isoformat())
+        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=str(day), ts=now.isoformat())
         with tempfile.TemporaryDirectory(prefix='branch-refresh-') as name:
             scratch = Path(name)
             tree, auxiliary = scratch / 'tree', scratch / 'checks'
@@ -680,7 +364,7 @@ def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=Fal
                         or git(tree, 'diff', '--quiet', after, check=False).returncode):
                     failures.append('checks-modified-tree')
                 if failures:
-                    if failures != ['checks-undetermined'] and not defer_checks:
+                    if failures != ['checks-undetermined']:
                         rework(spec, branch, events, paths=[], tip=before, recut_reason='checks-failed',
                                failing_ids=failures, rebased_sha=after)
                     return dict(state='checks-failed', failing_ids=failures, rebased_sha=after, reports=reports)
@@ -696,9 +380,8 @@ def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=Fal
                     git(holding[0], 'reset', '--hard', after)
                 else:
                     git(repo, 'update-ref', ref, after, before)
-                authority = grade_adoption(events, spec, branch)
                 emit('branch-refreshed', spec, spec=spec, project=project, from_sha=before,
-                     to_sha=after, base_sha=base, checks='pass', cpu_s=adoption_cpu(cpu_started), **authority)
+                     to_sha=after, base_sha=base, checks='pass')
                 import build_runner
                 bundle = build_runner.run(spec, after)
                 # Re-gating may itself refresh after another master move.
@@ -707,7 +390,6 @@ def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=Fal
                 if gate:
                     rework(spec, branch, ledger_cache.tail_refresh(), paths=[], tip=before,
                            recut_reason='merge-gate', failing_ids=['merge-gate'])
-                grade_terminal(spec, project, authority, after, base, bundle, gate)
                 return dict(state='refreshed', from_sha=before, to_sha=after, base_sha=base,
                             bundle=str(bundle), gate=gate, reports=reports)
             finally:
@@ -717,9 +399,8 @@ def refresh(repo, branch, main, spec, *, events=None, now=None, defer_checks=Fal
                 git(repo, 'worktree', 'prune')
 
 
-def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
+def recut(repo, branch, main, spec, *, now=None):
     """Replay non-merge patches on main, preserving the old tip before adoption."""
-    cpu_started = children_cpu()
     import re
     import build_runner
     import merge_gate
@@ -770,8 +451,7 @@ def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
             return skip('daily-limit')
         commits = value(repo, 'rev-list', '--reverse', '--topo-order', '--no-merges', base + '..' + before).splitlines()
         merges = int(value(repo, 'rev-list', '--count', '--merges', base + '..' + before))
-        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=day,
-             tip=before, ts=now.isoformat())
+        emit('branch-refresh-skipped', spec, reason='attempt-started', project=project, day=day, ts=now.isoformat())
         with tempfile.TemporaryDirectory(prefix='branch-recut-', dir='/var/tmp') as name:
             tree, auxiliary = Path(name) / 'tree', Path(name) / 'checks'
             auxiliary.mkdir()
@@ -808,8 +488,7 @@ def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
                     failures.append('checks-modified-tree')
                 if failures:
                     reason = 'checks-undetermined' if failures == ['checks-undetermined'] else 'checks-failed'
-                    if not (defer_checks and reason == 'checks-failed'):
-                        recovery_receipt(spec, branch, events, project, reason, before, now, paths=[], failing_ids=failures)
+                    recovery_receipt(spec, branch, events, project, reason, before, now, paths=[], failing_ids=failures)
                     return dict(state='checks-failed', failing_ids=failures, reports=reports)
                 if (value(repo, 'rev-parse', ref) != before or value(repo, 'rev-parse', main) != base
                         or open_builder(ledger_cache.tail_refresh(), spec, now=now) or holders(repo, ref) != holding
@@ -835,11 +514,6 @@ def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
                 except subprocess.SubprocessError:
                     return skip('adoption-state-changed')
                 adopted = True
-                # Adoption accounting precedes the terminal gate: even a later
-                # rollback consumed this CPU and must retain its audit receipt.
-                authority = grade_adoption(events, spec, branch)
-                emit('branch-refreshed', spec, spec=spec, project=project, from_sha=before,
-                     to_sha=after, base_sha=base, checks='pass', cpu_s=adoption_cpu(cpu_started), **authority)
                 try:
                     bundle = build_runner.run(spec, after)
                     fcntl.flock(reservation, fcntl.LOCK_UN)
@@ -847,7 +521,6 @@ def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
                 except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, build_runner.Undetermined):
                     gate = 1
                 if gate:
-                    grade_terminal(spec, project, authority, after, base, None, gate)
                     fcntl.flock(reservation, fcntl.LOCK_EX)
                     fresh = ledger_cache.tail_refresh()
                     if (value(repo, 'rev-parse', ref) == after and holders(repo, ref) == holding
@@ -870,7 +543,6 @@ def recut(repo, branch, main, spec, *, now=None, defer_checks=False):
                              skipped_merges=merges, dropped_empty=len(commits) - count,
                              old_base_sha=old_base, base_sha=base)
                 emit('branch-recut', spec, spec=spec, project=project, **facts)
-                grade_terminal(spec, project, authority, after, base, bundle, gate)
                 return dict(state='recut', bundle=str(bundle), gate=gate, reports=reports, **facts)
             finally:
                 if not adopted:
@@ -910,18 +582,11 @@ def dispatch_preflight(runtime, a, cwd, events, fail):
         import packet_base
         repo = runtime.ROOT / 'repos' / a.project
         main = packet_base._effective_branch(repo, a.project, runtime.spec_path(a.subject), a.subject)
-        outcome = refresh_before_grade(repo, a.subject.lower(), main, a.subject, now=operation_time,
-                                       _recut_first=True)
+        outcome = recut(repo, a.subject.lower(), main, a.subject, now=operation_time)
     except (OSError, ValueError, subprocess.SubprocessError, __import__('merge_gate').Undetermined):
         outcome = None
-    state = (outcome or {}).get('state')
-    if state == 'current':
-        return True
-    if state == 'refreshed':
+    if outcome and outcome['state'] == 'recut':
         fail('branch-recut: branch checked, adopted and re-gated; no builder needed', reason='branch-recut')
-    if state in {'hold', 'undetermined'}:
-        fail('branch-not-descendant: held, not a conflict (' + str(outcome.get('reason')) + '); no builder dispatched',
-             reason='branch-not-descendant')
     if getattr(runtime, 'pending_conflict_rework', lambda *_: False)(events, a.subject):
         return False
     fail('branch-not-descendant: isolated refresh/recut did not pass; preserve the branch for builder recovery',
