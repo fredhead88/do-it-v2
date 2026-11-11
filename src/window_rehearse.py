@@ -240,7 +240,7 @@ def _run(ident, project, specs, on, main):
                     emit('running', sha=candidate, tree=tree, required=required)
                     previous = signal.signal(signal.SIGTERM, _cancel_verification)
                     try:
-                        with window_dispatch.managed(tree, known=dict(project=project, base_sha=base, specs=members)):
+                        with window_dispatch.managed(tree, known=dict(project=project, base_sha=base, specs=members, entries=entries)):
                             result = gate.verify(repo, candidate, required, ident, rehearsal=True)
                     finally:
                         signal.signal(signal.SIGTERM, previous)
@@ -264,7 +264,7 @@ def _run(ident, project, specs, on, main):
                         green=state == 'green', required=required, new_ids=result.get('nodes', []),
                         rehearsal=True, base_sha=base, project=project,
                         **({k: diagnosis[k] for k in ('flakes', 'flake_only') if k in diagnosis}))
-            if not result.get('skipped_known'):
+            if not (result.get('skipped_known') or result.get('superseded')):
                 ids, flakes = diagnosis.get('ids', []), diagnosis.get('flakes', [])
                 unresolved = state == 'red' and bool(diagnosis.get('unresolved'))
                 window_known_red.receipt(gate, ident, project=project, base_sha=base, sha=candidate, tree=tree,

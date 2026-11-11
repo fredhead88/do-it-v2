@@ -142,9 +142,9 @@ def render(repo: str) -> str:
                        f'reused for {fresh} hours (verdict_fresh_hours). Reject undetermined, malformed, '
                        'stale or future-dated evidence.'))
     lines.extend(_wrap('`src/window_dispatch.py`: predeploy tree, window, suite, quick ids; legacy tree/quick empty.'))
-    lines.extend(_wrap('`src/window_known_red.py`: `window-dispatch-verdict` completion receipts and '
-                       '`window_gate.quick_ids`; an unchanged tree whose red is all master known-red is not '
-                       're-dispatched (`window-skipped-known`, pending, never green).'))
+    lines.extend(_wrap('`src/window_known_red.py`: `window-dispatch-verdict` completion receipts; '
+                       'master-known-red retries stay pending (`window-skipped-known`, never green).'))
+    lines.extend(_wrap('`src/window_cancel.py`: confirm owned cancels before replacement; tombstones veto verdicts.'))
     lines.extend(['', '## Branch refresh',
                   'Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; '
                   f'max {queue.get("branch_refresh_per_day", 3)}/spec/day.'])

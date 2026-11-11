@@ -176,7 +176,7 @@ def chain_lock(window, project, root=None):
             yield holder
             return
         os.ftruncate(fd, 0)
-        record = json.dumps(dict(window=window, pid=os.getpid())).encode()
+        record = json.dumps(window_dispatch.window_cancel.holder_record(window)).encode()
         # One small regular-file write publishes both diagnostic fields together.
         if os.write(fd, record) != len(record):
             raise OSError("incomplete window-chain metadata write")
@@ -1629,8 +1629,9 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             flakes_all.update(prior.get("flakes", []))
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
-        with window_dispatch.managed(tree, known=dict(project=project, base_sha=root_base, specs=list(kept))):
+        with window_dispatch.managed(tree, known=dict(project=project, base_sha=root_base, specs=list(kept), entries=entries)):
             res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
+        if res.get("superseded"): return res
         ev('window-verification-result', window, state=res['state'], first_run=judgments == 1,
            sha=cand, specs=kept, nodes=res.get('nodes', []))
         try:
@@ -1801,7 +1802,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     def judge(cand, kept, *, half=False):
         seen.clear()
         res = judge_once(cand, kept, half=half)
-        if not res.get("skipped_known"):
+        if not (res.get("skipped_known") or res.get("superseded")):
             try:
                 tree = tree_of(repo, cand)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
@@ -1954,7 +1955,6 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     print(f"gate-window: advanced {main} -> {cand[:12]}  shipped={live} dropped={dropped}")
     return 1 if dropped or len(live) < len(entries) else 0
 
-
 def cleanup(repo, window):
     git(repo, "update-ref", "-d", f"refs/heads/window/{window}", check=False)
 
@@ -1995,12 +1995,16 @@ def main_(argv):
         return 2
     if bypass or fixes_base:
         after = None
-    with chain_lock(window, project) as refusal:
+    try:
+        events = train_events()
+    except (OSError, ValueError):
+        print("gate-window: ledger unreadable; no slot admitted"); return 3
+    with chain_lock(window, project) as refusal, window_dispatch.window_cancel.try_supersede(refusal, window, project, specs, events) as refusal:
         if refusal is not None:
             ev("window-refused", window, window=window, project=project, **refusal)
             print(f"gate-window: project chain held by {refusal['holder_window']} pid={refusal['holder_pid']}")
             return 3
-        return _admitted(window, project, specs, main, fixes_base, after, bypass)
+        return _admitted(window, project, specs, main, fixes_base, after, bypass, events)
 
 
 def main_branch(main):
@@ -2013,13 +2017,9 @@ def main_branch(main):
     return main or "master"
 
 
-def _admitted(window, project, specs, main, fixes_base, after, bypass):
+def _admitted(window, project, specs, main, fixes_base, after, bypass, events):
     """Only main_'s lifetime-lock owner may evaluate admission or touch slots."""
     main = main_branch(main)
-    try:
-        events = train_events()
-    except (OSError, ValueError):
-        print("gate-window: ledger unreadable; no slot admitted"); return 3
     flying = in_flight(events)
     if not after and flying:
         print("gate-window: another window is in flight"); return 3
