@@ -16,6 +16,7 @@ import sys
 import unicodedata
 
 import autodispatch
+import auto_rework
 import attempts
 import dispatch
 import fold
@@ -398,7 +399,10 @@ def _rebuild(c):
                      or e['type'] == 'unblocked'
                      and fold.actor_of((_source(e) or '').split(':')[0]) == 'executor'
                      and bool(blocked.get('_src')) and e.get('ref') == blocked['_src'])]
-    trigger = max(decisions + rewrites + drops + blocking + releases, key=lambda e: _time(e['ts']), default=None)
+    auto = (auto_rework.trigger(evs, c.get('capabilities', {}).get(c.get('sid'), []))
+            if c.get('sid') else None)
+    trigger = max(decisions + rewrites + drops + blocking + releases + ([auto] if auto else []),
+                  key=lambda e: _time(e['ts']), default=None)
     dispatched = [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
     regrade = _latest([e for e in evs if e.get('type') == 'decision' and _admitted_actor(e) in {'thinker','operator'}
                        and e.get('regrade') == 'yes' and e.get('rework') != 'yes'], {'decision'})
@@ -407,6 +411,8 @@ def _rebuild(c):
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
         result = _retry_result(c, trigger, 'builder', dispatched=(
             _after(dispatched, trigger, DISPATCH_EVENTS) or _after(evs, trigger, {'build-started'})))
+        if result and trigger is auto and not result.get('retry_hold'):
+            result['reason'] = auto_rework.reason(evs, trigger)
         if result and (trigger.get('layer') == 'pregrade' or trigger.get('source') == 'precheck-pregrade'):
             detail = 'pregrade rework: ' + str(trigger.get('path') or ', '.join(trigger.get('tests', [])))
             result['reason'] = result['reason'] + '; ' + detail if result.get('retry_hold') else detail
