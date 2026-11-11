@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -54,9 +55,19 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(json.dumps(fold.APPLIED), applied)
         return actual
 
-    def test_cached_reader_inventory_and_locked_refresh(self):
-        # No full-parser bypass is necessary: even locked/post-action callers
-        # can use the metadata-validated tail refresh. Keep reasons explicit.
+    def test_reader_inventory_rejects_unlisted_bypass(self):
+        source = shutil.copytree(Path(__file__).parent, self.root / 'src',
+                                 ignore=shutil.ignore_patterns('__pycache__'))
+        self.assert_reader_inventory(source)
+        module = source / 'ledger_cache.py'
+        with module.open('a') as stream:
+            stream.write('\nfold.read_events(use_cache=False)\n')
+        with self.assertRaisesRegex(AssertionError, 'ledger_cache.py'):
+            self.assert_reader_inventory(source)
+
+    def assert_reader_inventory(self, source):
+        # Locked/post-action callers use metadata-validated tail refresh;
+        # deliberate reference-parser fallbacks need an explicit reason.
         reasons = {
             'branch_refresh.py': 'reservation, adoption and post-gate decisions under the branch lock',
             'empty_grade.py': 'double-read under the grading lock before an automatic verdict',
@@ -64,7 +75,7 @@ class CacheTests(unittest.TestCase):
             'tick.py': 'post-dispatch held-step evidence under the tick lock',
         }
         bypasses, fresh = [], set()
-        for path in Path(__file__).parent.glob('*.py'):
+        for path in source.glob('*.py'):
             if path.name.startswith('test_'):
                 continue
             for node in ast.walk(ast.parse(path.read_text())):
@@ -76,13 +87,20 @@ class CacheTests(unittest.TestCase):
                         bypasses.append((path.name, node.lineno))
                 if isinstance(node.func, ast.Attribute) and node.func.attr == 'tail_refresh':
                     fresh.add(path.name)
-        allowed = [('dispatch.py', 'pre-fork refusal read: no ledger-cache lock and no cache write (SD2)')]
+        allowed = [
+            ('dispatch.py', 'pre-fork refusal read: no ledger-cache lock and no cache write (SD2)'),
+            ('spec_preflight.py', 'L-spec-2135 busy-cache fallback to the reference parser in preflight'),
+            ('stall_sample.py', 'L-spec-2135 busy-cache fallback to the reference parser in the stall sampler'),
+        ]
         self.assertEqual(sorted({name for name, _ in bypasses}), [name for name, _ in allowed],
-                         'necessary full-parse allow-list is the one pre-fork read')
-        self.assertEqual(len(bypasses), len(allowed), 'exactly one uncached read in dispatch.py')
+                         'necessary full-parse allow-list must name every uncached reader')
+        self.assertEqual(len(bypasses), len(allowed), 'exactly one uncached read per allowed module')
         self.assertEqual(fresh, set(reasons))
-        print('L-spec-2049 AC1 uncached_allow_list=[] tail_refresh=' + json.dumps(reasons, sort_keys=True))
+        print('L-spec-2412 AC1 uncached_allow_list=' + json.dumps(dict(allowed), sort_keys=True)
+              + ' tail_refresh=' + json.dumps(reasons, sort_keys=True))
 
+    def test_cached_reader_inventory_and_locked_refresh(self):
+        self.assert_reader_inventory(Path(__file__).parent)
         name = 'L-operator-01.jsonl'
         self.write(name, [dict(ts='1', type='observed', subject='old')])
         ledger_cache.tail_refresh()
@@ -817,7 +835,11 @@ print(json.dumps(fold.read_events()))
             tree = ast.parse(Path(module.__file__).read_text())
             call_count += sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                               and n.func.attr in ('read_events', 'tail_refresh') for n in ast.walk(tree))
-        self.assertEqual(call_count, len(sites) + 1)  # tick's post-dispatch tail refresh
+        additional_sites = {
+            'tick._record_pass.tail_refresh': 'post-dispatch held-step observation',
+            'tick._report_merge_pass_failure.read_events': 'deduplicate merge-pass failure reports',
+        }
+        self.assertEqual(call_count, len(sites) + len(additional_sites))
         contracts = self.root / 'agents'
         contracts.mkdir()
         for role in ('relay', 'executor'):
