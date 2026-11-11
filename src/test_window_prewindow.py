@@ -310,22 +310,21 @@ class PrewindowTests(Fixture):
                 self.assertEqual(self.select([c]), ([], [(c, 'textual merge is not clean')]))
                 with patch.object(rechain, 'resolve', side_effect=OSError):
                     self.assertEqual(self.select([b]), ([], [(b, 'textual merge is not clean')]))
-                # Peer migrations off one base clash on bookkeeping; the resolver
-                # (reached through the cumulative merge's entry) admits both.
+                # A separate base keeps both members clean against master.
                 peer_root = pathlib.Path(root) / 'peer'
                 peer = MigrationFixture(peer_root)
-                first, second = peer.branch('L-spec-9101'), peer.branch('L-spec-9102')
+                first, second = peer.branch('first'), peer.branch('second')
                 for entry in (first, second):
                     (content / (entry[0] + '.md')).write_text('Writes: ' + entry[0] + '.py\n')
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     kept, drops = window_prewindow.select(peer.repo, peer.base, 'master',
                                                           [first, second], [], content)
-                self.assertEqual((kept, drops), ([first, second], []))
-                self.assertNotIn('deferred', output.getvalue())
+                self.assertEqual((kept, drops), ([first], []))
+                self.assertIn('merge with earlier window members', output.getvalue())
             self.assertEqual(fx.events, [])
         response('2111-AC14', dict(prefix_head='b', off_and_error_drop=True,
-                                  unrelated_drop=True, peer_rechained=True, events=0))
+                                  unrelated_drop=True, peer_conflict_deferred=True, events=0))
 
     def assertDeferred(self, fragment, entries=None):
         output = io.StringIO()
@@ -497,19 +496,10 @@ class PrewindowTests(Fixture):
         kept, _ = self.assertDropped('census')
         self.assertEqual(kept, self.entries[:1])
 
-    def test_unordered_migrations_are_admitted_in_canonical_order(self):
+    def test_unordered_migrations_fail_even_if_graph_was_rechained(self):
         self.branch(1, {VERSIONS + 'a.py': "revision='a'\ndown_revision='root'\n"})
-        self.branch(2, {VERSIONS + 'b.py': "revision='b'\ndown_revision='a'\n"}, parent='br-1',
-                    dependency='L-spec-1')
-        # Shuffled input: migration_order.order puts the prerequisite first.
-        shuffled = [self.entries[1], self.entries[0]]
-        self.assertEqual(self.select(shuffled), (self.entries, []))
-
-    def test_dependent_migration_without_its_prerequisite_is_held(self):
-        self.branch(1, {VERSIONS + 'a.py': "revision='a'\ndown_revision='root'\n"})
-        self.branch(2, {VERSIONS + 'b.py': "revision='b'\ndown_revision='a'\n"}, parent='br-1',
-                    dependency='L-spec-77')
-        self.assertDeferred('migration order', self.entries)
+        self.branch(2, {VERSIONS + 'b.py': "revision='b'\ndown_revision='a'\n"}, parent='br-1')
+        self.assertDeferred('ordered')
 
     def test_declared_write_overlap_including_uncreated_globs(self):
         self.branch(1, {'one.txt': 'one'}, writes=['future/*.py'])

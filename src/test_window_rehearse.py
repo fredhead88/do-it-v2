@@ -437,17 +437,15 @@ class Rehearsal(unittest.TestCase):
             code, calls, _, _, _ = self.rehearse()
         self.assertEqual((code, calls), (2, []))
 
-    def test_shared_files_competing_migration_roots_and_conflicts_fail_before_ci(self):
+    def test_shared_files_multiple_migration_specs_and_conflicts_fail_before_ci(self):
         import window_rehearse as wr
-        # Peer migrations are no longer refused for being migrations (test_multi_migration_window);
-        # two unrelated roots still leave two heads and fail before CI.
-        for mode in ('shared', 'competing-roots', 'conflict'):
+        for mode in ('shared', 'migrations', 'conflict'):
             with self.subTest(mode=mode):
                 c, d = 'C-' + mode, 'D-' + mode
                 if mode == 'shared':
                     self.branch(c, {'shared.txt': 'C'})
                     self.branch(d, {'shared.txt': 'D'})
-                elif mode == 'competing-roots':
+                elif mode == 'migrations':
                     self.branch(c, {wg.rechain.VERSIONS + 'c.py': "revision='c'\ndown_revision=None\n"})
                     self.branch(d, {wg.rechain.VERSIONS + 'd.py': "revision='d'\ndown_revision=None\n"})
                 else:

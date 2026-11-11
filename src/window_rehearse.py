@@ -95,43 +95,33 @@ def alembic_heads(repo, candidate, project):
                 gate.git(repo, 'worktree', 'remove', '--force', str(tree))
 
 
-def prepare(repo, ident, base, entries, project, main, events, record=None):
-    """Share the real merge/fingerprint/policy builders without their ref writes.
-
-    `record`, when given, receives the candidate-bound parent records
-    (rechained_specs, rechain); the return value stays the candidate SHA.
-    """
-    import window_migrations as wm
-    entries, held = wm.canonical(repo, base, entries, events, fold.ROOT / 'content')
-    if held:
-        raise ValueError('migration order holds: ' + '; '.join(f'{k}: {v}' for k, v in sorted(held.items())))
-    why, _ = wm.stack_check(repo, base, entries)
-    if why:
-        raise ValueError('migration stack refused: ' + why)
-    seen = {}
-    peers = {s for s, _, sha in entries if wm.adds_migration(repo, base, sha)}
+def prepare(repo, ident, base, entries, project, main, events):
+    """Share the real merge/fingerprint/policy builders without their ref writes."""
+    seen, migrations = {}, []
     for spec, _, sha in entries:
         changed = gate.git(repo, 'diff', '--name-only', '-z', f'{base}...{sha}').stdout.split('\0')
         for path in filter(None, changed):
-            if path in seen and not (spec in peers and seen[path] in peers):
+            if path in seen:
                 raise ValueError(f'shared file between {seen[path]} and {spec}: {path}')
-            seen.setdefault(path, spec)
+            seen[path] = spec
+        if any(p.startswith(gate.rechain.VERSIONS) and p.endswith('.py')
+               and '/_archive/' not in p for p in changed):
+            migrations.append(spec)
+    if len(migrations) > 1:
+        raise ValueError('at most one migration spec per rehearsal')
     admitted, rejected = window_prewindow.select(repo, base, main, entries, events,
                                                 fold.ROOT / 'content', on=base)
     if rejected or admitted != entries:
         reasons = '; '.join(spec[0] + ': ' + why for spec, why in rejected)
         raise ValueError('prewindow admission incomplete' + (': ' + reasons if reasons else ' (deferred specs)'))
-    evidence = wm.Evidence()
-    candidate, kept, conflicts = gate.build_candidate(repo, ident, base, entries, publish=False, emit=evidence)
+    silent = lambda *args, **kwargs: None
+    candidate, kept, conflicts = gate.build_candidate(repo, ident, base, entries, publish=False, emit=silent)
     if conflicts or kept != [s for s, _, _ in entries]:
         raise ValueError('merge conflict in rehearsal: ' + ', '.join(conflicts))
     alembic_heads(repo, candidate, project)
     if (os.environ.get('DOIT_WINDOW_RECHAIN', 'on') == 'on'
             and any(len(gate.rechain.added_versions(repo, base, sha)) == 1 for _, _, sha in entries)):
-        candidate = gate.fingerprint_candidate(repo, candidate, ident, project, publish=False, emit=evidence)
-    if record is not None:
-        names, mapping = wm.parents(repo, base, candidate, ident, kept, evidence)
-        record.update(rechained_specs=names, rechain=mapping)
+        candidate = gate.fingerprint_candidate(repo, candidate, ident, project, publish=False, emit=silent)
     return quarantine_file.candidate(repo, candidate, events, project)
 
 
@@ -166,7 +156,7 @@ def diagnose(repo, candidate, base, entries, result, main):
     return dict(ids=ids, flakes=flakes, unresolved=unresolved, retry=retry, attribution=plan)
 
 
-def prepared_candidate(repo, ident, project, base, entries, events, record=None):
+def prepared_candidate(repo, ident, project, base, entries, events):
     """Consume only a matching admitted launcher preparation, never a verdict.
 
     Branch identities bind the handoff to the queue version the launcher saw.
@@ -191,9 +181,6 @@ def prepared_candidate(repo, ident, project, base, entries, events, record=None)
         raise ValueError('launcher candidate tree differs')
     if gate.git(repo, 'merge-base', '--is-ancestor', base, candidate, check=False).returncode:
         raise ValueError('launcher candidate does not descend from intended base')
-    if record is not None:
-        import window_migrations
-        record.update(window_migrations.receipt_fields(receipt))
     return candidate
 
 
@@ -216,12 +203,10 @@ def run(ident, project, specs, on, main):
 def _run(ident, project, specs, on, main):
     repo = fold.ROOT / 'repos' / project
     base, members = 'unresolved', [s.partition(':')[0] for s in specs]
-    entries, record = [], {}
+    entries = []
     def emit(state, **fields):
-        import window_migrations
         gate.ev('window-rehearsed', ident, base_sha=base, specs=members, state=state,
-                rehearsal=True, project=project, entries=[list(entry) for entry in entries],
-                **window_migrations.receipt_fields(record), **fields)
+                rehearsal=True, project=project, entries=[list(entry) for entry in entries], **fields)
     with slot(fold.ROOT, project) as held:
         if held is None:
             print('gate-window: rehearsal capacity reached for ' + project)
@@ -237,13 +222,9 @@ def _run(ident, project, specs, on, main):
                 raise ValueError('rehearsal exceeds the current window cap')
             events = fold.read_events()
             entries = gate.resolve_entries(repo, specs, events)
-            import window_migrations
-            entries, held = window_migrations.canonical(repo, base, entries, events, fold.ROOT / 'content')
-            if held:
-                raise ValueError('migration order holds: ' + '; '.join(f'{k}: {v}' for k, v in sorted(held.items())))
-            candidate = prepared_candidate(repo, ident, project, base, entries, events, record)
+            candidate = prepared_candidate(repo, ident, project, base, entries, events)
             if candidate is None:
-                candidate = prepare(repo, ident, base, entries, project, main, events, record)
+                candidate = prepare(repo, ident, base, entries, project, main, events)
             required = gate.scope(repo, base, candidate, gate.required_checks(repo, base))['checks']
             tree = gate.tree_of(repo, candidate)
             prior = gate.prior_result(events, tree)

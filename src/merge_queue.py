@@ -727,20 +727,6 @@ def _rehearsal_batches(events, project):
     return list(batches.values())
 
 
-def _canonical_rows(repo, main, base, rows, events):
-    """Rows in migration_order.order's order for migration specs; (rows, {spec: hold reason})."""
-    import window_migrations
-    try:
-        entries = [window_gate.resolve_entries(repo, [row['spec'] + ':' + row['branch']], events)[0]
-                   for row in rows]
-    except RuntimeError:
-        return rows, {}
-    ordered, held = window_migrations.canonical(repo, base, entries, events, fold.ROOT / 'content')
-    by_spec = {row['spec']: row for row in rows}
-    return ([by_spec[e[0]] for e in ordered] + [by_spec[s] for s in held if s in by_spec],
-            {s: 'migration-order: ' + why for s, why in held.items()})
-
-
 def _refill_rehearsals(project, *, runner=None, launcher=None, cap=6, local=None, cancel=None):
     """Prepare and dispatch stacked CI work without acquiring ordinary gate slots.
 
@@ -748,7 +734,6 @@ def _refill_rehearsals(project, *, runner=None, launcher=None, cap=6, local=None
     a later tick; a missing/undetermined candidate is never treated as free room.
     """
     import precheck
-    import window_migrations
     import window_prewindow
     import window_rehearse
 
@@ -799,43 +784,36 @@ def _refill_rehearsals(project, *, runner=None, launcher=None, cap=6, local=None
         while remaining and len(active) < capacity:
             entries, selected, skipped, paths, migration = [], [], [], set(), False
             tip = base
-            remaining, held = _canonical_rows(repo, main, base, remaining, events)
-            record = {}
             for row in remaining:
                 sid = row['spec']
-                reason = ('precheck-red' if sid in red else 'cap-reached' if len(entries) >= cap
-                          else held.get(sid))
+                reason = 'precheck-red' if sid in red else 'cap-reached' if len(entries) >= cap else None
                 changes = spec_paths(repo, main, row['branch'])
                 if changes is None:
                     raise ValueError('rehearsal footprint undetermined: ' + sid)
                 footprint = {path for _, path in changes}
                 migrations = any(path.startswith(window_gate.rechain.VERSIONS) and path.endswith('.py')
                                  and '/_archive/' not in path for path in footprint)
-                # Peer migrations share bookkeeping files; only the resolver may
-                # admit that overlap (prewindow and the stack below prove it).
-                if reason is None and paths & footprint and not (migration and migrations):
+                if reason is None and paths & footprint:
                     reason = 'footprint-conflict'
+                if reason is None and migration and migrations:
+                    reason = 'multiple-migrations'
                 if reason is None:
                     entry = window_gate.resolve_entries(repo, [sid + ':' + row['branch']], events)[0]
                     admitted, rejected = window_prewindow.select(
                         repo, base, main, entries + [entry], events, fold.ROOT / 'content', on=base)
-                    # select reorders migrations canonically; the set must match, not the order.
-                    if rejected or {e[0] for e in admitted} != {e[0] for e in entries + [entry]}:
+                    if rejected or admitted != entries + [entry]:
                         reason = ('prewindow: ' + '; '.join(why for _, why in rejected)
                                   if rejected else 'prewindow-deferred')
                     else:
-                        new_tip, conflict = precheck.merge(repo, tip, entry[2], entry=entry)
+                        new_tip, conflict = precheck.merge(repo, tip, entry[2])
                         if conflict:
                             reason = 'merge-conflict: ' + conflict
-                        else:
-                            stack, _ = window_migrations.stack_check(repo, base, admitted)
-                            reason = ('migration-stack: ' + stack) if stack else None
                 if reason:
                     skipped.append(dict(spec=sid, reason=reason))
                     continue
                 tip = new_tip
-                entries[:] = admitted
-                selected[:] = [e[0] for e in entries]
+                entries.append(entry)
+                selected.append(sid)
                 paths.update(footprint)
                 migration = migration or migrations
             print(f'window-run: rehearsal selected {len(selected)}; skipped {len(skipped)}; '
@@ -843,15 +821,14 @@ def _refill_rehearsals(project, *, runner=None, launcher=None, cap=6, local=None
             if not entries:
                 break
             ident = 'window-' + uuid.uuid4().hex
-            candidate = window_rehearse.prepare(repo, ident, base, entries, project, main, events, record)
+            candidate = window_rehearse.prepare(repo, ident, base, entries, project, main, events)
             tree = window_gate.tree_of(repo, candidate)
             _train_emit(ledger_file, ident, 'queue-batch', project=project, specs=','.join(selected),
                         rehearsal=True, base_sha=base, sha=candidate, cap=cap, queue_len=len(remaining),
                         taken=selected, skipped=skipped, reason='rehearsal-refill')
             _train_emit(ledger_file, ident, 'window-rehearsed', project=project, specs=selected,
                         rehearsal=True, base_sha=base, sha=candidate, tree=tree, state='prepared',
-                        launcher_prepared=True, entries=[list(entry) for entry in entries],
-                        **window_migrations.receipt_fields(record))
+                        launcher_prepared=True, entries=[list(entry) for entry in entries])
             argv = ['doit', 'gate-window', ident, '--project', project, '--main', main,
                     '--rehearse', '--on', base,
                     '--specs', ','.join(spec + ':' + branch for spec, branch, _ in entries)]
