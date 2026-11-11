@@ -261,3 +261,123 @@ def classify(event: dict, action_class: str) -> Role:
     if kind in row.own_kinds and _text(subject):
         return 'own'
     return 'unknown'
+
+
+# ---------------------------------------------------------------------------
+# Executable mutation seeds (L-spec-2307)
+#
+# Seeds are committed synthetic data beneath fixtures/door_seed/. A scenario is
+# a directory of per-file ledgers (ledger/<scenario>/L-<actor>-NNNN.jsonl, the
+# filename gives the actor and the line number gives _src, exactly as a real
+# ledger does) plus content files (content/<scenario>/). seeds.json names, for
+# each seed, one scenario and ONE mutation event appended to one ledger file.
+# The seeds describe inputs only: the answer comparison runs production
+# functions in the test, and nothing here is a saved or captured answer.
+# ---------------------------------------------------------------------------
+from dataclasses import field
+import json
+from pathlib import Path
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'door_seed'
+_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]*')
+_LEDGER_FILE = re.compile(r'L-[a-z][a-z0-9-]*-[0-9]+\.jsonl')
+
+
+@dataclass(frozen=True)
+class Seed:
+    name: str
+    item_id: str
+    dependency_kind: str
+    base_events: tuple[dict, ...]
+    event: dict
+    now: str
+    content_files: dict[str, str] = field(default_factory=dict)
+
+
+def _actor(filename: str) -> str:
+    # D90, mirrored from fold.actor_of so loading a seed imports no production
+    # module: strip one machine prefix and one trailing token.
+    parts = Path(filename).stem.split('-')
+    return '-'.join(parts[1:-1]) if len(parts) >= 3 else Path(filename).stem
+
+
+def _safe_name(value, what):
+    if not isinstance(value, str) or not _NAME.fullmatch(value) or '..' in value:
+        raise ValueError('unsafe %s: %r' % (what, value))
+    return value
+
+
+def _scenario_dir(kind, scenario):
+    path = (FIXTURES / kind / _safe_name(scenario, 'scenario')).resolve()
+    if not path.is_relative_to(FIXTURES.resolve()):
+        raise ValueError('scenario escapes the fixture directory')
+    return path
+
+
+def scenario_ledgers(scenario: str) -> dict[str, list[dict]]:
+    """File name -> events (with _src, actor), fresh dictionaries per call."""
+    out = {}
+    directory = _scenario_dir('ledger', scenario)
+    for path in sorted(directory.glob('*.jsonl')):
+        if not _LEDGER_FILE.fullmatch(path.name):
+            raise ValueError('ledger fixture name is not L-<actor>-N.jsonl: ' + path.name)
+        rows = []
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            event = json.loads(line)
+            if 'actor' in event or '_src' in event:
+                raise ValueError('fixture line writes actor/_src: %s:%d' % (path.name, number))
+            rows.append(dict(event, actor=_actor(path.name), _src='%s:%d' % (path.name, number)))
+        out[path.name] = rows
+    return out
+
+
+def scenario_content(scenario: str) -> dict[str, str]:
+    """Safe relative name -> synthetic text, for temporary CONTENT."""
+    root = _scenario_dir('content', scenario)
+    if not root.is_dir():
+        return {}
+    return {p.name: p.read_text() for p in sorted(root.iterdir()) if p.is_file()}
+
+
+def _seed_rows():
+    return json.loads((FIXTURES / 'seeds.json').read_text())
+
+
+def make_event(scenario_files: dict[str, list[dict]], file: str, event: dict) -> dict:
+    """Place one mutation at the next line of `file` (a new file starts at 1)."""
+    if not _LEDGER_FILE.fullmatch(file):
+        raise ValueError('mutation file is not L-<actor>-N.jsonl: ' + file)
+    if 'actor' in event or '_src' in event:
+        raise ValueError('mutation writes actor/_src')
+    line = len(scenario_files.get(file, ())) + 1
+    return dict(event, actor=_actor(file), _src='%s:%d' % (file, line))
+
+
+def seeds(action_class: str) -> list[Seed]:
+    """Independent, deterministic seeds whose mutation is cited for the class."""
+    if not isinstance(action_class, str) or action_class not in TABLE:
+        raise ValueError('unknown action class: %r' % (action_class,))
+    out = []
+    for row in _seed_rows():
+        if action_class not in row['classes']:
+            continue
+        files = scenario_ledgers(row['scenario'])
+        base = sorted((e for rows in files.values() for e in rows),
+                      key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1])))
+        out.append(Seed(
+            name=row['name'], item_id=row['item_id'], dependency_kind=row['dependency_kind'],
+            base_events=tuple(base), event=make_event(files, row['file'], row['event']),
+            now=row['now'], content_files=scenario_content(row['scenario'])))
+    return out
+
+
+def seed_rows(action_class: str) -> list[dict]:
+    """Seed declarations (answer kind, covered cells, controls) for the matrix."""
+    if action_class not in TABLE:
+        raise ValueError('unknown action class: %r' % (action_class,))
+    return [dict(r) for r in _seed_rows() if action_class in r['classes']]
+
+
+def file_controls() -> list[dict]:
+    """Content-only controls: a fixture file edit with the ledger held fixed."""
+    return [dict(r) for r in json.loads((FIXTURES / 'controls.json').read_text())]

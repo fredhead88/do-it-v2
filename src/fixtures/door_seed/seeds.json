@@ -1,0 +1,1900 @@
+[
+ {
+  "name": "wave-shipped",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:shipped",
+  "cells": [
+   "global:shipped",
+   "ledger-wide:shipped"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-shipped-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "sibling-terminal:shipped",
+  "cells": [],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-killed",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:spec-killed",
+  "cells": [
+   "global:spec-killed"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-killed",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-killed-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "sibling-terminal:spec-killed",
+  "cells": [],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-killed",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-closed",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:spec-closed",
+  "cells": [
+   "global:spec-closed"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "spec-closed",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-closed-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "sibling-terminal:spec-closed",
+  "cells": [],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "spec-closed",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-retracted",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:charter-retracted",
+  "cells": [
+   "global:charter-retracted",
+   "ledger-wide:retracted"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "charter-retracted",
+   "subject": "L-charter-9001",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-retracted-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "global:charter-retracted",
+  "cells": [
+   "global:charter-retracted",
+   "ledger-wide:retracted"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "charter-retracted",
+   "subject": "L-charter-9001",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-queue-add",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-add",
+  "cells": [
+   "global:queue-add",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-executor-9001.jsonl",
+  "event": {
+   "type": "queue-add",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "branch": "fixture-s"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-conflict",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:merge-conflict",
+  "cells": [
+   "global:merge-conflict"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "merge-conflict",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-spawn-started",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:spawn-started",
+  "cells": [
+   "spawn:spawn-started"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "spawn-started",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "spawn": "L-builder-9002"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-build-started",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:build-started",
+  "cells": [
+   "spawn:build-started"
+  ],
+  "file": "L-builder-9002.jsonl",
+  "event": {
+   "type": "build-started",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "spawn": "L-builder-9002",
+   "role": "builder"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-charter-corr",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "membership:charter",
+  "cells": [
+   "global:correction",
+   "membership:charter"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:1",
+   "set": {
+    "charter": "L-charter-9002"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-charter-corr-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "membership:charter",
+  "cells": [
+   "global:correction",
+   "membership:charter"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:1",
+   "set": {
+    "charter": "L-charter-9002"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-footprint-corr",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "membership:wave",
+  "cells": [
+   "global:correction",
+   "membership:wave"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:1",
+   "set": {
+    "footprint": [
+     "src/elsewhere.py"
+    ]
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-footprint-corr-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "membership:wave",
+  "cells": [
+   "global:correction",
+   "membership:wave"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:1",
+   "set": {
+    "footprint": [
+     "src/elsewhere.py"
+    ]
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-sibling-written",
+  "scenario": "wave-lone",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "sibling:spec-written",
+  "cells": [
+   "sibling:spec-written",
+   "membership:charter",
+   "membership:wave"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "spec-written",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "path": "L-spec-9002",
+   "charter": "L-charter-9001",
+   "footprint": [
+    "src/s.py"
+   ]
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-sibling-written-wave",
+  "scenario": "wave-lone",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "sibling:spec-written",
+  "cells": [
+   "sibling:spec-written",
+   "membership:charter",
+   "membership:wave"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "spec-written",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "path": "L-spec-9002",
+   "charter": "L-charter-9001",
+   "footprint": [
+    "src/s.py"
+   ]
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-same-ts",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts",
+   "sibling:spec-carried",
+   "membership:charter"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-carried",
+   "subject": "L-spec-9001",
+   "ts": "2026-01-01T00:01:00Z",
+   "project": "fixture",
+   "charter": "L-charter-9002",
+   "footprint": [
+    "src/t.py"
+   ],
+   "path": "L-spec-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-same-ts-wave",
+  "scenario": "wave",
+  "item_id": "L-spec-9001",
+  "answer": "wave",
+  "classes": [
+   "wave-order"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts",
+   "sibling:spec-carried",
+   "membership:charter"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-carried",
+   "subject": "L-spec-9001",
+   "ts": "2026-01-01T00:01:00Z",
+   "project": "fixture",
+   "charter": "L-charter-9002",
+   "footprint": [
+    "src/t.py"
+   ],
+   "path": "L-spec-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-queue-remove",
+  "scenario": "wave-queued",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-remove",
+  "cells": [
+   "global:queue-remove",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-executor-9002.jsonl",
+  "event": {
+   "type": "queue-remove",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "wave-dropped",
+  "scenario": "wave-queued",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:window-dropped",
+  "cells": [
+   "global:window-dropped"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "window-dropped",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "window-batch",
+  "scenario": "window",
+  "item_id": "w1",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-batch",
+  "cells": [
+   "global:queue-batch",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "queue-batch",
+   "subject": "w1",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "albert-scott",
+   "specs": "L-spec-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "window-redcut",
+  "scenario": "window-batched",
+  "item_id": "w1",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:window-redcut",
+  "cells": [
+   "global:window-redcut",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "window-redcut",
+   "subject": "w1",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "albert-scott",
+   "window": "w1",
+   "returned": [
+    "L-spec-9001"
+   ],
+   "dropped": [],
+   "flakes": [],
+   "residual": []
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-shipped-build",
+  "scenario": "stage-build",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ledger-wide:shipped",
+  "cells": [
+   "global:shipped",
+   "ledger-wide:shipped",
+   "mention:dependency-hold"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-killed-build",
+  "scenario": "stage-build",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:spec-killed",
+  "cells": [
+   "global:spec-killed"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-killed",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-queue-build",
+  "scenario": "stage-build",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-add",
+  "cells": [
+   "global:queue-add",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-executor-9001.jsonl",
+  "event": {
+   "type": "queue-add",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "branch": "fixture-p"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-shipped-grade",
+  "scenario": "stage-grade",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ledger-wide:shipped",
+  "cells": [
+   "global:shipped",
+   "ledger-wide:shipped",
+   "mention:dependency-hold"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-killed-grade",
+  "scenario": "stage-grade",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:spec-killed",
+  "cells": [
+   "global:spec-killed"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-killed",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-queue-grade",
+  "scenario": "stage-grade",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-add",
+  "cells": [
+   "global:queue-add",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-executor-9001.jsonl",
+  "event": {
+   "type": "queue-add",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "branch": "fixture-p"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-shipped-review-dep",
+  "scenario": "stage-review-dep",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ledger-wide:shipped",
+  "cells": [
+   "global:shipped",
+   "ledger-wide:shipped",
+   "mention:dependency-hold"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-killed-review-dep",
+  "scenario": "stage-review-dep",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:spec-killed",
+  "cells": [
+   "global:spec-killed"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-killed",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-queue-review-dep",
+  "scenario": "stage-review-dep",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:queue-add",
+  "cells": [
+   "global:queue-add",
+   "ledger-wide:merge_queue"
+  ],
+  "file": "L-executor-9001.jsonl",
+  "event": {
+   "type": "queue-add",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "branch": "fixture-p"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "dep-void-hold",
+  "scenario": "stage-build",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:3",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "text-shipped",
+  "scenario": "spec-text",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ledger-wide:shipped",
+  "cells": [
+   "global:shipped",
+   "ledger-wide:shipped",
+   "file:content:spec-text"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "shipped",
+   "subject": "L-spec-9003",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "corr-grade",
+  "scenario": "stage-grade",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-builder-9001.jsonl:3",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "corr-review",
+  "scenario": "stage-review",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-grader-9001.jsonl:1",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "corr-merge",
+  "scenario": "stage-merge",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-tick-9001.jsonl:2",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "corr-close",
+  "scenario": "stage-close",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:3",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "ref-decision",
+  "scenario": "ref",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ref:decision",
+  "cells": [
+   "ref:decision"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:2"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "ref-unblocked",
+  "scenario": "ref",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "ref:unblocked",
+  "cells": [
+   "ref:unblocked"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:2"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "spawn-spawn-done",
+  "scenario": "spawn",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:spawn-done",
+  "cells": [
+   "spawn:spawn-done",
+   "ledger-wide:terminal_spawns"
+  ],
+  "file": "L-builder-9001.jsonl",
+  "event": {
+   "type": "spawn-done",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "spawn": "L-builder-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "spawn-spawn-failed",
+  "scenario": "spawn",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:spawn-failed",
+  "cells": [
+   "spawn:spawn-failed",
+   "ledger-wide:terminal_spawns"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "spawn-failed",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "spawn": "L-builder-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "spawn-spawn-stale",
+  "scenario": "spawn",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:spawn-stale",
+  "cells": [
+   "spawn:spawn-stale",
+   "ledger-wide:terminal_spawns"
+  ],
+  "file": "L-tick-9001.jsonl",
+  "event": {
+   "type": "spawn-stale",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "spawn": "L-builder-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "cap-unblocked",
+  "scenario": "capability",
+  "item_id": "capability:git",
+  "answer": "capability_holds",
+  "classes": [
+   "capability-release"
+  ],
+  "dependency_kind": "global:unblocked",
+  "cells": [
+   "global:unblocked",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "capability:git",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "cap-decision",
+  "scenario": "capability",
+  "item_id": "capability:git",
+  "answer": "capability_holds",
+  "classes": [
+   "capability-release"
+  ],
+  "dependency_kind": "global:decision",
+  "cells": [
+   "global:decision",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "capability:git",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "cap-hold",
+  "scenario": "capability",
+  "item_id": "capability:git",
+  "answer": "capability_holds",
+  "classes": [
+   "capability-release"
+  ],
+  "dependency_kind": "global:capability-hold",
+  "cells": [
+   "global:capability-hold",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-reviewer-9001.jsonl",
+  "event": {
+   "type": "capability-hold",
+   "subject": "capability:net",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "capability": "net",
+   "spec": "L-spec-9001"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "cap-correction",
+  "scenario": "capability",
+  "item_id": "capability:git",
+  "answer": "capability_holds",
+  "classes": [
+   "capability-release"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-grader-9001.jsonl:1",
+   "set": {
+    "type": "voided"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "cap-same-ts",
+  "scenario": "capability",
+  "item_id": "capability:git",
+  "answer": "capability_holds",
+  "classes": [
+   "capability-release"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "capability:git",
+   "ts": "2026-01-01T00:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "close-sibling",
+  "scenario": "charter-empty",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "sibling:spec-written",
+  "cells": [
+   "sibling:spec-written",
+   "membership:charter"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "spec-written",
+   "subject": "L-spec-9002",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "path": "L-spec-9002",
+   "charter": "L-charter-9001",
+   "footprint": [
+    "src/s.py"
+   ]
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "close-retracted",
+  "scenario": "charter",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "global:charter-retracted",
+  "cells": [
+   "global:charter-retracted",
+   "ledger-wide:retracted"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "charter-retracted",
+   "subject": "L-charter-9001",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "close-correction",
+  "scenario": "charter",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "global:correction",
+  "cells": [
+   "global:correction"
+  ],
+  "file": "L-operator-9001.jsonl",
+  "event": {
+   "type": "correction",
+   "subject": "fixture",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ref": "L-thinker-9001.jsonl:2",
+   "set": {
+    "charter": "L-charter-9002"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "same-ts-cross-file",
+  "scenario": "same-ts",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "L-spec-9001",
+   "ts": "2026-01-01T01:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "same-ts-cross-file-control",
+  "scenario": "same-ts",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts"
+  ],
+  "file": "L-thinker-9001.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "L-spec-9001",
+   "ts": "2026-01-01T01:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "same-ts-within-file",
+  "scenario": "same-ts",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts"
+  ],
+  "file": "L-spec-auditor-9001.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "L-spec-9001",
+   "ts": "2026-01-01T01:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "rule-decision",
+  "scenario": "rule",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:decision",
+  "cells": [
+   "global:decision"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "L-spec-9099",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ruling": {
+    "kind": "rebuild",
+    "spec": "L-spec-9001",
+    "reason": "fixture ruling"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "rule-decision-control",
+  "scenario": "rule",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:decision",
+  "cells": [
+   "global:decision"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "decision",
+   "subject": "L-spec-9099",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture",
+   "ruling": {
+    "kind": "rebuild",
+    "spec": "L-spec-9098",
+    "reason": "fixture ruling"
+   }
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "capstep-unblocked",
+  "scenario": "caphold",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:unblocked",
+  "cells": [
+   "global:unblocked",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "capability:db:L-spec-9001",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "capstep-unblocked-control",
+  "scenario": "caphold",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:unblocked",
+  "cells": [
+   "global:unblocked",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "unblocked",
+   "subject": "capability:db:L-spec-9099",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "capstep-hold",
+  "scenario": "capunb",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:capability-hold",
+  "cells": [
+   "global:capability-hold",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-grader-9002.jsonl",
+  "event": {
+   "type": "capability-hold",
+   "subject": "capability:db:L-spec-9001",
+   "capability": "db",
+   "spec": "L-spec-9001",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "capstep-hold-control",
+  "scenario": "capunb",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "global:capability-hold",
+  "cells": [
+   "global:capability-hold",
+   "ledger-wide:capability_holds"
+  ],
+  "file": "L-grader-9002.jsonl",
+  "event": {
+   "type": "capability-hold",
+   "subject": "capability:db:L-spec-9099",
+   "capability": "db",
+   "spec": "L-spec-9099",
+   "ts": "2026-01-01T12:00:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "seat-claimed",
+  "scenario": "seat",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:seat-claimed",
+  "cells": [
+   "spawn:seat-claimed"
+  ],
+  "file": "L-relay-9001.jsonl",
+  "event": {
+   "type": "seat-claimed",
+   "subject": "L-builder-9002",
+   "ts": "2026-01-01T04:15:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "seat-claimed-control",
+  "scenario": "seat",
+  "item_id": "L-spec-9001",
+  "answer": "step",
+  "classes": [
+   "next-step",
+   "build-start",
+   "grade",
+   "review",
+   "merge",
+   "close",
+   "hold-release"
+  ],
+  "dependency_kind": "spawn:seat-claimed",
+  "cells": [
+   "spawn:seat-claimed"
+  ],
+  "file": "L-relay-9001.jsonl",
+  "event": {
+   "type": "seat-claimed",
+   "subject": "L-builder-9099",
+   "ts": "2026-01-01T04:15:00Z",
+   "project": "fixture"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "close-same-ts",
+  "scenario": "charter-ts",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts",
+   "membership:charter"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-written",
+   "subject": "L-spec-9001",
+   "project": "fixture",
+   "footprint": [
+    "src/t.py"
+   ],
+   "path": "L-spec-9001",
+   "ts": "2026-01-01T01:00:00Z",
+   "charter": "L-charter-9002"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ },
+ {
+  "name": "close-same-ts-control",
+  "scenario": "charter-ts",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "same-ts",
+  "cells": [
+   "same-ts",
+   "membership:charter"
+  ],
+  "file": "L-thinker-9002.jsonl",
+  "event": {
+   "type": "spec-written",
+   "subject": "L-spec-9001",
+   "project": "fixture",
+   "footprint": [
+    "src/t.py"
+   ],
+   "path": "L-spec-9001",
+   "ts": "2026-01-01T01:00:00Z",
+   "charter": "L-charter-9000"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "same"
+ },
+ {
+  "name": "close-carried",
+  "scenario": "charter-empty",
+  "item_id": "L-charter-9001",
+  "answer": "closable",
+  "classes": [
+   "charter-close"
+  ],
+  "dependency_kind": "sibling:spec-carried",
+  "cells": [
+   "sibling:spec-carried",
+   "membership:charter"
+  ],
+  "file": "L-executor-9001.jsonl",
+  "event": {
+   "type": "spec-carried",
+   "subject": "L-spec-9002",
+   "project": "fixture",
+   "charter": "L-charter-9001",
+   "footprint": [
+    "src/s.py"
+   ],
+   "path": "L-spec-9002",
+   "source": "x",
+   "tier": "1",
+   "audited_at": "2026-01-01T00:00:00Z",
+   "ts": "2026-01-01T03:00:00Z"
+  },
+  "now": "2026-01-02T00:00:00Z",
+  "expect": "changed"
+ }
+]
