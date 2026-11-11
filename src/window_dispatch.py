@@ -6,9 +6,10 @@ _IDENTITY = ContextVar("window_dispatch_identity", default=None)
 
 
 @contextmanager
-def managed(tree, quick=()):
-    """Carry candidate identity through callers that retain the legacy call shape."""
-    token = _IDENTITY.set((tree, quick))
+def managed(tree, quick=(), known=None):
+    """Carry candidate identity through callers that retain the legacy call shape.
+    `known` (project, base_sha, specs) arms the known-red dispatch guard."""
+    token = _IDENTITY.set((tree, quick, known))
     try:
         yield
     finally:
@@ -23,8 +24,9 @@ def verify(gate, repo, cand, required, window, *, rehearsal=False, tree=None, qu
     """-> dict(state=green|red|undetermined, nodes, url, doc). Anything that is not
     an unambiguous green is not green."""
     context = _IDENTITY.get()
+    known = context[2] if context is not None else None
     if tree is None and context is not None:
-        tree, inherited_quick = context
+        tree, inherited_quick, _ = context
         if not quick:
             quick = inherited_quick
         if tree is None:
@@ -45,6 +47,11 @@ def verify(gate, repo, cand, required, window, *, rehearsal=False, tree=None, qu
             return _undetermined("candidate tree unavailable")
         if tree != resolved:
             return _undetermined("supplied tree differs from candidate tree")
+    if known is not None and tree is not None:
+        import window_known_red
+        skipped = window_known_red.guard(gate, repo, cand, tree, required, window, rehearsal=rehearsal, **known)
+        if skipped is not None:
+            return skipped
     script = gate.os.environ.get("DOIT_WINDOW_PREDEPLOY") or str(repo / gate.PREDEPLOY)
     ref = f"ci-verify/{cand[:12]}-win{gate.os.getpid()}"
     env = {**gate.os.environ, "PREDEPLOY_GATE_CI_ONLY": "1", "PREDEPLOY_GATE_ONLY_GREEN": "1",
