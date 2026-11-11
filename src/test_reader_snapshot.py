@@ -309,7 +309,7 @@ class SnapshotTests(unittest.TestCase):
             ('pane_resume', 'run', None), ('crons', 'check', []),
             ('look', '_read_state', {'last_pass': NOW.isoformat()}),
             ('look', 'heartbeat_missed', None), ('look', 'emit_once', None),
-            ('up', 'ensure_relay', 'ok'), ('autodispatch', 'redispatch_dead', []),
+            ('up', 'ensure_relay', 'ok'), ('up', 'ensure_planner', 'idle'), ('autodispatch', 'redispatch_dead', []),
             ('merge_queue', 'enqueue_due', []), ('resources', 'manifest_counts', {}),
             ('resources', 'not_reapable_counts', {}), ('reap_tmp', '_reap_recorded', []),
             ('tree_cleanup', 'reap_worktrees', ([], [])), ('dispatch', 'emit', None),

@@ -597,6 +597,14 @@ def _known_bug_escalation(e):
     return (e.get("actor") == "up" and "attempts" in e) or e.get("kind") == "known-bug"
 
 
+def _planner_identity(event):
+    """The Planner's own stem (its ledger file), when the row carries one."""
+    who = event.get("planner") or event.get("spawn")
+    if not who and isinstance(event.get("_src"), str):
+        who = event["_src"].split(":")[0].removesuffix(".jsonl")
+    return who if isinstance(who, str) and who.startswith("L-planner-") else None
+
+
 def planner_attempts(events, charter_id):
     """`{attempts, last_reason, next, held_by}` for one charter — R7's at-most-one-
     restart rule derived from the ledger, so the launcher keeps no state in memory
@@ -606,7 +614,9 @@ def planner_attempts(events, charter_id):
     not an attempt at cutting one). An unmatched trailing `planner-started` is the
     run happening NOW: it is never counted as a failure, or a launcher would escalate
     against its own live pane. A pair whose `reason` is `l1-complete` or `held`
-    does not count either.
+    does not count either. `never-started` is ignored entirely. Readable nonempty
+    ctx handovers exempt only the first two consecutive ctx ends after the reset
+    floor; missing handovers consume an ordinal, and never-started cannot refill it.
 
     One left-to-right walk also tracks a **known-bug hold** (planner-attempts-hold,
     L-charter-0042 R6): `governing` is the most recent `escalation-blocking` on
@@ -621,7 +631,7 @@ def planner_attempts(events, charter_id):
     positioned after it count toward `attempts` from then on — pre-reset failures
     are never recounted, and the floor stands even across a later, unrelated
     (ordinary) escalation round-trip on the same charter."""
-    opened, opened_pos, pairs = None, None, []
+    opened, opened_pos, pairs, by_identity = None, None, [], {}
     governing, latest_answer, reset_at = None, None, None
     for i, e in enumerate(events):
         et = e.get("type")
@@ -630,9 +640,21 @@ def planner_attempts(events, charter_id):
                 continue
             if not (e.get("subject") == charter_id or fold.charter_id(e.get("charter")) == charter_id):
                 continue
+            who = _planner_identity(e)
             if et == PLANNER_STARTED:
                 opened, opened_pos = e, i
+                if who is not None:
+                    by_identity[who] = (e, i)
+            elif who is not None and who in by_identity:
+                # Several starts for one charter can precede their later reaper ends: pair
+                # each end with ITS OWN start, never with whichever start came last.
+                start, pos = by_identity.pop(who)
+                pairs.append((start, e, pos))
+                if opened is start:
+                    opened, opened_pos = None, None
             elif opened is not None:
+                if _planner_identity(opened) is not None:
+                    by_identity.pop(_planner_identity(opened), None)
                 pairs.append((opened, e, opened_pos))
                 opened, opened_pos = None, None
         elif et in ("escalation-blocking", "decision", "unblocked") and e.get("subject") == charter_id:
@@ -648,8 +670,31 @@ def planner_attempts(events, charter_id):
     held_by = latest_answer["_src"] if held else None
 
     def _summarize(subset):
-        att = sum(1 for _, end, _ in subset if end.get("reason") not in ("l1-complete", "held"))
-        return att, (subset[-1][1].get("reason") if subset else None)
+        att, ctx_ordinal, last_reason = 0, 0, None
+        for _, end, _ in subset:
+            reason = end.get("reason")
+            if reason == "never-started":
+                continue
+            last_reason = reason
+            if reason == "ctx":
+                ctx_ordinal += 1
+                readable = False
+                try:
+                    handover = end.get("handover")
+                    if isinstance(handover, str) and handover:
+                        path = pathlib.Path(handover)
+                        if path.is_file() and path.stat().st_mode & 0o444:
+                            with path.open("rb") as stream:
+                                readable = bool(stream.read(1))
+                except (OSError, ValueError):
+                    pass
+                if readable and ctx_ordinal <= 2:
+                    continue
+            else:
+                ctx_ordinal = 0
+            if reason not in ("l1-complete", "held"):
+                att += 1
+        return att, last_reason
 
     attempts, last_reason = _summarize(pairs)
     if held:

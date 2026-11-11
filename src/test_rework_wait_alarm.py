@@ -334,6 +334,7 @@ class AC5Tests(Scratch):
         self.mock(tick.carry, 'sync_v4', return_value=None)
         self.mock(pane_resume, 'run', return_value={})
         self.mock(up, 'ensure_relay', return_value='healthy')
+        self.mock(up, 'ensure_planner', return_value='idle')
         self.mock(crons, 'check', return_value=[])
         self.mock(look, '_read_state', return_value={'last_pass': NOW.isoformat()})
         self.mock(look, 'heartbeat_missed', return_value=None)

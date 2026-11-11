@@ -14,7 +14,7 @@ system, and §4.9 routes those to a human rather than to an unattended process.
 would helpfully break.
 """
 import ledger_files
-import fcntl, importlib, json, math, os, pathlib, re, shlex, subprocess, sys, time
+import fcntl, importlib, json, math, os, pathlib, re, shlex, signal, stat, subprocess, sys, time
 from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -169,6 +169,29 @@ def install(contract):
 
 
 def main(print_only=False, max_cycles=None):
+    """`doit up` no longer supervises. The tick (cron -> `doit tick`) owns Planner
+    scheduling through `ensure_planner`; this prints where Planners run and returns,
+    so the exit is 0 and nothing is launched, slept on or escalated here (L-spec-2310).
+
+    `print_only` is the old one-shot dry run, unchanged in every observable way:
+    no relay call, no child, no event, no launcher file, and no sleep. `max_cycles`
+    is accepted for the old signature and ignored."""
+    if print_only:
+        return _supervisor_main(print_only=True)
+    contract = dispatch.AGENTS / "planner.md"
+    if not contract.exists():
+        sys.exit(f"up: no planner contract at {contract} — the pane is the contract (D116)")
+    install(contract)
+    (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
+    (fold.ROOT / "logs").mkdir(parents=True, exist_ok=True)
+    print("# the tick is cron's, and cron is yours — install this line yourself:")
+    print(cron_line())
+    print("# Planners are started by the tick (doit tick) in tmux session do-it-relay;"
+          " doit up starts nothing")
+    return 0
+
+
+def _supervisor_main(print_only=False, max_cycles=None):
     """One `doit up` is one FOREGROUND SUPERVISOR: derive the next plannable
     charter, run a Planner pane on it as a child, wait for it to exit, record the
     outcome, repeat — with no keystroke in between. The launcher never replaces
@@ -273,17 +296,26 @@ def _launcher(state):
     return state["up"]
 
 
-def _ended(ledger):
-    """True if the pane wrote its own end row. Re-read, never remembered (§9.2)."""
+def _planner_own_rows(ledger, *, strict=True):
+    """One own-file parser for wrapper completion and reaper read-back."""
+    rows = []
     for line in ledger_files.read_text(ledger.parent, ledger.name).splitlines():
-        if not line.strip().startswith("{"):
+        if not line.strip():
             continue
         try:
-            if json.loads(line).get("type") == "planner-ended":
-                return True
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("Planner own row must be an object")
+            rows.append(row)
         except ValueError:
-            continue
-    return False
+            if strict:
+                raise
+    return rows
+
+
+def _ended(ledger):
+    """True if the pane wrote its own end row. Re-read, never remembered (§9.2)."""
+    return any(row.get("type") == "planner-ended" for row in _planner_own_rows(ledger, strict=False))
 
 
 PLANNER_OCCUPIED = "planner-occupied"
@@ -397,26 +429,9 @@ def _charter_pass(state, events, charter, started_sha):
         print(f"# {charter}: held — known-bug escalation answered by {att.get('held_by')} without replan=yes")
         return True
     if att.get("next") == "escalate":
-        led = _launcher(state)
-        # R3/L-spec-0192: `escalation_ok` now gates this write (via `emit()`'s
-        # `required_reason` door) — mirroring dispatch.py's own post-0192 fix for
-        # the identical gap, this names the irreversible act rather than inventing
-        # a default/deadline/revert for a retry that R7's at-most-one-restart rule
-        # already forbids from happening on its own (measured: this call site was
-        # silently refused, and no escalation-blocking row has landed from it,
-        # since L-spec-0192 shipped — an unrelated, pre-existing bug fixed here
-        # because it otherwise blocks this file from ever reaching exit 0).
-        dispatch.emit(led, {"spawn": led.stem}, "escalation-blocking", subject=charter,
-                      last_reason=att.get("last_reason"), attempts=att.get("attempts"),
-                      why=f"planner on {charter} ended {att.get('attempts')}x without landing — "
-                          f"last: {att.get('last_reason')}",
-                      irreversible=f"{att.get('attempts')} planner attempt(s) on {charter} already ran "
-                                   f"and drew their budget; R7's at-most-one-restart rule means this "
-                                   f"charter is not retried automatically — an operator must record a "
-                                   f"decision or unblocked on {charter} carrying replan=yes to resume it "
-                                   f"— one without replan=yes leaves {charter} held")
-        print(f"# {charter}: escalation-blocking — last {att.get('last_reason')}")
-        return True                       # the charter leaves `ready` on relay's own exclusion
+        # ensure_planner is the only writer of the attempt-limit escalation (L-spec-2310).
+        print(f"# {charter}: attempt limit — the tick's ensure_planner escalates it")
+        return True
     maybe_reexec("planner", started_sha)  # R2 point 5(b): immediately before THIS charter's pane
     handover = ctx_handover(events, charter)
     prompt = f"{charter}\nRead the handover file {handover} before continuing." if handover else charter
@@ -558,9 +573,278 @@ def planner_alive() -> bool | None:
                 raise ValueError("pane identity unreadable")
             if panes._is_live(int(path.stem), meta) and panes.ledger_role(meta["name"]) == "planner":
                 live = True
-        return held or live
+        # A named Planner CLI without session JSON is still a live Planner; an
+        # unreadable or hidden process table is never "no Planner".
+        found = _planner_processes()
+        if found is None:
+            return None
+        return held or live or bool(found)
     except (OSError, ValueError, TypeError, KeyError):
         return None
+
+
+def _planner_host_namespace():
+    """Fail closed outside Linux's initial PID namespace, including nested procfs.
+
+    Linux reserves this namespace inode for init_pid_ns (PROC_PID_INIT_INO).
+    Merely seeing PID 1 or a one-element NSpid does not establish host visibility.
+    """
+    try:
+        namespace = os.readlink("/proc/self/ns/pid")
+        if namespace != "pid:[4026531836]" or os.readlink("/proc/1/ns/pid") != namespace:
+            return None
+        mounts = pathlib.Path("/proc/mounts").read_text().splitlines()
+        if not any(row.split()[1:3] == ["/proc", "proc"]
+                   and not any(option.startswith("hidepid=") and option != "hidepid=0"
+                               for option in row.split()[3].split(",")) for row in mounts):
+            return None
+        return namespace
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _proc_identity(pid):
+    """Read one kernel identity; never return or log unrelated argv tokens."""
+    directory = pathlib.Path("/proc") / str(pid)
+    try:
+        raw = (directory / "stat").read_text()
+        fields = raw[raw.rindex(")") + 2:].split()
+        ticks = int(fields[19])
+        if ticks < 0:
+            raise ValueError("invalid process start")
+        status = dict(line.split(":", 1) for line in (directory / "status").read_text().splitlines()
+                      if ":" in line)
+        uid = int(status["Uid"].split()[1])
+        uptime = float(pathlib.Path("/proc/uptime").read_text().split()[0])
+        started = time.time() - uptime + ticks / os.sysconf("SC_CLK_TCK")
+        args = (directory / "cmdline").read_bytes().split(b"\0")
+        args = [os.fsdecode(token) for token in args if token]
+        cli = cli_path.claude_bin()
+        stem = None
+        # A shebang script has its interpreter first and the script second.
+        executable = pathlib.Path(cli).resolve() if cli else None
+        prefix = 1
+        if args and executable is not None:
+            if pathlib.Path(args[0]).resolve() == executable:
+                prefix = 1
+            elif len(args) > 1 and args[0].startswith("/") and pathlib.Path(args[1]).resolve() == executable:
+                prefix = 2
+            else:
+                prefix = 0
+            if prefix and len(args) > prefix+1 and args[prefix] == "-n":
+                if re.fullmatch(r"L-planner-[0-9]+", args[prefix+1]):
+                    stem = args[prefix+1]
+        namespace = os.readlink(directory / "ns/pid") if stem else None
+        if not math.isfinite(started):
+            raise ValueError("invalid process age")
+        return dict(pid=pid, uid=uid, start_ticks=ticks, pid_namespace=namespace,
+                    started_at=started, planner=stem, zombie=fields[0] in ("Z", "X"))
+    except FileNotFoundError:
+        # A process disappearing during a multi-file read is not a malformed identity.
+        if not directory.exists():
+            return None
+        raise
+
+
+def _scan_planner_processes():
+    if _planner_host_namespace() is None or cli_path.claude_bin() is None:
+        return None
+    try:
+        found = []
+        for path in pathlib.Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            identity = _proc_identity(int(path.name))
+            if identity and identity["planner"] and not identity["zombie"]:
+                found.append(identity)
+        return found
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+# Kept as a separate probe so process-fixture tests can isolate the host scan.
+def _planner_processes():
+    return _scan_planner_processes()
+
+
+def _planner_pid_dead(pid, start_ticks=None):
+    if type(pid) is not int or pid <= 0:
+        return None
+    try:
+        identity = _proc_identity(pid)
+        if identity is None:
+            return True
+        if start_ticks is not None and str(identity["start_ticks"]) != str(start_ticks):
+            return None  # reused PID does not establish this run's death
+        return identity["zombie"]
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _unmatched_planners(events):
+    starts, ended = {}, set()
+    for event in events:
+        stem = event.get("planner") or event.get("spawn")
+        if not isinstance(stem, str) or not re.fullmatch(r"L-planner-[0-9]+", stem):
+            continue
+        if event.get("type") == "planner-started" and event.get("mode") != "serving":
+            starts.setdefault(stem, []).append(event)
+        elif event.get("type") == "planner-ended":
+            ended.add(stem)
+    return [{**rows[0], **({"_reap_ambiguous": True} if len(rows) != 1 else {})}
+            for stem, rows in starts.items() if stem not in ended]
+
+
+def _planner_reap_approved(starts, namespace):
+    legacy = [e for e in starts if "wrapper_pid" not in e]
+    if not legacy:
+        return True
+    if namespace is None:
+        return False
+    path = fold.ROOT / "state/planner-reap-approval.json"
+    try:
+        if path.is_symlink() or path.resolve().parent != (fold.ROOT / "state").resolve():
+            return False
+        if (fold.ROOT / "state").is_symlink():
+            return False
+        meta = path.stat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.geteuid() or meta.st_mode & 0o022:
+            return False
+        ledger_files._accessible(path)
+        approval = json.loads(path.read_text())
+        if not isinstance(approval, dict) or approval.get("pid_namespace") != namespace:
+            return False
+        rows = approval.get("starts")
+        if not isinstance(rows, list) or any(not isinstance(e, dict) or set(e) != {"planner", "started_at"}
+                                           or not isinstance(e["planner"], str)
+                                           or not isinstance(e["started_at"], str) for e in rows):
+            return False
+        approved = {(e["planner"], e["started_at"]) for e in rows}
+        return all((e.get("planner") or e.get("spawn"), e.get("ts")) in approved for e in legacy)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def reap_planners(events, now):
+    """Persist proven dead ends under the lifetime lock; no scheduling or full read.
+
+    Legacy starts are report-only until the operator acknowledges their identities
+    in the current host namespace. The caller's snapshot is never modified.
+    """
+    closed, report = [], []
+    fd = None
+    try:
+        # Probe this BEFORE reading sessions, processes, or migration approval.
+        fd = _planner_lock()
+        if fd is None:
+            return []
+        namespace = _planner_host_namespace()
+        processes = _planner_processes()
+        starts = _unmatched_planners(events)
+        approved = _planner_reap_approved(starts, namespace)
+        launched = {}
+        for event in events:
+            if event.get("type") == "role-launched" and event.get("pane"):
+                launched.setdefault(event["pane"], []).append(event)
+        for start in starts:
+            stem = start.get("planner") or start["spawn"]
+            matching = [p for p in processes or [] if p["planner"] == stem]
+            reason = "vanished" if "wrapper_pid" in start or launched.get(stem) else "never-started"
+            item = dict(planner=stem, started_at=start.get("ts"), reason=reason,
+                        processes=matching, action="left", uncertainty=None)
+            report.append(item)
+            if start.get("_reap_ambiguous"):
+                item["uncertainty"] = "multiple starts for one Planner identity"
+                continue
+            if namespace is None or processes is None or not approved:
+                item["uncertainty"] = "host/process visibility or migration acknowledgment unavailable"
+                continue
+            path = fold.EVENTS / (stem + ".jsonl")
+            if start.get("_src", "").split(":")[0] != path.name or path.is_symlink():
+                item["uncertainty"] = "start does not identify its existing own file"
+                continue
+            own = _planner_own_rows(path)
+            own_starts = [e for e in own if e.get("type") == "planner-started"]
+            raw_start = {key: value for key, value in start.items() if key not in ("actor", "_src")}
+            if (len(own_starts) != 1 or own_starts[0] != raw_start
+                    or any(e.get("type") == "planner-ended" for e in own)):
+                item["uncertainty"] = "own rows changed or already ended"
+                continue
+            pids = [(e.get("pid"), e.get("proc_start")) for e in launched.get(stem, [])]
+            if "wrapper_pid" in start:
+                pids.append((start["wrapper_pid"], None))
+            if any(_planner_pid_dead(pid, ticks) is not True for pid, ticks in pids):
+                item["uncertainty"] = "wrapper/child alive or identity undetermined"
+                continue
+            # Session metadata is corroboration; malformed or unreadable input blocks.
+            session_live = False
+            try:
+                files = list(panes.SESSIONS.iterdir())
+            except FileNotFoundError:
+                ledger_files._accessible(pathlib.Path(os.environ["HOME"]), directory=True)
+                files = []
+            for session in files:
+                if session.suffix == ".json" and session.stem.isdigit():
+                    ledger_files._accessible(session)
+                    meta = json.loads(session.read_text())
+                    if (not isinstance(meta, dict) or not isinstance(meta.get("name"), str)
+                            or not meta["name"]):
+                        raise ValueError("unreadable session identity")
+                    if meta["name"] == stem and _planner_pid_dead(int(session.stem), meta.get("procStart")) is not True:
+                        session_live = True
+            if session_live:
+                item["uncertainty"] = "live/uncertain session"
+                continue
+            if matching:
+                item["uncertainty"] = "live named process"
+                if reason != "never-started" or len(own) != 1 or len(matching) != 1:
+                    continue
+                process = matching[0]
+                row_time = datetime.fromisoformat(start["ts"].replace("Z", "+00:00"))
+                if (row_time.tzinfo is None or now.tzinfo is None
+                        or (now-row_time).total_seconds() <= 3600
+                        or now.timestamp()-process["started_at"] <= 3600
+                        or process["uid"] != os.geteuid() or process["pid_namespace"] != namespace):
+                    continue
+                # Re-read kernel identity immediately before the only destructive act.
+                current = _proc_identity(process["pid"])
+                keys = ("pid", "uid", "start_ticks", "pid_namespace", "planner", "zombie")
+                if current is None or any(current[k] != process[k] for k in keys):
+                    continue
+                print("planner-reap signal " + json.dumps(dict(planner=stem, own_row_count=len(own),
+                      pid=current["pid"], start_ticks=current["start_ticks"])), file=sys.stderr)
+                os.kill(current["pid"], signal.SIGTERM)
+                item["action"] = "signaled"
+                item["signaled"] = True
+                deadline = time.monotonic() + .25
+                while _planner_pid_dead(current["pid"], current["start_ticks"]) is not True:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(.01)
+                else:
+                    item["uncertainty"] = None
+                if item["uncertainty"]:
+                    continue
+            refusal = dispatch.emit(path, {"spawn": stem}, "planner-ended", strict=True,
+                                    subject=start.get("subject"), planner=stem,
+                                    mode=start.get("mode"), reason=reason)
+            if refusal:
+                raise ValueError(refusal)
+            own = _planner_own_rows(path)
+            end = own[-1]
+            closed.append({**end, "actor": "planner", "_src": f"{path.name}:{len(own)}"})
+            item["action"] = "closed"
+            item["uncertainty"] = None
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        report.append(dict(action="left", uncertainty=type(exc).__name__))
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if report:
+            print("planner-reap " + json.dumps(dict(closed=len(closed),
+                  signaled=sum(bool(e.get("signaled")) for e in report),
+                  left=sum(e["action"] == "left" for e in report), starts=report)), file=sys.stderr)
+    return closed
 
 
 def planner_launcher(argv, *, runner=None):
@@ -627,13 +911,80 @@ def launch_planner(charter, mode, attempt, *, launcher=None, now=None):
         return "undetermined"
 
 
-RESTART_CONFIRM_SECONDS = 5.0
+def _attempt_escalation(charter, att):
+    """The attempt-limit escalation fields, shared by nothing else (L-spec-2310)."""
+    return dict(subject=charter, last_reason=att.get("last_reason"), attempts=att.get("attempts"),
+        why=f"planner on {charter} ended {att.get('attempts')}x without landing — "
+            f"last: {att.get('last_reason')}",
+        irreversible=f"{att.get('attempts')} planner attempt(s) on {charter} already ran "
+                     f"and drew their budget; R7's at-most-one-restart rule means this "
+                     f"charter is not retried automatically — an operator must record a "
+                     f"decision or unblocked on {charter} carrying replan=yes to resume it "
+                     f"— one without replan=yes leaves {charter} held")
 
 
-def restart_pane(pane_name: str) -> bool | None:
-    """Confirm a targeted restart through the wrapper's lifecycle reader."""
-    import planner_run
-    return planner_run.restart_pane(pane_name)
+def _escalation_written(charter, snapshot):
+    """Ledger-based idempotency: an actor-up escalation for this charter at or after
+    its newest end already exists on disk, whatever the caller's snapshot says."""
+    ends = [e.get("ts") for e in snapshot
+            if e.get("type") == "planner-ended" and e.get("subject") == charter]
+    newest = max((t for t in ends if isinstance(t, str)), default="")
+    for name in sorted(ledger_files.names(fold.EVENTS)):
+        if not re.fullmatch(r"L-up-[0-9]+\.jsonl", name):
+            continue
+        for line in ledger_files.read_text(fold.EVENTS, name).splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if (isinstance(row, dict) and row.get("type") == "escalation-blocking"
+                    and row.get("subject") == charter and str(row.get("ts", "")) >= newest):
+                return True
+    return False
+
+
+LAST_PLANNER_READY = None
+
+
+def ensure_planner(events, now, *, launcher=None):
+    """The tick's one Planner scheduler: reap, decide, launch ready[0] through
+    launch_planner. The ordered ready snapshot lands in LAST_PLANNER_READY (None when
+    unknown) for the tick row; undetermined never reads as idle."""
+    global LAST_PLANNER_READY
+    LAST_PLANNER_READY = None
+    try:
+        if events is None:
+            return "undetermined"
+        import relay
+        snapshot = list(events)
+        snapshot.extend(reap_planners(events, now))
+        alive = planner_alive()
+        if alive is None:
+            return "undetermined"
+        if alive:
+            LAST_PLANNER_READY = []
+            return "alive"
+        if _unmatched_planners(snapshot):
+            return "undetermined"   # report-only migration or unexplained start
+        ready = list(relay.plannable(snapshot, fold.ROOT)[0])
+        LAST_PLANNER_READY = ready
+        if not ready:
+            return "idle"
+        charter = ready[0]
+        att = relay.planner_attempts(snapshot, charter) or {}
+        if att.get("next") == "held":
+            return "idle"
+        if att.get("next") == "escalate":
+            if not _escalation_written(charter, snapshot):
+                led = dispatch.alloc(fold.EVENTS, "L-up-", ".jsonl")
+                refusal = dispatch.emit(led, {"spawn": led.stem}, "escalation-blocking",
+                                        **_attempt_escalation(charter, att))
+                if refusal:
+                    raise ValueError(refusal)
+            return "escalated"
+        return launch_planner(charter, "charter", int(att.get("attempts") or 0) + 1,
+                              launcher=launcher, now=now)
+    except Exception:
+        return "undetermined"
 
 
 def ensure_relay(events, now, *, launcher=None):

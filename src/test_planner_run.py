@@ -86,6 +86,8 @@ class Scratch(unittest.TestCase):
                                 (launch, 'CLAUDE_CONFIG', self.home / '.claude.json')):
             self.enterContext(patch.object(obj, key, value))
         self.now = datetime.now(timezone.utc)
+        # The host /proc scan is not part of these lifecycle fixtures.
+        self.enterContext(patch.object(up, '_planner_processes', return_value=[]))
 
     def wrapper(self, **env):
         return subprocess.Popen([str(REPO / 'doit'), 'planner-run', 'L-charter-9001',
@@ -280,6 +282,7 @@ class AC3(Scratch):
     def test_two_real_processes_admit_once(self):
         code = '''import pathlib,sys,time
 sys.path.insert(0,sys.argv[1]); import up
+up._planner_processes=lambda: []
 print(up.launch_planner('L-charter-9001','charter',1,launcher=lambda argv: pathlib.Path(sys.argv[2]).open('a').write('launch\\n')))
 '''
         log = self.root / 'admitted'
@@ -308,104 +311,32 @@ print(up.launch_planner('L-charter-9001','charter',1,launcher=lambda argv: pathl
 
 
 class AC4(Scratch):
-    def test_real_readers_unconfirmed_and_confirmed(self):
+    def test_targeted_restart_routes_are_retired(self):
+        import planner_run
+        for module, name in ((up, 'restart_pane'), (planner_run, 'restart_pane'),
+                             (up, 'RESTART_CONFIRM_SECONDS'), (pane_resume, '_restart_ctx'),
+                             (pane_resume, 'ctx_ended_without_successor')):
+            self.assertFalse(hasattr(module, name), f'{module.__name__}.{name}')
         end = self.end()
-        dst = self.events / pane_resume.LEDGER_NAME
-        for outcome, reason in ((False,'no-restart-entry'), (None,'restart-unconfirmed'), ('error','restart-undetermined')):
-            def restart(name):
-                if outcome == 'error':
-                    raise OSError()
-                return outcome
-            resumed, skipped = pane_resume._restart_ctx([end], [], self.now, dst, restart)
-            self.assertEqual((resumed,skipped), ([],[end['planner']]))
-            self.assertEqual(self.rows()[-1]['reason'], reason)
-        self.assertTrue(pane_resume.ctx_ended_without_successor([end, *self.rows()], self.now))
-        with patch.object(up, 'launch_planner', return_value='started'), \
-             patch.object(up, 'RESTART_CONFIRM_SECONDS', .03):
-            resumed, skipped = pane_resume._restart_ctx([end], [], self.now, dst, up.restart_pane)
-            self.assertFalse(resumed)
-            self.assertTrue(skipped)
-        self.assertEqual(len(list(self.events.glob('L-planner-*.jsonl'))), 1)
-        def actual_launch(argv):
-            self.finish(subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE))
-        with patch.object(up, 'planner_launcher', side_effect=actual_launch):
-            self.assertEqual(pane_resume._restart_ctx([end],[],self.now,dst,up.restart_pane),([end['planner']],[]))
-        self.assertEqual(pane_resume._restart_ctx([end],[],self.now,dst,lambda name:self.fail('stale snapshot repeated')),([],[]))
-        # The real production reader sees the confirmed successor, including a stale input snapshot.
-        self.assertFalse(pane_resume.ctx_ended_without_successor(fold.read_events(use_cache=False), self.now+timedelta(seconds=2)))
-        with patch.object(up, 'launch_planner') as launch_again:
-            self.assertFalse(up.restart_pane(end['planner']))
-            launch_again.assert_not_called()
+        with patch.object(up, 'launch_planner') as launch:
+            result = pane_resume.run([end], now=self.now, sessions_dir=self.sessions)
+        launch.assert_not_called()
+        self.assertEqual(result['restarted'], [])
+        self.assertFalse(any(r['type'] in ('pane-resumed', 'pane-resume-skipped') for r in self.rows()))
 
-    def test_lost_admission_and_early_failure_remain_recoverable(self):
+    def test_ctx_end_recovers_only_through_ensure_planner(self):
         import relay
         (self.root / 'repos' / 'do-it-v2').mkdir(parents=True)
-        for fail in ('occupied','setup'):
-            with self.subTest(fail=fail):
-                end=self.end()
-                marker=self.root/'planner.starting'
-                marker.unlink(missing_ok=True)
-                def launcher(argv):
-                    if fail=='occupied':
-                        fd=self.held()
-                        try:
-                            self.finish(subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE),3)
-                        finally:
-                            fcntl.flock(fd,fcntl.LOCK_UN)
-                    else:
-                        self.finish(subprocess.Popen(argv,env={**os.environ,'HOME':'/dev/null'},
-                                                     stdout=subprocess.PIPE,stderr=subprocess.PIPE),1)
-                dst=self.events/pane_resume.LEDGER_NAME
-                with patch.object(up,'planner_launcher',side_effect=launcher), patch.object(up,'RESTART_CONFIRM_SECONDS',.03):
-                    self.assertEqual(pane_resume._restart_ctx([end],[],self.now,dst,up.restart_pane), ([],[end['planner']]))
-                self.assertTrue(pane_resume.ctx_ended_without_successor([end,*pane_resume._resume_rows(dst)],self.now))
-                self.assertFalse(any(r['type']=='pane-resumed' for r in self.rows()))
-                # Real relay reader with a complete synthetic charter: loss must not consume a start/attempt.
-                dispatch.emit(self.events/'L-operator-9001.jsonl',{},'charter-filed',
-                              subject=end['subject'],project='do-it-v2')
-                rows=fold.read_events(use_cache=False)
-                self.assertEqual(relay.planner_attempts(rows,charter_id=end['subject'])['next'],'start')
-                self.assertIn(end['subject'], relay.plannable(rows, self.root)[0])
-                with patch.object(up,'maybe_reexec'):
-                    up._cycle({'up':None,'watermark':None,'said':None},None)
-                self.assertEqual(len([r for r in self.rows() if r['type']=='planner-started']),1)
-                for file in self.events.glob('*.jsonl'):
-                    file.unlink()
-
-    def test_restart_eligibility_and_distinct_admission_outcomes(self):
-        for reason in ('exit-0','ctx','held'):
-            row=self.end(reason)
-            for result, expected in (('alive',False),('starting',False),('undetermined','error')):
-                with patch.object(up,'launch_planner',return_value=result):
-                    if reason!='exit-0' and expected=='error':
-                        with self.assertRaises(RuntimeError): up.restart_pane(row['planner'])
-                    else:
-                        self.assertIs(up.restart_pane(row['planner']),False)
-        for bad in ({'ts':'bad'},{'subject':''}):
-            row=self.end(); row.update(bad)
-            (self.events/(row['planner']+'.jsonl')).write_text(json.dumps(row)+'\n')
-            with patch.object(up,'launch_planner') as launcher:
-                self.assertFalse(up.restart_pane(row['planner']))
-                launcher.assert_not_called()
-        self.assertFalse(up.restart_pane('L-relay-9001'))
-        self.assertFalse(up.restart_pane('L-planner-9999'))
-
-    def test_old_or_unrelated_start_cannot_confirm(self):
-        end=self.end()
-        old=dict(type='planner-started',subject=end['subject'],planner='L-planner-9002',
-                 spawn='L-planner-9002',mode='ctx-restart',attempt=1,wrapper_pid=os.getpid(),
-                 ts=(self.now-timedelta(minutes=3)).isoformat(),v=1)
-        (self.events/'L-planner-9002.jsonl').write_text(json.dumps(old)+'\n')
-        def unrelated(*args):
-            dispatch.emit(self.events/'L-planner-9003.jsonl',{'spawn':'L-planner-9003'},'planner-started',
-                          subject='L-charter-9999',planner='L-planner-9003',mode='ctx-restart',attempt=1,
-                          wrapper_pid=os.getpid())
-            return 'started'
-        with patch.object(up,'launch_planner',side_effect=unrelated), patch.object(up,'RESTART_CONFIRM_SECONDS',.03):
-            self.assertIsNone(up.restart_pane(end['planner']))
-        with patch.object(up,'launch_planner',return_value='started'), \
-             patch.object(fold,'read_events',side_effect=[fold.read_events(use_cache=False),OSError('unreadable')]):
-            with self.assertRaises(OSError): up.restart_pane(end['planner'])
+        end = self.end()
+        dispatch.emit(self.events / 'L-operator-9001.jsonl', {}, 'charter-filed',
+                      subject=end['subject'], project='do-it-v2')
+        rows = fold.read_events(use_cache=False)
+        launches = []
+        with patch.object(up, 'launch_planner', side_effect=lambda *a, **k: launches.append((a, k)) or 'started'):
+            self.assertEqual(up.ensure_planner(rows, self.now), "started")
+        self.assertEqual([a for a, _ in launches], [(end['subject'], 'charter', 1)])
+        self.assertEqual(up.LAST_PLANNER_READY, [end['subject']])
+        self.assertEqual(relay.planner_attempts(rows, charter_id=end['subject'])['next'], 'start')
 
     def test_wrapper_handover_behaviour(self):
         handover=self.root/'handover with spaces.md'
@@ -510,7 +441,7 @@ class AC6(Scratch):
             stack.enter_context(patch.object(up,'_interval',return_value=.05 if real else 3.0))
             if not real:
                 stack.enter_context(patch.object(up,'_SLEEP',side_effect=lambda seconds:clock.__setitem__(0,clock[0]+seconds)))
-            self.assertEqual(up.main(max_cycles=3),3)
+            self.assertEqual(up._supervisor_main(max_cycles=3),3)
         self.assertEqual(counts.count('plannable'),3)
         self.assertEqual(len(stamps),3)
         self.assertGreaterEqual(stamps[2]-stamps[0],.09 if real else 6)

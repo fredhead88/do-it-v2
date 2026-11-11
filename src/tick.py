@@ -1271,6 +1271,18 @@ def _record_pass():
         relay_status = up.ensure_relay(ev, datetime.now(timezone.utc))
     except Exception:
         relay_status = "undetermined"
+    # L-spec-2310: the one Planner scheduler, on the SAME `ev` snapshot as the relay.
+    # Its failure never suppresses the relay status or the tick heartbeat.
+    planner_status, planner_ready = "undetermined", None
+    try:
+        import up
+        up.LAST_PLANNER_READY = None
+        planner_status = up.ensure_planner(ev, datetime.now(timezone.utc))
+        planner_ready = up.LAST_PLANNER_READY
+        if not isinstance(planner_status, str):
+            planner_status, planner_ready = "undetermined", None
+    except Exception:
+        planner_status, planner_ready = "undetermined", None
     # L-charter-0046/L-spec-0473, R1/R3/R4: the tick's own Proving bookkeeping —
     # automatic entry, close, reopen and the two alarms — on this SAME `specs`/
     # `charters` fold, no extra re-read (Boundaries). Lazily imported and its own
@@ -1491,6 +1503,7 @@ def _record_pass():
     # The one liveness fact: `fold` reads the newest of these for staleness, and
     # `lane` is the count — the whole record this process leaves behind.
     kv = {"lane": len(todo), "relay": relay_status,
+          "planner_status": planner_status, "planner_ready": planner_ready,
           "autodispatch_pass_failed": autodispatch_pass_failed,
           "observer_view": observer_view,
           "observer_excluded": sorted(observer_excluded),

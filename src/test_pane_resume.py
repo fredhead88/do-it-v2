@@ -250,70 +250,26 @@ out_c, _ = run_it(d2, still_open_auth)
 ok(out_c["escalated"] == ["L-executor-0050"],
    f"AC2(c): a further stop after recovery escalates again, same reason_class: {out_c}")
 
-# L-spec-2045 AC3: ctx/held end identity comes from the writer's ledger source.
+# L-spec-2310 AC5: the context-restart branch is retired. A ctx/held end alone launches
+# nothing and writes no pane-resumed or pane-resume-skipped row; ensure_planner recovers it.
 from unittest.mock import patch
-import hashlib
 for reason in ('ctx', 'held'):
     d = new_root()
-    end = dict(type='planner-ended', subject='L-charter-9001', reason=reason,
+    end = dict(type='planner-ended', subject='L-charter-9001', reason=reason, planner='L-planner-9001',
                ts=iso(NOW - timedelta(minutes=5)), _src='L-planner-9001.jsonl:1')
-    calls = []
-    def restart(name):
-        calls.append(name)
-        return True
-    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions', restart=restart)
-    rows = fold.read_events(use_cache=False)
-    resumed = [e for e in rows if e['type'] == 'pane-resumed']
-    ok(out['restarted'] == ['L-planner-9001'] and calls == ['L-planner-9001'],
-       '2045 AC3: restart exactly once on first cycle')
-    ok(len(resumed) == 1 and resumed[0]['reason_class'] == 'ctx-ended'
-       and resumed[0]['lag_s'] == 300, '2045 AC3: durable measured lag')
-    pane_resume.run([end, *rows], now=NOW, sessions_dir=d / 'sessions', restart=restart)
-    ok(len(calls) == 1, '2045 AC3: fresh ledger suppresses duplicate restart')
-    body = json.dumps(resumed, sort_keys=True)
-    print(json.dumps(dict(url='cli://L-spec-2045/AC3', status=0,
-                         body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
-    start = dict(type='planner-started', subject=end['subject'], planner='L-planner-9002', ts=iso(NOW))
-    ok(not pane_resume.ctx_ended_without_successor([end, start], NOW), '2045 AC3: later start suppresses')
-    ok(not pane_resume.ctx_ended_without_successor([{**end, 'ts': 'bad'}], NOW),
-       '2045 AC3: unknown lag cannot claim restart')
-    live_root = new_root()
-    with patch.object(panes, 'live_panes', return_value=[dict(name='L-planner-9002')]):
-        out = pane_resume.run([end], now=NOW, sessions_dir=live_root / 'sessions', restart=restart)
-        ok(not out['restarted'] and len(calls) == 1, '2045 AC3: live successor prevents restart')
-    with patch.object(panes, 'live_panes', side_effect=OSError('undetermined')):
-        out = pane_resume.run([end], now=NOW, sessions_dir=live_root / 'sessions', restart=restart)
-        ok(not out['restarted'] and out['skipped'], '2045 AC3: failed live read never claims restart')
-
-# Production uses the targeted launcher; unreadable metadata cannot authorize a restart.
-d = new_root()
-end = dict(type='planner-ended', subject='L-charter-9002', planner='L-planner-9002',
-           reason='ctx', ts=iso(NOW - timedelta(minutes=1)))
-with patch('up.restart_pane', return_value=False) as restart:
-    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
-    restart.assert_called_once_with('L-planner-9002')
-ok(not out['restarted'] and out['skipped'] == ['L-planner-9002'],
-   '2045 AC3: unavailable restart is an explicit skip')
-ok(any(e.get('reason') == 'no-restart-entry' for e in fold.read_events(use_cache=False)),
-   '2045 AC3: false targeted restart is recorded')
-# Unconfirmed admission and unknown ownership remain candidates on the next pass.
-for outcome, expected_reason in ((None, 'restart-unconfirmed'), (OSError('synthetic'), 'restart-undetermined')):
-    args = {'side_effect': outcome} if isinstance(outcome, Exception) else {'return_value': outcome}
-    with patch('up.restart_pane', **args):
+    with patch('up.launch_planner') as launch:
         out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
-    ok(not out['restarted'] and out['skipped'], '2167: only confirmed starts resume')
-    rows = fold.read_events(use_cache=False)
-    ok(any(e.get('reason') == expected_reason for e in rows), '2167: distinct retry reason')
-    ok(bool(pane_resume.ctx_ended_without_successor([end, *rows], NOW)), '2167: skipped remains a candidate')
-with patch('up.restart_pane', return_value=True) as restart:
-    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
-    restart.assert_called_once_with('L-planner-9002')
-ok(out['restarted'] == ['L-planner-9002'], '2045 AC3: production default restarts targeted pane')
+    ok(not launch.called, f'2310 AC5: {reason} end cannot launch through pane_resume')
+    ok(out == {"resumed": [], "escalated": [], "skipped": [], "restarted": []}, f'2310 AC5: {reason} result {out}')
+    ok(not [e for e in fold.read_events(use_cache=False)
+            if e.get('type') in ('pane-resumed', 'pane-resume-skipped')], f'2310 AC5: {reason} writes no pane rows')
+ok(not hasattr(pane_resume, '_restart_ctx') and not hasattr(pane_resume, 'ctx_ended_without_successor'),
+   '2310 AC5: restart helpers removed')
+# Corrupt session metadata is still an undetermined read, never a launch.
 (d / 'sessions' / '123.json').write_text('{')
-with patch.object(pane_resume, '_restart_ctx') as actuator:
-    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions', restart=lambda name: True)
-    ok(not out['restarted'] and out['skipped'], '2045 AC3: corrupt session metadata is undetermined')
-    ok(not actuator.called, '2045 AC3: unknown successor cannot reach actuator')
+with patch('up.launch_planner') as launch:
+    out = pane_resume.run([end], now=NOW, sessions_dir=d / 'sessions')
+ok(not launch.called and not out['restarted'], '2310 AC5: corrupt session metadata launches nothing')
 
 for p in KIDS:
     p.kill()
