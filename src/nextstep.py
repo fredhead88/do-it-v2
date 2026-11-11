@@ -408,16 +408,6 @@ def _rebuild(c):
                        and e.get('regrade') == 'yes' and e.get('rework') != 'yes'], {'decision'})
     if regrade and (trigger is None or _time(regrade['ts']) > _time(trigger['ts'])):
         return None
-    secret = None
-    if blocked and not (trigger and _time(trigger['ts']) > _time(blocked['ts'])):
-        secret = _secret_block_trigger(evs, blocked, regrade)
-    if secret:
-        # L-spec-2209: the block is its own trigger, so neither it nor its same-attempt
-        # receipts may count as the output that consumes the rebuild it authorizes.
-        own = [e for e in evs if not _same_attempt(evs, e, secret)]
-        result = _retry_result(dict(c, evs=own), secret, 'builder', dispatched=(
-            _after(_dispatches(own), secret, DISPATCH_EVENTS) or _after(own, secret, {'build-started'})))
-        return dict(result, trigger=result.get('trigger') or _source(secret)) if result else None
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
         result = _retry_result(c, trigger, 'builder', dispatched=(
             _after(dispatched, trigger, DISPATCH_EVENTS) or _after(evs, trigger, {'build-started'})))
@@ -428,53 +418,6 @@ def _rebuild(c):
             result['reason'] = result['reason'] + '; ' + detail if result.get('retry_hold') else detail
         return dict(result, trigger=result.get('trigger') or _source(trigger)) if result else None
 
-
-
-SECRET_BLOCK = 'handin-check:secret-scan'
-
-
-def _attempt_key(evs, e):
-    """One blocked build attempt: its spawn; a legacy row without one is keyed by the build-started it follows,
-    else by its own source identity, so duplicate receipts of one attempt collapse."""
-    if e.get('spawn'):
-        return ('spawn', e['spawn'])
-    start = _latest([x for x in evs if x.get('type') == 'build-started' and _time(x['ts']) <= _time(e['ts'])],
-                    {'build-started'})
-    if start:
-        return ('start', _source(start) or start['ts'])
-    return ('source', str(_source(e) or '').rsplit(':', 1)[0], e.get('ts'))
-
-
-def _same_attempt(evs, e, block):
-    """The block itself and the receipts one builder attempt left with it."""
-    if e is block or (_source(e) and _source(e) == _source(block)):
-        return True
-    if block.get('spawn'):
-        return e.get('spawn') == block['spawn'] or (
-            not e.get('spawn') and e.get('type') in {'build-done', 'build-blocked'} and e.get('ts') == block.get('ts'))
-    return (e.get('type') in {'build-done', 'build-blocked'} and e.get('ts') == block.get('ts')
-            and _attempt_key(evs, e) == _attempt_key(evs, block))
-
-
-def _dispatches(evs):
-    return [e for e in evs if _builder_dispatch(e) and not _refusal(e)]
-
-
-def _secret_block_trigger(evs, blocked, regrade):
-    """The current handin-check:secret-scan block, only when it is the first distinct one in its authorization
-    interval (latest subject spec-written or operator decision, else the start of history). Exact reason only."""
-    if blocked.get('type') != 'build-blocked' or blocked.get('reason') != SECRET_BLOCK:
-        return None
-    if regrade and _time(regrade['ts']) > _time(blocked['ts']):
-        return None
-    marks = [e for e in evs if e.get('type') == 'spec-written'
-             or e.get('type') == 'decision' and _admitted_actor(e) == 'operator']
-    start = max((_time(e['ts']) for e in marks), default=None)
-    seen = {_attempt_key(evs, e) for e in evs if e.get('type') == 'build-blocked' and e.get('reason') == SECRET_BLOCK
-            and (start is None or _time(e['ts']) >= start)}
-    if len(seen) != 1 or _attempt_key(evs, blocked) not in seen:
-        return None
-    return blocked
 
 
 def _close(c):

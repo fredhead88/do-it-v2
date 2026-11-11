@@ -811,25 +811,6 @@ def post_backend_finish(d, config, observed):
     observed["grading_budget"] = d.grading_budget(events, "L-spec-7933")
 
 
-def handin_aware(value):
-    """Strip only the additive hand-in outcome of a checked DONE builder: the
-    handin_check / handin_reason fields and the handin-checked row. Everything
-    else must still equal the baseline."""
-    if isinstance(value, list):
-        return [handin_aware(v) for v in value
-                if not (isinstance(v, dict) and v.get("type") == "handin-checked")]
-    if not isinstance(value, dict):
-        return value
-    out = {}
-    for k, v in value.items():
-        if k == "handin_check" and v in ("clean", "undetermined"):
-            continue
-        if k == "handin_reason" and v == "handin-check:undetermined":
-            continue
-        out[k] = handin_aware(v)
-    return out
-
-
 class TestPostBackendFreshness(unittest.TestCase):
     def pairs(self, fixtures):
         candidate = Path(__file__).resolve().parent.parent
@@ -863,7 +844,7 @@ class TestPostBackendFreshness(unittest.TestCase):
                         shutil.rmtree(root)
                     signed(self.id(), dict(fixture=case, role=role, route=route,
                                            baseline=values[0], candidate=values[1]))
-                    self.assertEqual(values[0], handin_aware(values[1]) if role == "builder" else values[1])
+                    self.assertEqual(values[0], values[1])
                     self.assertEqual(len(values[1]["launches"]), 2 if route == "fallback" else 1)
                     completed.append((case, values[1], results[1]))
         return completed
