@@ -1,5 +1,6 @@
 #!/bin/bash
 # attr.sh — run the named failing tests on master and on master+each spec alone; print who adds failures.
+source "$(dirname "${BASH_SOURCE[0]}")/attrseq.sh"
 export LC_ALL=C; R=/opt/albert-scott; P=/opt/albert-scott/.venv/bin/python; OUT=/var/tmp/push/attr.txt; : > $OUT
 TESTS="${ATTR_TESTS:-tests/ci/test_path_scope_coverage.py}"   # failing ids from the batch rehearsal (brackets stripped)
 # Thinker 2026-11-05 07:00Z: run whole FILES, not ids. Rehearsal output can truncate an id ("...cache_k"); one
@@ -16,4 +17,5 @@ one(){ s=$1; W=/var/tmp/attr-$s; git -C $R worktree add -q --detach $W refs/inte
   else echo "$s CONFLICT" >> $OUT; fi
   git -C $R worktree remove --force $W; }
 for s in "$@"; do one $s & done; wait   # members in parallel: these runs use no PG lane
+attr_resolve "$OUT" one || exit $?
 echo DONE >> $OUT
