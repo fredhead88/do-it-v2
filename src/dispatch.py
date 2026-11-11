@@ -1746,6 +1746,56 @@ fold.REQUIRED["manual-dispatch"] = ("role", "reason", "outcome")
 
 CLI = cli_version()
 
+def _prefork_main_sha(project):
+    """The runner's master identity (origin preferred, local fallback) for this project; None when it cannot be proved."""
+    import precheck, grading_env
+    repo = ROOT / "repos" / project
+    try:
+        branch = os.environ.get("DOIT_MAIN") or grading_env._look_toml(HERE.parent).get("push", {}).get("main", {}).get(project)
+        if not branch:
+            head = precheck.git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).stdout.strip()
+            branch = head[len("origin/"):] if head.startswith("origin/") else next(
+                (b for b in ("main", "master") if precheck.git(repo, "show-ref", "--verify", "--quiet", "refs/heads/" + b, check=False).returncode == 0), None)
+        if not branch:
+            return None
+        for ref in ("origin/" + branch, branch):
+            try:
+                value = precheck.master_sha(repo, ref)
+            except subprocess.CalledProcessError:
+                continue
+            return value if re.fullmatch(r"[0-9a-f]{40,64}", value or "") else None
+    except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+def prefork_refusal(a):
+    """Parent-side readiness for a detached start (L-spec-2207): the reason to print before any fork, or None to proceed to the child. A start the predicate lets through still meets every in-process gate in `_main`."""
+    sys.modules.setdefault("dispatch", sys.modules[__name__])  # start_check imports dispatch; never reload this file as a second module
+    try:
+        import start_check, project_scope
+        events = fold.read_events(use_cache=False)
+        registered = project_scope.subject_project(events, a.subject)
+        if a.cwd is None:
+            project = a.project if a.project is not None else registered
+            try:
+                spawns.default_cwd(a.role, a.subject, project, ROOT)
+            except ValueError:
+                return None  # the child records its own preflight:cwd-unresolved
+        else:
+            project = a.project or pathlib.Path(spawns.resolve_cwd(a.cwd, ROOT)).name
+        if registered is not None and project != registered:
+            return None  # the child records wrong-project
+        main_sha = None
+        if a.role == "grader":
+            main_sha = _prefork_main_sha(project)
+            if main_sha is None:
+                return "bundle-pending"
+        found = start_check.refusal(a.role, a.subject, events, now=datetime.now(timezone.utc), root=ROOT,
+                                    charter=a.charter, main_sha=main_sha)
+        return found.reason if found else None
+    except Exception:
+        return "preflight:start-context-unavailable"
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("role", choices=sorted(ROLES))
@@ -1769,6 +1819,9 @@ if __name__ == "__main__":
         a._packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text() if pathlib.Path(a.packet).is_file() else ""
         if __import__("audit").HEADER not in a._packet:
             main(a)  # preserve the recorded pre-pass refusal ahead of the manual gate
+    if a.detach and a.packet != "-" and a.role in ("builder", "grader", "reviewer"):
+        if reason := prefork_refusal(a):  # before the audit write, the log open and the fork; no flag bypasses it
+            sys.exit(print(f"refused-before-start: {reason}", file=sys.stderr) or 3)
     refusal = manual_dispatch_refusal(a.role, os.environ, a.manual_override_reason)
     if refusal or ((a.manual_override_reason or "").strip() and not a.detach and manual_dispatch_refusal(a.role, os.environ, None)):
         ledger_write_guard.check(EVENTS); EVENTS.mkdir(parents=True, exist_ok=True)
