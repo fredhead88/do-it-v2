@@ -1,21 +1,91 @@
 #!/usr/bin/env python3
 """Hermetic read-count and text-change regressions for a preflight pass."""
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 import fold
+import ledger_cache
 import spec_preflight as sp
 
 NOW = datetime(2026, 11, 1, tzinfo=timezone.utc)
+SEED_SPECS = ("L-spec-9401", "L-spec-9402", "L-spec-9403", "L-spec-9404", "L-spec-9405")
+MODES = ("uncached", "cold", "warm", "busy")
+
+
+def seed(root):
+    """The common deterministic ledger for the periodic-reader suites."""
+    root = Path(root)
+    (root / "events").mkdir(parents=True, exist_ok=True)
+    (root / "content").mkdir(exist_ok=True)
+    (root / "models.toml").write_text("[seats]\nbuilder = 7\n")
+    stamp = lambda minutes: (NOW + timedelta(minutes=minutes)).isoformat()
+    rows = {"spec-writer": [], "builder": [], "executor": [], "operator": []}
+    for sid, minutes in zip(SEED_SPECS, (-10, -9, -8, -7, -5760)):
+        path = root / "content" / (sid + ".md")
+        path.write_text(sid + " source snapshot\n## Interfaces\nWrites: src/a.py\n")
+        rows["spec-writer"].append(dict(type="spec-written", subject=sid, ts=stamp(minutes),
+                                        project="do-it-v2", path=str(path), footprint=["src/a.py"]))
+    rows["builder"].append(dict(type="build-started", subject="L-spec-9402", ts=stamp(-6)))
+    # A builder cannot ship: the parser must ignore this forged-role event.
+    rows["builder"].append(dict(type="shipped", subject="L-spec-9404", ts=stamp(-5)))
+    rows["executor"].append(dict(type="spec-killed", subject="L-spec-9403", ts=stamp(-4)))
+    rows["operator"].append(dict(type="correction", subject="L-spec-9401", ts=stamp(-3),
+                                 ref="L-spec-writer-seed.jsonl:1", set={"project": "seed-corrected"}))
+    for actor, events in rows.items():
+        (root / "events" / f"L-{actor}-seed.jsonl").write_text(
+            "".join(json.dumps(e) + "\n" for e in events))
+
+
+@contextmanager
+def cache_mode(mode, root):
+    """Run reads in one of the four equality modes; yields the read-call log."""
+    calls, real = [], fold.read_events
+
+    def logged(*args, **kwargs):
+        calls.append(dict(kwargs, scope=str(fold.ROOT)))
+        if mode == "uncached":
+            kwargs["use_cache"] = False
+        return real(*args, **kwargs)
+
+    def busy(*args, **kwargs):
+        raise ledger_cache.LockTimeout("fixture busy")
+
+    with ExitStack() as stack:
+        if mode == "cold":
+            shutil.rmtree(Path(root) / "cache", ignore_errors=True)
+        stack.enter_context(mock.patch.object(fold, "read_events", side_effect=logged))
+        if mode == "busy":
+            stack.enter_context(mock.patch.object(ledger_cache, "read", side_effect=busy))
+        yield calls
+
+
+# Frozen from the unmodified base readers (0eeb8ff, real reference parser).
+FROZEN = {
+    'run:L-spec-9401':
+        '{"spec": "L-spec-9401", "findings": [{"check": 1, "id": "seed-corrected", "line": "L-spec-9401 source snapshot"}], "red_on_master": [], "undetermined": []}',
+    'run:L-spec-9402':
+        '{"spec": "L-spec-9402", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9402 source snapshot"}], "red_on_master": [], "undetermined": []}',
+    'run:L-spec-9403':
+        '{"spec": "L-spec-9403", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9403 source snapshot"}], "red_on_master": [], "undetermined": []}',
+    'run:L-spec-9404':
+        '{"spec": "L-spec-9404", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9404 source snapshot"}], "red_on_master": [], "undetermined": []}',
+    'run:L-spec-9405':
+        '{"spec": "L-spec-9405", "findings": [{"check": 1, "id": "do-it-v2", "line": "L-spec-9405 source snapshot"}], "red_on_master": [], "undetermined": []}',
+    'tick':
+        '[0, "spec-preflight: processed=2 deferred=0 (tick budget 240s); skipped=3 (requires a valid timestamp under 3 days old, no later build-started, and no closed state); lag_s=L-spec-9401:600.0, L-spec-9404:420.0; deferred specs=none\\n", "", [["{doit}", "append", "spec-preflight", "L-spec-9401", "project=seed-corrected", "spec:=\\"L-spec-9401\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"seed-corrected\\", \\"line\\": \\"L-spec-9401 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"hook _discover_coupled: ValueError\\"]", "lag_s:=600.0"], ["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[{\\"check\\": 1, \\"id\\": \\"do-it-v2\\", \\"line\\": \\"L-spec-9404 source snapshot\\"}]", "red_on_master:=[]", "undetermined:=[\\"hook _discover_coupled: ValueError\\"]", "lag_s:=420.0"]]]',
+    'append':
+        '[["{doit}", "append", "spec-preflight", "L-spec-9404", "project=do-it-v2", "spec:=\\"L-spec-9404\\"", "findings:=[]", "red_on_master:=[]", "undetermined:=[]"]]',
+}
 
 
 class ReadTests(unittest.TestCase):
@@ -111,6 +181,63 @@ class ReadTests(unittest.TestCase):
 
     def recheck(self, sid):
         return f"preflight recheck next pass: {sid} spec text changed during the pass\n"
+
+    def answer(self, calls, mode):
+        """Serialized answers for the seed; asserts the read pattern per entrance."""
+        root = str(self.root)
+        cached = {"scope": root}
+        pattern = [cached] + ([{"use_cache": False, "scope": root}] if mode == "busy" else [])
+        out = {}
+
+        def phase(name, reads, callback):
+            start = len(calls)
+            value = callback()
+            self.assertEqual(calls[start:], pattern * reads, (mode, name))
+            return value
+
+        for sid in SEED_SPECS:
+            out["run:" + sid] = json.dumps(phase(sid, 1, lambda: sp.run(sid, root=self.root, now=NOW)))
+        self.appends.clear()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = phase("tick", 1, lambda: sp.tick(root=self.root, now=NOW))
+        out["tick"] = json.dumps([code, stdout.getvalue(), stderr.getvalue(),
+                                  [["{doit}" if a == str(sp.DOIT) else a for a in argv] for argv in self.appends]])
+        body = dict(spec="L-spec-9404", findings=[], red_on_master=[], undetermined=[])
+        self.appends.clear()
+        phase("append", 1, lambda: sp._append(self.root, body))
+        out["append"] = json.dumps([["{doit}" if a == str(sp.DOIT) else a for a in argv] for argv in self.appends])
+        return out
+
+    def test_cache_modes_and_busy_fallback(self):
+        self.feedback = False
+        seed(self.root)
+        tree = lambda: {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for d in ("events", "content") for p in sorted((self.root / d).iterdir())}
+        before = tree()
+        answers = {}
+        for mode in MODES:
+            with cache_mode(mode, self.root) as calls:
+                answers[mode] = self.answer(calls, mode)
+            if mode == "cold":
+                self.assertTrue(any((self.root / "cache").iterdir()))
+            self.assertEqual(tree(), before, mode)
+        self.assertEqual(set(FROZEN), set(answers["uncached"]))
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(answers[mode], answers["uncached"])
+                self.assertEqual(answers[mode], FROZEN)
+        # Supplied events and spec_written never read, even with a busy cache.
+        with cache_mode("uncached", self.root):
+            events = sp._events(self.root)
+        written = next((e for e in events if e["type"] == "spec-written"
+                        and e.get("subject") == "L-spec-9404"), None)
+        self.assertIsNotNone(written, "seeded spec-written event missing from the ledger read")
+        with cache_mode("busy", self.root) as calls:
+            sp.run("L-spec-9404", root=self.root, now=NOW, events=events)
+            sp._append(self.root, dict(spec="L-spec-9404", findings=[], red_on_master=[],
+                                       undetermined=[]), spec_written=written)
+            self.assertEqual(calls, [])
 
     def test_one_read_and_order(self):
         for count in (3, 6):

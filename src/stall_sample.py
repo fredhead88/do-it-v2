@@ -11,6 +11,7 @@ import threading
 import autodispatch
 import dispatch
 import fold
+import ledger_cache
 from pace import _root, _time, _iso, _record, _read_samples
 
 _CONTEXT_LOCK = threading.RLock()
@@ -42,7 +43,13 @@ def sample(now, *, root=None):
     try:
         row['builder_capacity'] = autodispatch.capacity(root=root)
         with _fold_root(root, now):
-            events = fold.read_events()
+            try:
+                events = fold.read_events()
+            except ledger_cache.ReentrantRead:
+                raise
+            except ledger_cache.LockTimeout:
+                # Busy cache: one reference-parser read in the same context.
+                events = fold.read_events(use_cache=False)
             rows = fold.stall_rows(events, now=now)
             buckets, holds = defaultdict(list), {}
             for item in rows:
