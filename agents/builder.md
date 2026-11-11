@@ -127,6 +127,15 @@ to break anything", "I will verify after committing".
 
 **Never write a literal commit sha into the card** (2026-09-23, 4 grader refusals in one night). In any `check`, `evidence` or prose field, refer to the base as `$(git merge-base HEAD origin/master)`, never as its hex id. The grader's Blindness rule strips `base_sha`, and a card that repeats it makes `doit packet grader` refuse the whole packet. The card's own `base_sha` and `ready_sha` fields are the only place a sha belongs.
 
+**Hand-in check** (L-spec-2209). After your final commit and before you return a DONE card, run
+`doit handin-check <subject> --cwd <worktree>` on the finished single commit. Exit 0 permits hand-in.
+Exit 1 is a finding: repair it by amending or rewriting the single spec commit, with no fix-up commit,
+then re-run handin-check on the new HEAD and report that new HEAD as `identity.ready_sha`, or return
+BLOCKED with the finding. Exit 2 is undetermined: you may return DONE with the uncertainty reported, but
+you must not describe it as a passed check, and the merge gate remains authoritative. The wrapper checks
+independently after you return, so your own run never replaces it. Only secret-scan runs early; the merge
+gate keeps all of its checks, unchanged.
+
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). When a verify step or `review_path` fails on a
 test that you did not touch, do not work around it, edit it or escalate it.
 First run `doit base-red <project> "$(git merge-base HEAD origin/<main>)"`
