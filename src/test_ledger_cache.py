@@ -811,7 +811,8 @@ print(json.dumps(fold.read_events()))
         import push_origin
         import pr_closeout
         sites = ('planner', 'relay', 'executor-top', 'executor-settled',
-                 'executor-pane', 'launch', 'record-first', 'record-second')
+                 'executor-pane', 'launch', 'bundle-launch', 'bundle-exhaustion',
+                 'record-first', 'record-second')
         call_count = 0
         for module in (up, tick):
             tree = ast.parse(Path(module.__file__).read_text())
@@ -892,6 +893,19 @@ print(json.dumps(fold.read_events()))
                         'action', 'build', 'tick', None, '', None, '')
                     self.assertIsNone(tick.launch(step, dispatcher=SimpleNamespace(events=None)))
                     self.assertEqual(read.call_count, 1)
+                    emit.assert_not_called()
+                elif site.startswith('bundle-'):
+                    step = nextstep.Step('L-spec-9001', 'spec', 'checking',
+                        'action', 'bundle', 'tick', 'L-builder-fixture.jsonl:1',
+                        'retries-exhausted: bundle; checks failed', None, '')
+                    child = mock(tick.subprocess, 'Popen')
+                    if site == 'bundle-launch':
+                        self.assertIsNone(tick.launch(step, dispatcher=SimpleNamespace(events=None)))
+                    else:
+                        result = tick._record_retry_exhaustion(step, [], None)
+                        self.assertIn('failed durable exhaustion: ' + message, result)
+                    self.assertEqual(read.call_count, 1)
+                    child.assert_not_called()
                     emit.assert_not_called()
                 else:
                     intake = mock(tick.intake, 'run', return_value={})

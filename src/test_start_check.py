@@ -413,13 +413,13 @@ class GateParityTests(ScratchTests):
         with patch('subprocess.Popen') as launch:
             with self.assertRaisesRegex(RuntimeError, 'bundle-pending'):
                 self.gate(packet='wrong digest')
-            launch.assert_called_once()
+            launch.assert_not_called()
         self.bundle['bundle_key'] = 'stable-unreadable'
         self.path.unlink()
         with patch('subprocess.Popen') as launch:
             with self.assertRaisesRegex(RuntimeError, 'bundle-pending'):
                 self.gate()
-            launch.assert_called_once()
+            launch.assert_not_called()
 
     def test_failure_order_and_wall_cap_claim(self):
         failure = dict(self.bundle, type='evidence-bundle-failed', reason='broken')
@@ -439,8 +439,8 @@ class GateParityTests(ScratchTests):
             with patch('subprocess.Popen') as launch:
                 with self.assertRaisesRegex(RuntimeError, 'wall-cap-retry'):
                     grader_packet.gate(events, SUBJECT, '', lambda *a, **kw: emitted.append(kw), fail)
-                self.assertEqual(launch.call_count, int(not claimed))
-                self.assertEqual(len(emitted), int(not claimed))
+                launch.assert_not_called()
+                self.assertEqual(emitted, [])
 
 
 class DuplicateEligibilityTests(ScratchTests):

@@ -16,6 +16,7 @@ from itertools import chain
 import ledger_files
 import ledger_cache
 import argparse, fcntl, hashlib, json, os, pathlib, re, socket, sys, time
+import subprocess
 from datetime import datetime, timedelta, timezone
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import carry, dispatch, fold, intake, notes, pane_resume, panes, tree_cleanup  # noqa: E402
@@ -274,7 +275,7 @@ ROUTINE_ROLES = dict(build='builder', grade='grader', review='reviewer',
                      rebuild='builder', regrade='grader', audit='spec-auditor')
 ROUTINE_ACTIONS = set(ROUTINE_ROLES)
 AUDIT_PASS_MAX = 6
-LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge', 'merge-direct'}
+LAUNCH_ACTIONS = ROUTINE_ACTIONS | {'merge', 'merge-direct', 'bundle'}
 MERGE_DIRECT_PROBLEM = 'merge-direct-pass-failed'
 _PASS_MERGED = []  # (spec, sha) merged by the pass in flight; read by the failure reporter
 
@@ -304,8 +305,11 @@ def _report_merge_pass_failure(merged, exc):
     import dispatch
     for spec, sha in merged:
         try:
+            events = _launch_events()
+            if events is None:
+                continue
             if any(e.get('type') == 'problem-occurred' and e.get('problem') == MERGE_DIRECT_PROBLEM
-                   and e.get('subject') == spec and e.get('sha') == sha for e in fold.read_events()):
+                   and e.get('subject') == spec and e.get('sha') == sha for e in events):
                 continue
             dispatch.emit(tick_path(), {'subject': spec}, 'problem-occurred',
                           problem=MERGE_DIRECT_PROBLEM, sha=sha,
@@ -393,6 +397,122 @@ def _record_held_skips(events, specs, *, reporter=None):
                                            subject=sid, reason=reason, ts=dispatch.now()))
 
 
+def _bundle_receipt(identity, reason, **fields):
+    refused = dispatch.emit(tick_path(), {}, 'autodispatch-skipped', strict=True,
+                            action='bundle', reason=reason, **identity, **fields)
+    if refused:
+        raise ValueError('bundle receipt refused: ' + str(refused))
+
+
+def _checker_live(receipt):
+    if receipt.get('host') != socket.gethostname() or not receipt.get('pid'):
+        return False
+    pid = receipt['pid']
+    if not panes._is_live(pid, {'procStart': receipt.get('proc_start')}):
+        return False
+    try:
+        raw = pathlib.Path(f'/proc/{int(pid)}/stat').read_text()
+        return raw[raw.rindex(')') + 2:].split()[0] != 'Z'
+    except OSError:
+        return False
+
+
+def _launch_bundle(step, *, dispatcher, reconcile_only=False):
+    """Serialize fresh read/claim/launch, also for callers outside run_steps."""
+    import build_runner
+    import grader_packet
+    import nextstep
+    if getattr(dispatcher, 'dry_run', False):
+        return None
+    if not re.fullmatch(r'L-spec-\d+', step.item):
+        raise ValueError('invalid bundle subject')
+    state = fold.ROOT / 'state'
+    state.mkdir(parents=True, exist_ok=True)
+    with (state / ('bundle-' + step.item + '.lock')).open('a') as admission_lock:
+        fcntl.flock(admission_lock, fcntl.LOCK_EX)
+        try:
+            events = ledger_cache.tail_refresh()
+        except ledger_cache.LockTimeout as exc:
+            print(str(exc), file=sys.stderr)
+            return None
+        raw_events = events
+        events = __import__('bundle_wait').build_view(events, step.item)
+        evs = [e for e in events if e.get('subject') == step.item]
+        identity = nextstep._bundle_context(evs, step.item, step.trigger)
+        if identity is None:
+            return None
+        now = getattr(dispatcher, 'now', datetime.now(timezone.utc))
+        if nextstep._bundle_usable(evs, step.item, identity['sha']):
+            return None
+        if grader_packet.snapshot_identity_missing(evs, step.item, identity['sha']):
+            return None
+        claims = [e for e in evs if e.get('type') == 'autodispatch-skipped'
+                  and e.get('reason') == 'bundle-claim']
+        for claim in claims:
+            receipts = [e for e in evs if e.get('acquisition_key') == claim.get('acquisition_key')
+                        and e.get('attempt') == claim.get('attempt')
+                        and e.get('claimed_at') == claim.get('claimed_at')]
+            if any(e.get('reason') == 'bundle-launch-failed' for e in receipts):
+                continue
+            terminal = any(e.get('type') in {'evidence-bundle', 'evidence-bundle-failed'}
+                           and grader_packet._same_sha(e.get('sha'), claim['sha'])
+                           and e.get('criteria') is None
+                           and __import__('evidence_revision').current(evs, step.item, e)
+                           and nextstep._time(e['ts']) >= nextstep._time(claim['claimed_at'])
+                           for e in evs)
+            if terminal:
+                continue
+            launched = next((e for e in receipts if e.get('reason') == 'bundle-launched'), None)
+            if launched and _checker_live(launched):
+                return None
+            expired = now >= nextstep._time(claim['expires_at'])
+            if not expired and not launched:
+                return None
+            # A runner may outlive its launcher or be started manually. Probe
+            # its existing lock before closing a claim or launching a checker.
+            locks = fold.ROOT / 'evidence/locks'
+            for path in locks.glob(step.item + '-*.lock'):
+                with path.open('a') as runner_lock:
+                    try:
+                        fcntl.flock(runner_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        return None
+            fields = {key: claim[key] for key in identity}
+            _bundle_receipt(fields, 'bundle-launch-failed', attempt=claim['attempt'],
+                            claimed_at=claim['claimed_at'], expires_at=claim['expires_at'],
+                            detail='checker-receipt-timeout' if expired else 'checker-vanished')
+            if claim.get('acquisition_key') == identity['acquisition_key']:
+                return None
+        if reconcile_only:
+            return None
+        # A stale caller cannot release a lifecycle hold or dispatch an old SHA.
+        specs = fold.fold(raw_events)[0]
+        mains = {} if raw_events is not events else None
+        fresh = next((s for s in nextstep.next_steps(raw_events, specs, now, __import__('lane_rules').load(), mains=mains)
+                      if s.item == step.item and s.item_kind == 'spec'), None)
+        if fresh is None or fresh.action != 'bundle' or fresh.trigger != step.trigger:
+            return None
+        history = nextstep._bundle_history(evs, identity, now)
+        if history.live or history.exhausted or history.next_retry_at and now < history.next_retry_at:
+            return None
+        cap = build_runner.grading_env._project_row(identity['project']).get('runner_wall_cap_s', build_runner.WALL_CAP)
+        if type(cap) is not int or cap <= 0:
+            raise ValueError('invalid runner_wall_cap_s')
+        fields = dict(attempt=history.n_failed + 1, claimed_at=now.isoformat(),
+                      expires_at=(now + timedelta(seconds=cap + 60)).isoformat())
+        _bundle_receipt(identity, 'bundle-claim', **fields)
+        try:
+            child = subprocess.Popen(['doit', 'run-checks', step.item, '--sha', identity['sha']],
+                                     start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError as exc:
+            _bundle_receipt(identity, 'bundle-launch-failed', **fields, detail=type(exc).__name__)
+            raise ValueError('bundle launch failed: ' + type(exc).__name__) from exc
+        _bundle_receipt(identity, 'bundle-launched', **fields, pid=child.pid,
+                        host=socket.gethostname(), proc_start=panes.proc_start(child.pid))
+        return child.pid
+
+
 def launch(step, *, dispatcher):
     """Launch precisely one tick-owned routine Step; failures remain standing."""
     import autodispatch
@@ -408,6 +528,8 @@ def launch(step, *, dispatcher):
         return None
     if step.reason.startswith('undetermined:'):
         return None
+    if step.action == 'bundle':
+        return _launch_bundle(step, dispatcher=dispatcher)
     events = getattr(dispatcher, 'events', None)
     if events is None:
         events = _launch_events()
@@ -586,10 +708,46 @@ def _steps(events, specs, now):
 def _record_retry_exhaustion(step, events, now):
     import nextstep
     import attempts
-    match = re.match(r'retries-exhausted: (builder|grader|reviewer);', step.reason)
+    match = re.match(r'retries-exhausted: (builder|grader|reviewer|bundle);', step.reason)
     if not match:
         return None
     role = match.group(1)
+    if role == 'bundle':
+        state = fold.ROOT / 'state'
+        state.mkdir(parents=True, exist_ok=True)
+        with (state / ('bundle-' + step.item + '.lock')).open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            # Fresh durable state owns both retry authority and dedup, including
+            # stale-snapshot and concurrent tick callers.
+            try:
+                raw_own = [e for e in ledger_cache.tail_refresh() if e.get('subject') == step.item]
+                own = __import__('bundle_wait').build_view(raw_own, step.item)
+            except ledger_cache.LockTimeout as exc:
+                print(str(exc), file=sys.stderr)
+                return 'failed durable exhaustion: ' + str(exc)
+            fresh = next((s for s in nextstep.next_steps(raw_own, fold.fold(raw_own)[0], now,
+                          __import__('lane_rules').load(), mains={} if own is not raw_own else None) if s.item == step.item), None)
+            if fresh is None or fresh.trigger != step.trigger or not fresh.reason.startswith('retries-exhausted: bundle;'):
+                return None
+            identity = nextstep._bundle_context(own, step.item, step.trigger)
+            if identity is None or nextstep._bundle_usable(own, step.item, identity['sha']):
+                return None
+            history = nextstep._bundle_history(own, identity, now)
+            if not history.exhausted:
+                return None
+            if any(e.get('type') == 'escalation-blocking' and e.get('kind') == 'retries-exhausted'
+                   and (e.get('role'), e.get('ref'), e.get('acquisition_key')) ==
+                       ('bundle', step.trigger, identity['acquisition_key'])
+                   and nextstep._admitted_actor(e) in {'tick','executor','thinker','operator'} for e in own):
+                return None
+            reason = dispatch.emit(tick_path(), {'subject':step.item}, 'escalation-blocking', strict=True,
+                kind='retries-exhausted', owner='thinker', role='bundle', ref=step.trigger,
+                acquisition_key=identity['acquisition_key'], reasons=list(history.reasons),
+                default='leave bundle acquisition stopped pending a human decision',
+                deadline=(now+timedelta(hours=24)).isoformat(),
+                revert='no automatic action was taken; nothing to revert')
+            return ('failed durable exhaustion: '+str(reason) if reason else
+                    'escalated '+step.item+' retries-exhausted')
     own = [e for e in events if e.get('subject') == step.item]
     trigger = next((e for e in own if nextstep._source(e) == step.trigger), None)
     if trigger is None or not step.trigger:
@@ -704,6 +862,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     out.append(f"{'would act' if dry_run else 'acted'} {step.item}: zero grader criteria; automatic pass")
                     continue
                 if not dry_run:
+                    if step.reason == 'bundle in flight':
+                        _launch_bundle(step, dispatcher=runner, reconcile_only=True)
                     try:
                         exhaustion = _record_retry_exhaustion(step, events, now)
                     except Exception as exc:
@@ -769,7 +929,8 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     continue
                 if gate is not None and not gate_disabled:
                     try:
-                        decision = gate.check(step.item, role or 'window_gate', action=step.action, since=step.since)
+                        decision = gate.check(step.item, 'grader' if step.action == 'bundle' else role or 'window_gate',
+                                              action='grade' if step.action == 'bundle' else step.action, since=step.since)
                         if decision.hold:
                             out.append(f'resource-wait {step.item} {step.action}')
                             continue
@@ -809,13 +970,13 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     else:
                         out.append(f'hold {step.item}: standing dispatch failure')
                 except ValueError as exc:
-                    if reporter:
+                    if reporter and step.action != 'bundle':
                         reporter.fail(step.item, exc, phase='launch')
                     out.append(f'failed {step.item} {step.action}: {exc}')
             except Exception as exc:
                 if merged:
                     _report_merge_pass_failure(merged, exc)
-                if reporter:
+                if reporter and step.action != 'bundle' and step.reason != 'bundle in flight':
                     reporter.fail(step.item, exc, phase='dispatch')
                 detail = ': ' + dispatch._failure_detail(exc) if isinstance(exc, ValueError) else ''
                 out.append(f'failed {step.item} {step.action}: {type(exc).__name__}{detail}')

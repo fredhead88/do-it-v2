@@ -87,7 +87,10 @@ class LaneNotReadyTests(unittest.TestCase):
                   event('evidence-bundle', -10, sha='tip')]
         specs = {SID: dict(state='building')}
         old = self.was_parked(events, specs=specs)
-        new = self.one(events, specs=specs)
+        # This classification fixture represents a validated full bundle;
+        # bundle contents and digest validation have their own regression tests.
+        with patch.object(ns, '_bundle_usable', return_value=True):
+            new = self.one(events, specs=specs)
         self.assertEqual((new.state, new.action, new.owner), ('action', 'grade', 'tick'))
         self.report(1, 'bundle arrived', new, old)
 

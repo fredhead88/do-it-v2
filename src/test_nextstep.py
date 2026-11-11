@@ -1493,26 +1493,262 @@ class GateToolingTests(unittest.TestCase):
             self.assertNotIn(self.one(base + [blocked, built]).action, {'rebuild', 'gate', 'enqueue'})
 
 
+class BundleStepTests(unittest.TestCase):
+    """Snapshot selection never buys a grader to discover missing evidence."""
+
+    steps = NextStepTests.steps
+    one = NextStepTests.one
+
+    def setUp(self):
+        from test_factory_evidence import ReadOnlyBundleTests
+        self.fixture = ReadOnlyBundleTests(methodName='runTest')
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.rules = lr.load()
+        self.now = datetime(2026, 11, 6, 1, tzinfo=timezone.utc)
+        self.rows = [event('spec-written', -120),
+                     dict(self.fixture.build, status='DONE', actor='builder', _src='L-builder-fixture.jsonl:1')]
+
+    def selected(self, rows):
+        return self.one(rows, now=self.now)
+
+    def signed(self, name, matrix):
+        body = json.dumps(matrix, sort_keys=True, default=str)
+        print(json.dumps(dict(url='cli://bundle/' + name, status=0,
+                              body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+
+    def test_selection(self):
+        matrix = {}
+        for name, extra, expected in [
+                ('done', [], 'bundle'),
+                ('worked', [], 'bundle'),
+                ('regrade', [event('decision', regrade='yes')], 'bundle'),
+                ('blocked', [event('build-done', status='BLOCKED')], None),
+                ('missing-sha', [event('build-done', status='DONE')], 'grade'),
+                ('close', [event('decision', close='yes')], 'close'),
+                ('dependency', [event('dependency-hold', waits_for='L-spec-9999')], None),
+                ('terminal', [event('spec-closed', disposition='closed-unbuilt')], None),
+                ('rebuild', [event('decision', rework='yes')], 'rebuild'),
+                ('stale-queue', [event('queue-add', -110, project='do-it-v2', sha='c'*40)], 'bundle')]:
+            with self.subTest(name=name):
+                rows = self.rows + extra
+                if name == 'stale-queue':
+                    rows = [self.rows[0], event('build-done', -115, actor='builder', status='DONE',
+                                               ready_sha='c'*40), extra[0], self.rows[-1]]
+                if name == 'worked':
+                    rows.append(event('worked', role='builder', ts='2026-11-06T00:00:01Z'))
+                if name in {'blocked', 'missing-sha'}:
+                    rows[-1]['ts'] = self.rows[-1]['ts']
+                    rows[-1]['actor'] = 'builder'
+                if name in {'close', 'dependency', 'terminal', 'rebuild', 'regrade'}:
+                    rows[-1]['ts'] = '2026-11-06T00:00:01Z'
+                steps = [s for s in self.steps(rows, now=self.now) if s.item == SID]
+                if name == 'terminal':
+                    self.assertFalse(any(s.action in {'grade', 'regrade', 'bundle'} for s in steps))
+                    matrix[name] = [asdict(s) for s in steps]
+                    continue
+                self.assertEqual(len(steps), 1)
+                step = steps[0]
+                self.assertEqual(step.action, expected, step)
+                if expected == 'bundle':
+                    self.assertEqual((step.stage, step.owner, step.state), ('checking', 'tick', 'action'))
+                matrix[name] = asdict(step)
+        self.signed('selection', matrix)
+
+    def test_evidence_gate(self):
+        from copy import deepcopy
+        f = self.fixture
+        matrix = {}
+        cases = ['valid', 'abbreviated', 'other-subject', 'old-sha', 'subset', 'missing',
+                 'bad-digest', 'escape', 'amended', 'rebuild', 'newer-failure',
+                 'missing-identity', 'inconsistent-identity', 'cached']
+        original = deepcopy(f.data)
+        for name in cases:
+            with self.subTest(name=name):
+                f.publish(original)
+                evidence = dict(f.event)
+                rows = deepcopy(self.rows)
+                expected = 'bundle'
+                if name in {'valid', 'abbreviated', 'cached'}:
+                    expected = 'grade'
+                if name == 'abbreviated': rows[-1]['ready_sha'] = f.sha[:9]
+                if name == 'other-subject': evidence['subject'] = 'L-spec-9002'
+                if name == 'old-sha': evidence['sha'] = 'd'*40
+                if name == 'subset': evidence['criteria'] = ['AC1']
+                if name == 'missing': evidence['path'] += '.absent'
+                if name == 'bad-digest': evidence['bundle_sha256'] = 'bad'
+                if name == 'escape': evidence['path'] = str(f.root / 'outside.json')
+                if name == 'rebuild': rows[-1]['ts'] = '2026-11-06T00:02:00Z'
+                if name in {'missing-identity', 'inconsistent-identity'}:
+                    data = deepcopy(original)
+                    if name == 'missing-identity': data.pop('master_sha')
+                    else: data['base_sha'] = 'e'*40
+                    f.publish(data)
+                    evidence = dict(f.event)
+                    expected = None
+                rows.append(evidence)
+                if name == 'amended':
+                    rows.append(event('spec-amended', ts='2026-11-06T00:03:00Z'))
+                if name == 'newer-failure':
+                    rows.append(event('evidence-bundle-failed', sha=f.sha, reason='checks failed',
+                                      ts='2026-11-06T00:03:00Z'))
+                before = f.snapshot()
+                with f.no_effects(), patch.dict(os.environ, DOIT_ROOT=str(f.root)):
+                    for _ in range(2):
+                        step = self.selected(rows)
+                        self.assertEqual(step.action, expected, step)
+                        if expected is None: self.assertEqual(step.reason, 'undetermined: bundle identity')
+                    import tick
+                    tick.run_steps(rows, specs_for(rows), self.now, dry_run=True, steps=[step])
+                self.assertEqual(before, f.snapshot())
+                matrix[name] = asdict(step)
+        f.publish(original)
+        f.test_default_lookup_keeps_live_validation_and_reuse_receipt()
+        with f.no_effects():
+            regrade = self.selected(self.rows + [f.event, event('decision', regrade='yes',
+                                                              ts='2026-11-06T00:03:00Z')])
+        self.assertEqual(regrade.action, 'regrade')
+        matrix['regrade'] = asdict(regrade)
+        self.signed('evidence', matrix)
+
+    def test_retry_boundaries(self):
+        import attempts
+        matrix = []
+        start = ns._time(self.rows[-1]['ts']) + timedelta(seconds=2)
+        for kind in ('checks failed', 'wall cap exceeded', 'launch', 'silent', 'dead', 'paired'):
+            for refusal in ('bundle-pending', 'lock', 'duplicate-dispatch', 'dispatch-in-progress'):
+                rows = deepcopy(self.rows)
+                identity = ns._bundle_context(rows, SID, rows[-1]['_src'])
+                for count in range(attempts.MAX_ATTEMPTS + 1):
+                    with self.subTest(kind=kind, refusal=refusal, count=count):
+                        h = ns._bundle_history(rows, identity, self.now)
+                        self.assertEqual(h.n_failed, count)
+                        if count:
+                            instant = ns._time(rows[-1]['ts'])
+                            self.assertEqual(ns._bundle_history(rows, identity, instant).n_failed, count)
+                        ref = event('spawn-failed', ts=(start-timedelta(seconds=1)).isoformat(),
+                                    role='grader', spawn='L-grader-9990', reason=refusal,
+                                    why='another dispatch holds the subject lock')
+                        # A lock refusal uses the existing dispatch-in-progress vocabulary.
+                        if refusal == 'lock': ref['reason'] = 'dispatch-in-progress'
+                        test_rows = rows + [ref]
+                        due = h.next_retry_at or (failed+timedelta(seconds=1) if count else start)
+                        moments = (due-timedelta(microseconds=1), due) if count and not h.exhausted else (due,)
+                        for moment in moments:
+                            step = self.one(test_rows, now=moment)
+                            exhausted = count == attempts.MAX_ATTEMPTS
+                            expected = None if exhausted or moment < due else 'bundle'
+                            self.assertEqual(step.action, expected, step)
+                            self.assertEqual(step.trigger, identity['ref'])
+                            self.assertEqual(step.attempt, min(count+1, attempts.MAX_ATTEMPTS))
+                            if exhausted:
+                                self.assertIn('retries-exhausted: bundle', step.reason)
+                                for reason in h.reasons: self.assertIn(reason, step.reason)
+                            paid = attempts.history(ns._grader_history(test_rows)[0], rows[1], 'grader', now=moment)
+                            self.assertEqual((paid.n_failed, paid.consumed), (0, False))
+                            matrix.append(dict(case=kind, refusal=refusal, failures=count,
+                                               due=str(h.next_retry_at), now=str(moment),
+                                               attempt=step.attempt, action=step.action, reason=step.reason))
+                        if count == attempts.MAX_ATTEMPTS: break
+                        claimed = max(due, start) + timedelta(seconds=1)
+                        failed = claimed + timedelta(seconds=1)
+                        common = dict(identity, attempt=count+1, claimed_at=claimed.isoformat(),
+                                      expires_at=(claimed+timedelta(seconds=60)).isoformat())
+                        if kind in ('launch', 'silent', 'dead', 'paired'):
+                            rows.append(event('autodispatch-skipped', ts=claimed.isoformat(),
+                                              reason='bundle-claim', action='bundle', **common))
+                            detail = {'launch':'FileNotFoundError', 'silent':'checker-receipt-timeout',
+                                      'dead':'checker-vanished', 'paired':'checker-vanished'}[kind]
+                            rows.append(event('autodispatch-skipped', ts=failed.isoformat(),
+                                              reason='bundle-launch-failed', action='bundle', detail=detail, **common))
+                        if kind in ('checks failed', 'wall cap exceeded', 'paired'):
+                            rows.append(event('evidence-bundle-failed', ts=failed.isoformat(),
+                                              sha=self.fixture.sha, reason=kind,
+                                              reason_code='wall-cap' if kind == 'wall cap exceeded' else 'checks'))
+                # A new build and a revision each own a new acquisition identity.
+                for renewed in (dict(rows[1], ts=(failed+timedelta(seconds=1)).isoformat(),
+                                     _src='L-builder-renewed.jsonl:1'),
+                                event('spec-amended', ts=(failed+timedelta(seconds=1)).isoformat())):
+                    spec_path = self.fixture.root/'content'/f'{SID}.md'
+                    if renewed['type'] == 'spec-amended': spec_path.write_text(self.fixture.text+'Revised.\n')
+                    reset = self.one(rows+[renewed], now=failed+timedelta(minutes=1))
+                    spec_path.write_text(self.fixture.text)
+                    self.assertEqual((reset.action, reset.attempt), ('bundle', 1), reset)
+                # Late usable success releases acquisition even after the retry cap.
+                success = dict(self.fixture.event, ts=(failed+timedelta(seconds=1)).isoformat())
+                self.assertEqual(self.one(rows+[success], now=failed+timedelta(minutes=1)).action, 'grade')
+        self.signed('retry-boundaries', matrix)
+
+    def test_receiver_safety(self):
+        import grader_packet as gp
+        class Refused(Exception): pass
+        def fail(message, **fields): raise Refused(fields['reason'])
+        matrix = {}
+        f = self.fixture
+        gp_bundle = gp.bundle_for
+        with patch.object(gp.subprocess, 'Popen', side_effect=AssertionError('receiver checker launch')), \
+                patch.object(dispatch, 'run_codex', side_effect=AssertionError('paid entry')), \
+                patch.object(dispatch, 'run_seat', side_effect=AssertionError('paid entry')), \
+                patch.object(gp, 'bundle_for', wraps=lambda *a, **kw: gp_bundle(*a, **kw, identity=(f.base, 'c'*40, None))), \
+                patch.object(__import__('build_runner'), '_event'):
+            for mode in ('attached', 'detached'):
+                for name in ('missing', 'stale', 'invalid', 'failed', 'wall-cap', 'wall-cap-retried', 'digest', 'usable'):
+                    rows = deepcopy(self.rows)
+                    emitted = []
+                    if name in ('stale', 'invalid', 'digest', 'usable'):
+                        evidence = dict(f.event)
+                        if name == 'stale': evidence['ts'] = rows[1]['ts']
+                        if name == 'invalid': evidence['bundle_sha256'] = 'bad'
+                        rows.append(evidence)
+                    if name in ('failed', 'wall-cap', 'wall-cap-retried'):
+                        rows.append(event('evidence-bundle-failed', sha=f.sha, ts='2026-11-06T00:02:00Z',
+                                          reason='wall cap exceeded' if name.startswith('wall-cap') else 'checks failed'))
+                    if name == 'wall-cap-retried':
+                        rows.append(event('infra-failure', role='grader', ts='2026-11-06T00:03:00Z'))
+                    packet = 'bundle_sha256: `' + (f.event['bundle_sha256'] if name == 'usable' else 'wrong') + '`'
+                    expected = ('wall-cap-retry' if name == 'wall-cap-retried' else 'wall-cap' if name == 'wall-cap'
+                                else 'preflight:runner' if name == 'failed' else 'bundle-pending')
+                    if name == 'usable':
+                        self.assertIsNotNone(gp.gate(rows, SID, packet, lambda *a, **kw: emitted.append(kw), fail))
+                    else:
+                        with self.assertRaisesRegex(Refused, expected):
+                            gp.gate(rows, SID, packet, lambda *a, **kw: emitted.append(kw), fail)
+                    self.assertFalse(any(e.get('reason') == 'wall-cap-retry' for e in emitted))
+                    matrix[mode+'/'+name] = dict(refusal=expected if name != 'usable' else None, metadata=emitted)
+        self.signed('receiver-safety', matrix)
+
+    def test_empty_grade_preserved(self):
+        from test_empty_grade import EmptyGradeTests
+        result = unittest.TestResult()
+        unittest.defaultTestLoader.loadTestsFromTestCase(EmptyGradeTests).run(result)
+        self.assertEqual(result.testsRun, 4)
+        self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
+
 class GraderRetryTests(unittest.TestCase):
     """Grading has distinct transport, checker-request and genuine budgets."""
 
     READY_SHA = 'a' * 40
 
     def setUp(self):
+        import grader_packet
         self.rules = lr.load()
-        temporary = tempfile.TemporaryDirectory(prefix='nextstep-content-')
+        temporary = tempfile.TemporaryDirectory(prefix='grader-policy-')
         self.addCleanup(temporary.cleanup)
-        self.content = Path(temporary.name)
-        content_patch = patch.object(dispatch, 'CONTENT', self.content)
-        content_patch.start()
-        self.addCleanup(content_patch.stop)
+        self.root = Path(temporary.name)
+        self.content = self.root/'content'
+        self.content.mkdir()
+        (self.content/f'{SID}.md').write_text('AC1 [backend]: retry fixture.\n')
+        self.addCleanup(patch.stopall)
+        patch.object(dispatch, 'CONTENT', self.content).start()
+        patch.object(grader_packet, 'root', return_value=self.root).start()
 
     steps = NextStepTests.steps
     one = NextStepTests.one
 
-    def fixture(self, action='grade'):
+    def fixture(self, action='grade', *, ready=False):
         rows = [event('spec-written', -120),
-                event('build-done', -100, actor='builder', status='DONE', ready_sha=self.READY_SHA)]
+                event('build-done', -100, actor='builder', status='DONE', **(dict(ready_sha='a'*40) if ready else {}))]
         if action == 'regrade':
             rows.append(event('decision', -90, actor='thinker', regrade='yes'))
         return rows
@@ -1528,52 +1764,37 @@ class GraderRetryTests(unittest.TestCase):
 
     def test_retry1851_AC1_detached_marker_preserves_trigger_and_request_window(self):
         for action in ('grade', 'regrade'):
-            rows = self.fixture(action)
+            rows = self.fixture(action, ready=True)
             trigger = rows[-1]
             rows += [event('autodispatched', -5, role='grader', spawn='12345'), self.refusal()]
-            for seconds in (0, 59):
+            for seconds in (0, 59, 301):
                 step = self.one(rows, now=NOW + timedelta(seconds=seconds))
-                self.assertEqual(step.reason, 'grade-wait: bundle-pending')
+                self.assertEqual((step.action, step.attempt), ('bundle', 1))
                 self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
-                self.assertIn(self.READY_SHA, step.clears)
-                self.assertIn('1/3', step.clears)
-            self.assertEqual(self.one(rows, now=NOW + timedelta(minutes=1)).action, action)
+                self.assertIn('evidence required', step.reason)
         self.signed('AC1-detached', asdict(step))
 
     def test_retry1851_AC1_silent_checker_cap_late_evidence_and_resets(self):
         import attempts
         for action in ('grade', 'regrade'):
-            rows = self.fixture(action)
+            rows = self.fixture(action, ready=True)
             trigger = rows[-1]
             for n in range(1, 4):
                 minute = -20 + 5*n
                 rows += [event('autodispatched', minute, role='grader', spawn=str(12340+n)),
                          self.refusal(minute, number=n)]
-                deadline = NOW+timedelta(minutes=minute+5)
-                for second in (-299, -1, 0, 1):
-                    step = self.one(rows, now=deadline+timedelta(seconds=second))
-                    self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
-                    if second < 0:
-                        self.assertEqual(step.reason, 'grade-wait: bundle-pending')
-                    elif n < 3:
-                        self.assertEqual(step.action, action)
-                    else:
-                        self.assertTrue(step.reason.startswith('exhausted: bundle-pending'))
-                    h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
-                    self.assertEqual((h.n_failed, h.reasons, h.not_ready), (0, (), None))
-                # Snapshot rereads and a repeated receipt do not create requests.
-                again = self.one(rows+[rows[-1]], now=deadline-timedelta(seconds=1))
-                self.assertIn(f'{n}/3', again.clears)
-            far_future = NOW+timedelta(days=100)
-            self.assertTrue(self.one(rows, now=far_future).reason.startswith('exhausted: bundle-pending'))
-            for kind in ('evidence-bundle', 'evidence-bundle-failed'):
-                evidence = event(kind, -30, sha=self.READY_SHA)
-                self.assertEqual(self.one(rows+[evidence]).action, action)
-            new_build = event('build-done', 1, actor='builder', status='DONE', ready_sha='b' * 40)
-            self.assertEqual(self.one(rows+[new_build], now=NOW+timedelta(minutes=2)).action, 'grade')
+                step = self.one(rows)
+                self.assertEqual((step.action, step.attempt), ('bundle', 1))
+                self.assertEqual(step.trigger, trigger['_src'])
+                h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=NOW)
+                self.assertEqual((h.n_failed, h.reasons), (0, ()))
+            # Legacy grader request receipts do not become checker attempts.
+            self.assertEqual(self.one(rows, now=NOW+timedelta(days=100)).action, 'bundle')
+            new_build = event('build-done', 1, actor='builder', status='DONE', ready_sha='b'*40)
+            self.assertEqual(self.one(rows+[new_build], now=NOW+timedelta(minutes=2)).action, 'bundle')
             decision = event('decision', 1, regrade='yes', actor='operator')
-            self.assertEqual(self.one(rows+[decision], now=NOW+timedelta(minutes=2)).action, 'regrade')
-        self.signed('AC1-cap', dict(requests=3, cap=3, interval_seconds=300, history=asdict(h)))
+            self.assertEqual(self.one(rows+[decision], now=NOW+timedelta(minutes=2)).action, 'bundle')
+        self.signed('AC1-cap', dict(legacy_requests=3, checker_attempts=0, history=asdict(h)))
 
     def test_retry1851_AC1_build_freshness_and_real_gate(self):
         import grader_packet as gp
@@ -1581,30 +1802,31 @@ class GraderRetryTests(unittest.TestCase):
             pass
         def fail(why, reason=None):
             raise Refused(reason)
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, DOIT_ROOT=directory):
+        with patch.dict(os.environ, DOIT_ROOT=str(self.root)):
+            directory = self.root
             path = Path(directory)/'content'/'evidence'/SID/'bundle.json'
             path.parent.mkdir(parents=True)
-            raw = json.dumps(dict(spec=SID, sha=self.READY_SHA, commands=[], comparison={})).encode()
+            raw = json.dumps(dict(spec=SID, sha='a'*40, commands=[], comparison={})).encode()
             path.write_bytes(raw)
             digest = hashlib.sha256(raw).hexdigest()
             for action in ('grade', 'regrade'):
-                rows = self.fixture(action)+[self.refusal()]
-                success = event('evidence-bundle', -10, sha=self.READY_SHA, path=str(path), bundle_sha256=digest)
+                rows = self.fixture(action, ready=True)+[self.refusal()]
+                success = event('evidence-bundle', -10, sha='a'*40, path=str(path), bundle_sha256=digest)
                 packet = 'bundle_sha256: `' + digest + '`'
                 self.assertEqual(self.one(rows+[success]).action, action)
                 with patch.object(gp.subprocess, 'Popen') as checker:
                     with self.assertRaisesRegex(Refused, 'bundle-pending'):
                         gp.gate(rows+[success], SID, 'stale packet without digest', lambda *a, **k: None, fail)
-                    self.assertEqual(checker.call_args.args[0][-4:], ['run-checks', SID, '--sha', self.READY_SHA])
+                    checker.assert_not_called()
                     self.assertIsNotNone(gp.gate(rows+[success], SID, packet, lambda *a, **k: None, fail))
-                failed = event('evidence-bundle-failed', -4, sha=self.READY_SHA, reason='checker failed')
-                self.assertEqual(self.one(rows+[failed]).action, action)
+                failed = event('evidence-bundle-failed', -4, sha='a'*40, reason='checker failed')
+                self.assertTrue(self.one(rows+[failed]).reason.startswith('retry-wait: bundle'))
                 with self.assertRaisesRegex(Refused, 'preflight:runner'):
                     gp.gate(rows+[failed], SID, packet, lambda *a, **k: None, fail)
-                for evidence in (dict(success, ts=rows[1]['ts']), dict(success, sha='c' * 40),
+                for evidence in (dict(success, ts=rows[1]['ts']), dict(success, sha='c'*40),
                                  dict(success, subject='L-spec-9999'),
                                  dict(success, ts=event('x', -101)['ts'])):
-                    self.assertEqual(self.one(rows+[evidence]).reason, 'grade-wait: bundle-pending')
+                    self.assertEqual(self.one(rows+[evidence]).action, 'bundle')
                     with patch.object(gp.subprocess, 'Popen'), self.assertRaisesRegex(Refused, 'bundle-pending'):
                         gp.gate(rows+[evidence], SID, packet, lambda *a, **k: None, fail)
                 # Same-second result order is ledger order, including failures before refusal.
@@ -1617,7 +1839,7 @@ class GraderRetryTests(unittest.TestCase):
                         self.assertIsNotNone(gp.gate(rows+tail, SID, packet, lambda *a, **k: None, fail))
                 for mutation in (dict(path=str(path.with_name('missing'))), dict(bundle_sha256='bad')):
                     corrupt = dict(success, **mutation)
-                    self.assertEqual(self.one(rows+[corrupt]).action, action)
+                    self.assertEqual(self.one(rows+[corrupt]).action, 'bundle')
                     with self.assertRaisesRegex(Refused, 'preflight:runner'):
                         gp.gate(rows+[corrupt], SID, packet, lambda *a, **k: None, fail)
         self.signed('AC1-freshness', dict(pre_refusal=True, same_second_failure=True, digest_checked=True))
@@ -1649,8 +1871,8 @@ class GraderRetryTests(unittest.TestCase):
             pass
         def fail(why, reason=None):
             raise Refused(reason)
-        rows = [dict(type='build-done', subject=SID, ready_sha=self.READY_SHA),
-                dict(type='evidence-bundle-failed', subject=SID, sha=self.READY_SHA,
+        rows = [dict(type='build-done', subject=SID, ready_sha='a'*40),
+                dict(type='evidence-bundle-failed', subject=SID, sha='a'*40,
                      reason='wall cap exceeded')]
         with patch.object(gp.subprocess, 'Popen') as checker:
             with self.assertRaisesRegex(Refused, '^wall-cap$'):
@@ -1678,7 +1900,7 @@ class GraderRetryTests(unittest.TestCase):
                         self.assertEqual((step.trigger, step.since), (trigger['_src'], trigger['ts']))
                     h = attempts.history(ns._grader_history(rows)[0], trigger, 'grader', now=deadline)
                     self.assertEqual(h.n_failed, n)
-                late = event('evidence-bundle', -1, sha=self.READY_SHA)
+                late = event('evidence-bundle', -1, sha='a'*40)
                 self.assertTrue(self.one(rows+[late], now=NOW+timedelta(days=1)).reason.startswith('retries-exhausted:'))
         for action in ('build', 'rebuild', 'review'):
             rows, role, trigger = VanishedRetryTests.fixture(self, action)

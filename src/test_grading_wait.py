@@ -156,10 +156,9 @@ class GradingWaitTests(unittest.TestCase):
                 launched.assert_not_called()
                 self.clock = due
                 self.assertEqual(self.dispatch_once(), 2)
-                launched.assert_called_once()
-                self.assertEqual(launched.call_args.args[0][-1], TIP)
+                launched.assert_not_called()
                 self.assertEqual(self.dispatch_once(), 2)
-                launched.assert_called_once()
+                launched.assert_not_called()
                 self.assertFalse(any(e["type"] == "spawn-failed" or e.get("kind") == "failure-unknown"
                                      for e in self.events))
                 # A fresh failed runner consumes the next rung, ending after four retries.
@@ -185,14 +184,14 @@ class GradingWaitTests(unittest.TestCase):
             launched.reset_mock()
             self.assertEqual(self.dispatch_once(), 1)
             self.assertFalse(any(e["type"] == "infra-failure" for e in self.events))
-            self.assertEqual(launched.call_args.args[0][-1], TIP)
+            launched.assert_not_called()
             self.events = [dict(type="evidence-bundle-failed", subject=SID,
                 sha=BASE, reason="wall cap exceeded", reason_code="wall-cap")]
             launched.reset_mock()
             self.assertEqual(self.dispatch_once(), 1)
             launched.assert_not_called()
             self.assertFalse(any(e["type"] == "infra-failure" for e in self.events))
-        evidence("AC2", dict(new_and_historical=True, retry_once_when_due=True,
+        evidence("AC2", dict(new_and_historical=True, receiver_launches=0,
             ladder_exhausted=True, unrelated_failures_preserved=True, old_commit_not_retried=True))
 
     def test_ac3(self):

@@ -282,8 +282,7 @@ class EvidenceRefusals(DispatchCase):
         self.assertEqual(emitted, [])
         _, launches = self.invoke("bundle-pending", role="grader")
         for calls in (requested, launches):
-            self.assertEqual(len(calls), 1)
-            self.assertEqual(calls[0][1:], ["run-checks", self.subject, "--sha", self.main_sha])
+            self.assertEqual(calls, [], "evidence acquisition belongs to tick")
 
     def test_missing_bundle_requests_evidence_and_persists_refusal(self):
         self.build()

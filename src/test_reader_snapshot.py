@@ -413,7 +413,7 @@ class SnapshotTests(unittest.TestCase):
                 and ((n.func.value.id == 'fold' and n.func.attr == 'read_events')
                      or (n.func.value.id == 'ledger_cache' and n.func.attr == 'tail_refresh'))
                 for n in ast.walk(tree))
-        self.assertEqual(count, 9)
+        self.assertEqual(count, 11)
         print('AC4 tick reads=2 shared + 1 cached tail refresh; sweep reads=3/4; cache materializations=generations+tick refresh; tick normalizations=generations+1; copy passes per shared read=1; look folds=1/evaluation')
         print('L-spec-1711 AC4 ok')
 
