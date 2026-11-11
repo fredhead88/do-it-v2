@@ -127,9 +127,9 @@ Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` 
 - Green member-verdict or window-tree-verified for required checks on the exact tree is reused for
   24 hours (verdict_fresh_hours). Reject undetermined, malformed, stale or future-dated evidence.
 - `src/window_dispatch.py`: predeploy tree, window, suite, quick ids; legacy tree/quick empty.
-- `src/window_known_red.py`: `window-dispatch-verdict` completion receipts and
-  `window_gate.quick_ids`; an unchanged tree whose red is all master known-red is not re-dispatched
-  (`window-skipped-known`, pending, never green).
+- `src/window_known_red.py`: `window-dispatch-verdict` completion receipts; master-known-red retries
+  stay pending (`window-skipped-known`, never green).
+- `src/window_cancel.py`: confirm owned cancels before replacement; tombstones veto verdicts.
 
 ## Branch refresh
 Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 3/spec/day.

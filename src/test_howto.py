@@ -201,6 +201,7 @@ class HowtoTests(unittest.TestCase):
         self.assertIn(' (paused)', howto.render(str(self.repo)))
 
     def test_ac5_committed_page_and_shell_entrypoint(self):
+        self.assertIn('tombstones veto verdicts', howto.render(str(REPO)))
         self.assertEqual((REPO / 'docs/HOW-IT-WORKS.md').read_text(), howto.render(str(REPO)))
         result = subprocess.run([str(REPO / 'doit'), 'howto', '--check'],
                                 capture_output=True, text=True)

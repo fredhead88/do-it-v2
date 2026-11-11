@@ -7,7 +7,7 @@ import ledger_files
 METHODS = {'glob', 'rglob', 'iterdir', 'listdir', 'scandir', 'open', 'read_text', 'read_bytes'}
 
 
-def scan(source):
+def scan(source, *, cancellation_state=False):
     tree = ast.parse(source)
     parents = {}
     for node in ast.walk(tree):
@@ -84,13 +84,18 @@ def scan(source):
             continue
         scope = owner(node)
         receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
-        if marked(receiver, scope) or (method in {'open', 'listdir', 'scandir', 'glob'} and any(marked(a, scope) for a in node.args)):
+        if (cancellation_state and method == 'read_text') or marked(receiver, scope) or (method in {'open', 'listdir', 'scandir', 'glob'} and any(marked(a, scope) for a in node.args)):
             hits.add(scope.name if scope is not tree else '<module>')
     return hits
 
 
 # Every exception is an exact (file, function), with its own reason.
 ALLOW = {
+    # Cancellation state is private runtime metadata, never a ledger source.
+    ('window_cancel.py', 'start_identity'): 'Reads only proc stat and boot_id to prove process start identity.',
+    ('window_cancel.py', 'alive'): 'Reads only proc stat to distinguish live companions from zombies.',
+    ('window_cancel.py', 'active'): 'Reads per-invocation ownership receipt JSON under state/window-cancel.',
+    ('window_cancel.py', 'try_supersede'): 'Reads window-chain lock metadata twice to prove stable ownership before action.',
     ('tg_check.py', 'lambda_silent'): 'Read-only segment integrity and symlink checks at the effective root; decisions use ledger_files virtual sources without cache writes.',
     ('base_red.py', '_nightly_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up (additional classified hit).',
     ('base_red.py', '_rows'): 'Only reads L-base-red-local.jsonl; local files never roll up.',
@@ -147,7 +152,7 @@ class ReaderGuard(unittest.TestCase):
     def test_tree(self):
         actual = {(p.name, fn) for p in Path(__file__).parent.glob('*.py')
                   if not p.name.startswith('test_') and '_checks_' not in p.name
-                  for fn in scan(p.read_text())}
+                  for fn in scan(p.read_text(), cancellation_state=p.name == 'window_cancel.py')}
         self.assertEqual(actual - ALLOW.keys(), set(), 'unclassified ledger readers')
         self.assertEqual(ALLOW.keys() - actual, set(), 'stale exceptions')
         self.assertTrue(all(ALLOW.values()))

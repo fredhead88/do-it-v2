@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 
+import window_cancel
+
 _IDENTITY = ContextVar("window_dispatch_identity", default=None)
 
 
@@ -49,9 +51,42 @@ def verify(gate, repo, cand, required, window, *, rehearsal=False, tree=None, qu
             return _undetermined("supplied tree differs from candidate tree")
     if known is not None and tree is not None:
         import window_known_red
-        skipped = window_known_red.guard(gate, repo, cand, tree, required, window, rehearsal=rehearsal, **known)
+        skipped = window_known_red.guard(gate, repo, cand, tree, required, window, rehearsal=rehearsal, **{k: known[k] for k in ('project', 'base_sha', 'specs')})
         if skipped is not None:
             return skipped
+    owner = None
+    try:
+        if tree is not None:
+            owner = window_cancel.Admission(gate, repo, cand, tree, required, window, quick, suite, known)
+            owner.enter(gate.verify_timeout_secs(gate.os.environ))
+            if owner.error:
+                return _undetermined(owner.error)
+            if owner.waited:
+                events = gate.train_events()
+                prior = gate.prior_result(events, tree)
+                if gate.covers(prior, required):
+                    return dict(state="green", nodes=[], url="", doc={})
+                if known is not None:
+                    skipped = window_known_red.guard(gate, repo, cand, tree, required, window,
+                                                     rehearsal=rehearsal, **{k: known[k] for k in ('project', 'base_sha', 'specs')})
+                    if skipped is not None:
+                        return skipped
+        try:
+            result = _launch(gate, repo, cand, required, window, rehearsal, tree, quick, suite, owner)
+        except gate.TrainCancelled:
+            ignored = owner.finish(_undetermined("verification cancelled")) if owner else {}
+            if ignored.get("superseded"):
+                return ignored
+            raise
+        return owner.finish(result) if owner else result
+    except (OSError, ValueError, TypeError, KeyError, gate.subprocess.SubprocessError):
+        return _undetermined("managed invocation ownership unavailable")
+    finally:
+        if owner:
+            owner.release()
+
+
+def _launch(gate, repo, cand, required, window, rehearsal, tree, quick, suite, owner):
     script = gate.os.environ.get("DOIT_WINDOW_PREDEPLOY") or str(repo / gate.PREDEPLOY)
     ref = f"ci-verify/{cand[:12]}-win{gate.os.getpid()}"
     env = {**gate.os.environ, "PREDEPLOY_GATE_CI_ONLY": "1", "PREDEPLOY_GATE_ONLY_GREEN": "1",
@@ -75,6 +110,8 @@ def verify(gate, repo, cand, required, window, *, rehearsal=False, tree=None, qu
         proc = gate.subprocess.Popen(["bash", script], cwd=str(repo), env=env, text=True, start_new_session=True,
                                      stdout=gate.subprocess.PIPE, stderr=gate.subprocess.STDOUT)
         try:
+            if owner:
+                owner.bind(proc)
             train = gate._VERIFY_TRAIN.get()
             if train is None or train["window"] != window:
                 out, _ = proc.communicate(timeout=timeout)
@@ -98,6 +135,8 @@ def verify(gate, repo, cand, required, window, *, rehearsal=False, tree=None, qu
         except gate.subprocess.TimeoutExpired:
             gate.stop_verification(proc)
             return dict(state="undetermined", nodes=[], url="", doc={}, why=f"verification timed out after {timeout:.0f}s")
+        if owner and window_cancel.paths(owner.row)[1].exists():
+            return owner.finish(_undetermined("verification superseded"))
         doc, nodes, url = gate.parse_verdict(out)
         checks = doc.get("checks")
         # predeploy_gate.sh (L-spec-0764) reports each check as {"state": "ran", "run_id", "url"};
