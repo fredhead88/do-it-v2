@@ -24,7 +24,7 @@ import lane_rules as lr
 NOW = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
 SID = 'L-spec-9001'
 KEYS = {'item', 'item_kind', 'stage', 'state', 'action', 'owner',
-        'trigger', 'reason', 'clears', 'since', 'attempt', 'retry_at'}
+        'trigger', 'reason', 'clears', 'since', 'attempt', 'retry_at', 'cause'}
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / 'src/fixtures/nextstep'
 
@@ -494,7 +494,7 @@ class NextStepTests(unittest.TestCase):
             matching = [s for s in steps if s.item == sid]
             self.assertEqual(len(matching), 1)
             expected = ns.Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', trigger,
-                               'condition met', None, since, attempt=1)
+                               'condition met', None, since, attempt=1, cause='other')
             for key in KEYS:
                 self.assertEqual(asdict(matching[0])[key], asdict(expected)[key], (name, key))
             if name == 'w41':

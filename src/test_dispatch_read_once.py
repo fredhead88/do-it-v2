@@ -583,6 +583,16 @@ class TestPreBackendEquality(unittest.TestCase):
             str(Path(root).parent), "$SCRATCH"))
 
     def test_pinned_base_gate_pairs(self):
+        def cause_aware(value):
+            if isinstance(value, list):
+                return [cause_aware(v) for v in value]
+            if not isinstance(value, dict):
+                return value
+            value = {k: cause_aware(v) for k, v in value.items()}
+            if value.get("type") == "build-started" and "cause" in value:
+                self.assertEqual(value.pop("cause"), "other")
+            return value
+
         fixtures = {
             "builder": ["admitted", "killed", "open-writer", "wrong-project", "wave-hold",
                         "wave-waiver", "unaudited", "duplicate", "stale-branch", "disk-restored",
@@ -609,7 +619,7 @@ class TestPreBackendEquality(unittest.TestCase):
                             root = result["equality"].pop("root")
                             value = dict(outcome=result["outcome"], **result["equality"])
                             raw_pairs.append(value)
-                            pairs.append(self.comparison_value(value, root))
+                            pairs.append(cause_aware(self.comparison_value(value, root)))
                             shutil.rmtree(root)
                         signed(self.id(), dict(fixture=case, role=role,
                             comparison_substitutions=dict(
@@ -827,6 +837,8 @@ def handin_aware(value):
         return value
     out = {}
     for k, v in value.items():
+        if k == "cause" and value.get("type") == "build-started":
+            continue
         if k == "handin_check" and v in ("clean", "undetermined"):
             continue
         if k == "handin_reason" and v == "handin-check:undetermined":

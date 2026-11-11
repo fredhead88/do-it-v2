@@ -1205,7 +1205,7 @@ def main(a):
 
 @_with_dispatch_view
 def _main(a):
-    import fold; ledger_write_guard.check(EVENTS)
+    import fold; __import__("nextstep").validate_cause(a); ledger_write_guard.check(EVENTS)
     kind, tmin, usd = ROLES[a.role]
     atexit.register(poke)
     schema_path = AGENTS / f"{a.role}.schema.json"
@@ -1362,7 +1362,7 @@ def _main(a):
                  "refusing role=builder before any spend", reason="no-pinned-base")
         a.pinned_base_sha_explicit = _pinned_base_explicit_in(packet)
         all_ev = current_events()
-        if fold.spec_state([e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
+        if fold.spec_state(builder_events := [e for e in all_ev if e.get("subject") == a.subject], set()) == "killed":
             fail(f"{a.subject} is killed — refusing role=builder before any spend")
         # L-spec-0276/R3 Target 4(a): a builder must not run ahead of an unmerged, unsettled earlier plan wave on the SAME charter. No resolvable charter, no plan file, or no unit matching this spec's own footprint is `wave_note="undetermined"` on `build-started` below — never a refusal (SD6: "the unit boundary is not this check's call").
         wave_charter = resolve_charter(all_ev, a.subject, a.charter)
@@ -1584,7 +1584,7 @@ def _main(a):
     if builder:
         # L-spec-0276/R3 Target 4: `wave_note="undetermined"` only — an optional field, omitted (not a forced null) whenever the wave WAS determined (Null encoding, mirrors carry.py's own convention). L-spec-0269: every start also records the window it was offered under and who is waiting on it (waiter_kv). R7/AC5: base_sha is the pinned value read off the packet above — never a fresh worktree-HEAD guess taken here.
         emit(ledger, base, "build-started", worktree=cwd, dsn_role=dsn_role, backend=backend, issued_by=issued_by(),
-             base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}))
+             base_sha=a.pinned_base_sha, **waiter_kv, **({"wave_note": wave_note} if wave_note else {}), **({'cause': cause} if (cause := __import__("nextstep").builder_cause(a, builder_events)) is not None else {}))
     else:
         kv = {"role": a.role, "backend": backend, **waiter_kv}
         if a.role in ("grader", "owed-sweeper", "owed-verifier"):
@@ -1784,7 +1784,7 @@ def cli_version():
     except (OSError, subprocess.SubprocessError, IndexError):
         return None
 
-
+sys.modules.setdefault("dispatch", sys.modules[__name__])  # lazy routing imports must share this CLI module
 import fold
 _default_subject_project = fold.subject_project
 fold.EMITS["worktree-recreated"] = {"builder"}
@@ -1818,7 +1818,6 @@ def _prefork_main_sha(project):
 
 def prefork_refusal(a):
     """Parent-side readiness for a detached start (L-spec-2207): the reason to print before any fork, or None to proceed to the child. A start the predicate lets through still meets every in-process gate in `_main`."""
-    sys.modules.setdefault("dispatch", sys.modules[__name__])  # start_check imports dispatch; never reload this file as a second module
     try:
         import start_check, project_scope
         events = fold.read_events(use_cache=False)
@@ -1862,7 +1861,8 @@ if __name__ == "__main__":
                     help="do not run `claude -p`; write the packet under $R/seat/ and wait for "
                          "<spawn>.result.json from a seat-billed sub-agent (or DOIT_SEAT=1)")
     ap.add_argument("--manual-override-reason", help="reason for an intentional manual dispatch")
-    a = ap.parse_args()
+    ap.add_argument("--cause", choices=__import__("nextstep").REBUILD_CAUSES, help="builder rebuild trigger")
+    a = __import__("nextstep").validate_cause(ap.parse_args())
     if a.role == "plan-auditor":
         a._packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text() if pathlib.Path(a.packet).is_file() else ""
         if __import__("audit").HEADER not in a._packet:

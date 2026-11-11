@@ -61,6 +61,7 @@ class Step:
     since: str
     attempt: int = 0
     retry_at: str | None = None
+    cause: str | None = None
 
     def __post_init__(self):
         if (self.item_kind not in KINDS or self.stage not in STAGES
@@ -321,6 +322,12 @@ def _retry_result(c, trigger, role, *, dispatched=False):
         return None
     fields = dict(trigger=_source(trigger), attempt=min(h.n_failed+1, attempts.MAX_ATTEMPTS),
                   retry_at=h.next_retry_at.isoformat() if h.next_retry_at else None)
+    if role == 'builder':
+        failed = next((e for e in reversed(evs) if h.n_failed
+                       and e.get('type') in {'spawn-failed', 'autodispatch-failed'}
+                       and _attempt_role(e) == 'builder' and not _refusal(e)
+                       and _time(e['ts']) >= _time(trigger['ts'])), None)
+        fields['cause'] = _rebuild_cause(c.get('cause_evs', evs), failed or trigger)
     reason = 'condition met'
     if h.exhausted:
         reason = f'retries-exhausted: {role}; {h.n_failed} failed attempts; ' + '; '.join(h.reasons)
@@ -346,6 +353,63 @@ def _start_refusal(c, role):
     """The shared early refusal for a builder or reviewer start; read-only."""
     import start_check
     return start_check.refusal(role, c['sid'], c.get('events', c['evs']), now=c['now'], root=fold.ROOT)
+
+
+REBUILD_CAUSES = ('merge-gate', 'rejected-criterion', 'conflict', 'stale-branch', 'launch-failure', 'other')
+
+
+def validate_cause(a):
+    cause = getattr(a, 'cause', None)
+    if cause is not None and (a.role != 'builder' or cause not in REBUILD_CAUSES):
+        sys.exit('dispatch: --cause requires builder and one of ' + ', '.join(REBUILD_CAUSES))
+    return a
+
+
+def builder_cause(a, events):
+    """Explicit issuer metadata wins; automatic first builds omit the optional key."""
+    cause = getattr(a, 'cause', None)
+    if cause is not None:
+        return cause
+    if dispatch.issued_by() in {'tick', 'executor', 'foreman'} and not any(
+            e.get('subject') == a.subject and e.get('type') == 'build-started' for e in events):
+        return None
+    return 'other'
+
+
+def _rebuild_cause(evs, trigger):
+    """Classify only the selected trigger (or failed attempt), never nearby prose."""
+    if not any(e.get('type') == 'build-started' for e in evs):
+        return None
+    evidence = trigger or {}
+    if evidence.get('type') == 'decision':
+        evidence = next((e for e in evs if evidence.get('ref')
+                         and _source(e) == evidence['ref']
+                         and e.get('subject') == evidence.get('subject')
+                         and _time(e['ts']) < _time(evidence['ts'])), {})
+    kind = evidence.get('type')
+    if kind == 'merge-gate-rework' or (kind == 'build-blocked'
+            and str(evidence.get('reason') or '').startswith('handin-check:')):
+        return 'merge-gate'
+    if kind in {'rejected-criterion', 'must-fix'}:
+        return 'rejected-criterion'
+    if kind in {'review', 'verdict'} and evidence.get('spawn') and any(
+            e.get('type') in {'must-fix', 'rejected-criterion'}
+            and e.get('spawn') == evidence['spawn']
+            and e.get('subject') == evidence.get('subject')
+            and _time(e['ts']) >= _time(evidence['ts']) for e in evs):
+        return 'rejected-criterion'
+    if kind in {'conflict-rework', 'merge-conflict'}:
+        return 'conflict'
+    if kind in {'branch-recut', 'branch-recut-refused'}:
+        return 'stale-branch'
+    if kind in {'spawn-failed', 'autodispatch-failed', 'build-blocked'}:
+        if kind != 'build-blocked' and _attempt_role(evidence) != 'builder':
+            return 'other'
+        if BASE_FAILURE_RE.search(_failure_text(evidence)):
+            return 'stale-branch'
+        if kind != 'build-blocked' and _attempt_role(evidence) == 'builder':
+            return 'launch-failure'
+    return 'other'
 
 
 def _rebuild(c):
@@ -416,7 +480,7 @@ def _rebuild(c):
         # L-spec-2209: the block is its own trigger, so neither it nor its same-attempt
         # receipts may count as the output that consumes the rebuild it authorizes.
         own = [e for e in evs if not _same_attempt(evs, e, secret)]
-        result = _retry_result(dict(c, evs=own), secret, 'builder', dispatched=(
+        result = _retry_result(dict(c, evs=own, cause_evs=evs), secret, 'builder', dispatched=(
             _after(_dispatches(own), secret, DISPATCH_EVENTS) or _after(own, secret, {'build-started'})))
         return dict(result, trigger=result.get('trigger') or _source(secret)) if result else None
     if trigger and (not blocked or _time(trigger['ts']) > _time(blocked['ts'])):
@@ -873,7 +937,7 @@ def _ruling_step(c, spawn_events, owners):
             if not rebuild.get('retry_hold'):
                 return Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', source,
                             rebuild['reason'], None, rebuild['since'],
-                            rebuild.get('attempt',1), rebuild.get('retry_at'))
+                            rebuild.get('attempt',1), rebuild.get('retry_at'), rebuild.get('cause'))
     clears = {'close': 'spec-killed', 'rework': 'rework dispatch',
               'hold': 'dependency-hold waits_for=' + str(ruling.get('waits_for')),
               'recut': 'recut resolution recorded as spec-killed'}[action]
@@ -1116,7 +1180,7 @@ def _base_refresh_hold(c, failure):
     ignored = sum(_base_receipt(e) for e in evs)
     reason += f'; {ignored} base transport refusal(s) excluded from builder retry budget; recut daily bound applies'
     return Step(sid, 'spec', 'building', 'action', 'build', 'tick', _source(failure),
-                reason, None, failure['ts'])
+                reason, None, failure['ts'], cause=_rebuild_cause(evs, failure))
 
 
 def _idle_reason(evs):
@@ -1170,7 +1234,7 @@ def _choose(c, rows, owners):
         return Step(sid, 'spec', ACTION_STAGES[name], 'action',
                     row.get('step_action', name), row.get('step_owner', owners[name]),
                     _source(trigger), row.get('reason', 'condition met'), None, row['since'],
-                    row.get('attempt', 0), row.get('retry_at'))
+                    row.get('attempt', 0), row.get('retry_at'), row.get('cause'))
     for row in rows:
         if row['name'] in {'wave-held', 'dependency-held'}:
             label = 'dependency' if row['name'] == 'dependency-held' else 'wave'
