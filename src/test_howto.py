@@ -148,6 +148,11 @@ class HowtoTests(unittest.TestCase):
         self.assertEqual(before, howto.render(str(self.repo)))
         print('1500-AC2 four source additions and agent deletion ... ok')
 
+    def test_migration_cut_entry(self):
+        page = howto.render(str(REPO))
+        self.assertIn('migration-not-cut', page)
+        self.assertIn('migration-only predecessor first', page)
+
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))

@@ -89,10 +89,10 @@ def render(repo: str) -> str:
     lines.extend('- ' + backend for backend in backends)
     lines.extend(['', 'SD10 records `tokens = {vendor, input, cached_input, output, reasoning}` on terminal events.',
                   'Vendors are `codex` or `claude`; input includes cached input; absent usage is unknown.',
-                  '`doit health [--json]`: finishing, intake, usage percentages, disk and tokens_per_live_spec.',
-                  'Seven-day shipped mean: uncached input + output; unmeasured_specs excluded; spawn-stale unknown.',
-                  'Authors: Codex; judges: Claude seats. Executor: claude-sonnet-5-5; judgment: claude-opus-5-5 seat.',
-                  'Sonnet trial: tokens_per_live_spec.claude now and 14 days on, lesson lines axis=K; a rise ends it.'])
+                  '`doit health [--json]`: finishing, intake, usage, disk, tokens_per_live_spec (7-day mean;',
+                  'unmeasured_specs excluded). Authors: Codex; judges: Claude. Executor: claude-sonnet-5-5;',
+                  'judgment: claude-opus-5-5 seat. Sonnet trial: log health at start and 14 days later; axis=K.',
+                  'SD10 migration cuts: audit reports migration-not-cut; merge the migration-only predecessor first.'])
     lines.extend(['', '## Lane rules', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     # Keep each lane tuple intact while leaving room for new cron rows within
     # the page's existing line budget.
