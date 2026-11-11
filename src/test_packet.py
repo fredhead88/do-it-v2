@@ -1433,7 +1433,7 @@ for boundary, accepted in ((32, True), (33, False)):
     else:
         assert accepted and len(boundary_manifest['rows']) == 32, "33-row owed manifest must be refused"
 print("2238 shared manifest boundary: 32 accepted, 33 refused")
-assert set(m11) == {"project", "cwd", "rows", "kind"} and len(m11["rows"]) == 3, m11
+assert set(m11) == {"project", "cwd", "rows", "kind", "need"} and m11["need"] is None and len(m11["rows"]) == 3, m11
 assert m11["rows"] == ROWS11, "AC11: rows returned verbatim, as written"
 N += 1
 

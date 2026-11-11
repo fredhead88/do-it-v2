@@ -6,7 +6,7 @@ import argparse, hashlib, os, pathlib, re, shlex, subprocess, sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import amends, audit, fold, merge_gate, models, routing, grader_packet  # noqa: E402
-import verification, base_refresh, coupled_tests, effective_writes, wip_resume
+import verification, base_refresh, coupled_tests, effective_writes, wip_resume, sweep_need
 from packet_base import current_tip, _effective_base, builder_pin, pinned_baseline
 
 ROOT = pathlib.Path(os.environ.get("DOIT_ROOT", pathlib.Path.home() / ".do-it"))
@@ -1193,6 +1193,7 @@ def parse_sweep_manifest(path):
     if not p.is_file():
         die(f"no sweep manifest at {path}")
     raw = p.read_text()
+    need = sweep_need.parse_need(raw, path, die)
     m = re.search(r"^project:\s*(.+)$", raw, re.M)
     if not m:
         die(f"{path}: no 'project:' line")
@@ -1227,8 +1228,7 @@ def parse_sweep_manifest(path):
         if got != want:
             die(f"{path}: row {row['spec']}'s spec_path {row['spec_path']!r} does not resolve "
                 f"to dispatch.spec_path({row['spec']!r}) == {want}")
-    return {"project": project, "cwd": cwd, "rows": rows, "kind": kind}
-
+    return {"project": project, "cwd": cwd, "rows": rows, "kind": kind, "need": need}
 
 def criterion_block(body, crit_id):
     """One acceptance criterion's FULL block, verbatim — from its `^\\s*{crit_id}
@@ -1286,10 +1286,12 @@ def p_owed_sweeper(c):
             if paths:
                 L.append("     not-sha-bound: " + ", ".join(paths))
         L += [f"     {ln}" for ln in block.splitlines()]
-    env_path = pathlib.Path(manifest["cwd"]) / ".env"
-    if manifest["kind"] == "repo":
+    need, env_path = manifest["need"], pathlib.Path(manifest["cwd"]) / ".env"
+    if manifest["kind"] == "repo" or need in ("repo", "environment"):
         L.append("3. Production DSNs stay unset for repo checks. The check_runner supplies "
                  "AS_LOCAL_PG_ADMIN only for a check needing scratch Postgres; never source an env file.")
+    elif need == "droplet":
+        L.append(sweep_need.grant_line(need))
     elif env_path.is_file():
         L.append(f"3. This batch's own read-only DB credential, for a `live_db` observation: "
                  f"`{env_path}` holds `SUPABASE_DB_URL` — `set -a; . {env_path}; set +a` before "
@@ -1301,11 +1303,9 @@ def p_owed_sweeper(c):
              "never move money.")
     L.append("5. Cannot-observe capabilities: " + " | ".join(__import__("owed_routes").ROUTES) + ".")
     return L
-
 BUILD = {"spec-auditor": p_spec_auditor, "spec-writer": p_spec_writer, "builder": p_builder,
          "grader": p_grader, "reviewer": p_reviewer, "charter-reviewer": p_charter_reviewer,
          "plan-auditor": p_plan_auditor, "owed-sweeper": p_owed_sweeper, "owed-verifier": p_owed_sweeper}
-
 
 # ──────────────────────────── Blindness, as a check ────────────────────────────
 
