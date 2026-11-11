@@ -147,7 +147,7 @@ class HeldWithoutRunTests(unittest.TestCase):
         self.seed(-3 * 86400)
         specs, steps = self.steps()
         original = next(s for s in steps if s.item == SID)
-        self.assertEqual(original.reason, 'idle: awaiting lane condition')
+        self.assertTrue(original.reason.startswith('unknown: no rule matched after'))
         before, stalls = self.invariant()
         self.assertTrue(any(r['spec'] == SID and r['bucket'] == 'STUCK' for r in stalls))
         reasons = ['A', 'A', 'B', 'B', 'A']
@@ -264,7 +264,11 @@ tick._record_next_step_held(events, specs, steps, now)
                   default='wait', deadline=(NOW + timedelta(days=1)).isoformat(), revert='decision')
         before = len(self.held())
         tick._record()
-        self.assertEqual(len(self.held()), before)  # same reason, escalation is no assignment
+        # The named idle reason carries the last event type; the pass's own event renames it once.
+        self.assertEqual(len(self.held()), before + 1)
+        self.assertTrue(self.held()[-1]['reason'].startswith('unknown: no rule matched after '), self.held()[-1])
+        tick._record()
+        self.assertEqual(len(self.held()), before + 1)  # same reason again, no new assignment
         # Real grade action, refusal and same-pass assignment all share _record.
         self.seed(-1800, 'L-spec-9903', 'DONE')
         _, steps = self.steps()

@@ -208,7 +208,7 @@ class NextStepTests(unittest.TestCase):
             held = self.selected({name: dict(row, blocker='L-spec-9002'), 'idle': row})
             self.assertEqual((held.state, held.owner), ('hold', 'tick'))
             self.assertIn('L-spec-9002', held.clears)
-        self.assertEqual(self.selected({'idle': row}).owner, 'executor')
+        self.assertEqual(self.selected({'idle': row}).owner, 'thinker')
         held = self.selected({'build': dict(row, reason='undetermined: missing timestamp')})
         self.assertEqual((held.state, held.owner), ('hold', 'executor'))
         # Table order, rather than predicate registry order, wins ties.

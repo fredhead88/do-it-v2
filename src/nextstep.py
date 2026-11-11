@@ -1116,6 +1116,25 @@ def _base_refresh_hold(c, failure):
                 reason, None, failure['ts'])
 
 
+def _idle_reason(evs):
+    """Name the last event, what clears the hold and the owner, from the given events only."""
+    last = evs[-1].get('type') if evs else None
+    last = str(last) if last else 'none'
+    if last == 'build-blocked':
+        why = evs[-1].get('why') or evs[-1].get('reason')
+        why = ''.join(ch if ch.isprintable() else ' ' for ch in str(why or '')).strip()[:120]
+        return ('after build-blocked: ' + (why or 'no reason recorded'))[:300], \
+            'decision, unblocked, or a new spec-written', 'thinker'
+    judged = _latest(evs, JUDGING)
+    if judged and judged.get('type') == 'verdict' and judged.get('confirmed') is False:
+        done = max((i for i, e in enumerate(evs) if e.get('type') == 'build-done'), default=-1)
+        n = sum(1 for e in evs[done + 1:] if e.get('type') == 'rejected-criterion')
+        return (f'after verdict not confirmed ({n} rejected criteria): awaiting a rework decision',
+                'decision rework=yes, or a new build-done', 'thinker')
+    return (f'unknown: no rule matched after {last}'[:300],
+            'a rule for this event or a decision', 'thinker')
+
+
 def _choose(c, rows, owners):
     sid, evs = c['sid'], c['evs']
     event, stage = evs[-1] if evs else {}, _stage(evs)
@@ -1156,7 +1175,8 @@ def _choose(c, rows, owners):
             return _hold(sid, 'spec', stage, event,
                          label + ': ' + row.get('reason', 'held'),
                          str(row.get('blocker')) + ' shipped', 'tick', row['since'])
-    return _hold(sid, 'spec', stage, event, 'idle: awaiting lane condition', 'lane condition or decision')
+    reason, clears, owner = _idle_reason(evs)
+    return _hold(sid, 'spec', stage, event, reason, clears, owner)
 
 
 def _spec_exception(sid, evs, exc):
