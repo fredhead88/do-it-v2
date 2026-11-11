@@ -54,7 +54,19 @@ def _process(argv, *, timeout=30, **kwargs):
         return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
 
 
-def _events(root):
+PROJECTED_TYPES = frozenset({"spec-written", "spec-preflight", "build-started",
+                             "shipped", "spec-closed", "spec-killed"})
+
+
+def _project(events):
+    """Ordered subsequence of the authorized list that the checks consume."""
+    return [e for e in events if e.get("type") in PROJECTED_TYPES]
+
+
+def _events(root, *, full=False):
+    # Full canonical read and full authorization fold; only the returned
+    # processing list is narrowed, after ordering, corrections and admission.
+    # full=True returns the complete authorized list (tick's grant lookups).
     # One cached canonical snapshot per pass; correction order and authorization
     # still belong to fold. Only the disposable read cache is updated here.
     saved = fold.ROOT, fold.EVENTS, fold.PROJECT
@@ -70,7 +82,8 @@ def _events(root):
             # Busy cache: one reference-parser read in the same root scope.
             events = fold.read_events(use_cache=False)
         ignored = {id(e) for e in fold.fold(events)[2]}
-        return [e for e in events if id(e) not in ignored]
+        authorized = [e for e in events if id(e) not in ignored]
+        return authorized if full else _project(authorized)
     finally:
         fold.ROOT, fold.EVENTS, fold.PROJECT = saved
 
@@ -512,7 +525,8 @@ def tick(*, root=None, now=None):
     now = now or datetime.now(timezone.utc)
     deadline = time.monotonic() + TICK_BUDGET_S
     try:
-        events = _events(root)
+        authorized = _events(root, full=True)
+        events = _project(authorized)
     except (OSError, ValueError) as exc:
         print("preflight ledger unavailable: " + str(exc), file=sys.stderr)
         return 2
@@ -547,12 +561,13 @@ def tick(*, root=None, now=None):
             if deferred or not unchanged:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
+            # Grant dedupe reads the full authorized list, not the projection.
             already_granted = any(e.get("type") == "writes-granted" and e.get("subject") == sid
-                                  and e.get("spec_written_src") == written[sid].get("_src") for e in events)
+                                  and e.get("spec_written_src") == written[sid].get("_src") for e in authorized)
             if tests is not None and not _grant_blocked(body) and not already_granted:
                 _append_grant(root, sid, tests, written[sid])
             already_files = any(e.get("type") == "coupled-files-granted" and e.get("subject") == sid
-                                and e.get("spec_written_src") == written[sid].get("_src") for e in events)
+                                and e.get("spec_written_src") == written[sid].get("_src") for e in authorized)
             if files and not _grant_blocked(body) and not already_files:
                 _append_coupled_files(root, sid, files, written[sid])
             stamp = datetime.fromisoformat(written[sid]["ts"].replace("Z", "+00:00"))
