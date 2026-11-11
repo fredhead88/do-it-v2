@@ -129,7 +129,9 @@ moment `BOARD_OWNERS` names you as its owner.
   `escalation-blocking` with a `default`, a `deadline` and a `revert`. You never
   edit a conflicted file, never `git checkout --theirs`, never hand-merge a
   hunk — see the binding rule below.
-  **Project `do-it-v2`: executor-owned `merge-direct` Step.** Read its queued
+  **Project `do-it-v2`: tick-owned `merge-direct` Step.** The tick merges it
+  (`direct_merge.merge_one`, one merge per pass); you take it over by hand only
+  when the tick is down, following these same steps. Read its queued
   branch from `doit queue list --project do-it-v2`. In that repository, rerun
   `doit gate <branch> main --spec <spec>` immediately before merging. Require
   the newly recorded clean gate's `main_sha` and `branch_sha` to match the

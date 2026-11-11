@@ -113,8 +113,9 @@ Source: `crons.toml`. Name | schedule | where | path, then command.
 Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.
 - autodispatch-failed; autodispatch-skipped; autodispatched; charter-closed; charter-proving;
   charter-reopened; cron-missing; dispatch-builder; dispatch-grader; dispatch-reviewer; doit-gate;
-  escalation-blocking; look-stale; next-step-held; none; proving-check-failed; proving-overdue;
-  queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run; worktree-reaped
+  escalation-blocking; look-stale; next-step-held; none; problem-occurred; proving-check-failed;
+  proving-overdue; queue-add; spawn-failed; spawn-stale; spec-killed; sweep-check; tick; window-run;
+  worktree-reaped
 `src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.
 `bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.
 
