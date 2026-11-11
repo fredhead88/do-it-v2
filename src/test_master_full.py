@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -62,6 +63,12 @@ class MasterFixture(fixtures.SelectiveFixture):
         self.dispatches = []
         self.clock = NOW
         self.artifacts = {}
+        self.paths = []
+        self.api_calls = []
+        self.all_runs = None
+        self.listing_error = False
+        self.run_reply = None
+        self.no_artifact = set()
         self.stack = fixtures.contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(master_full, "_now", side_effect=lambda: self.clock))
@@ -76,11 +83,26 @@ class MasterFixture(fixtures.SelectiveFixture):
 
     def api(self, path, key):
         if key == "workflow_runs":
-            return list(self.runs)
+            self.paths.append(path)
+            if "/workflows/python-tests.yml/runs?" in path:
+                if self.listing_error:
+                    raise ValueError("GitHub API failed")
+                terms = path.split("?", 1)[1].split("&")
+                created = [t[len("created=>="):] for t in terms if t.startswith("created=>=")]
+                if len(created) != 1 or not {"event=workflow_dispatch", "branch=master",
+                                             "per_page=100"} <= set(terms):
+                    return []
+                floor = br._time(created[0])
+                return [r for r in self.runs if "created_at" in r and br._time(r["created_at"]) >= floor]
+            return list(self.runs) if self.all_runs is None else list(self.all_runs)
         if key == "jobs":
+            self.paths.append(path)
             return self.jobs[1]
         if key == "artifacts":
+            self.paths.append(path)
             rid = int(path.split("/")[-2])
+            if rid in self.no_artifact:
+                return []
             return [dict(id=rid, name="ci-selection-request", expired=False)]
         raise AssertionError((path, key))
 
@@ -92,6 +114,17 @@ class MasterFixture(fixtures.SelectiveFixture):
         return super().binary(argv, **kw)
 
     def transport(self, argv, **kw):
+        if argv[:2] == ["gh", "api"]:
+            self.assertFalse(kw.get("wait", True))
+            self.api_calls.append(argv)
+            if self.run_reply is not None:
+                return self.run_reply
+            match = re.fullmatch(r"repos/example/demo/actions/runs/(\d+)", argv[2])
+            self.assertIsNotNone(match, argv)
+            run = next((r for r in self.runs if r["id"] == int(match[1])), None)
+            if run is None:
+                return 1, "", "gh: Not Found (HTTP 404)"
+            return 0, json.dumps(run), ""
         self.assertEqual(argv[:3], ["gh", "workflow", "run"])
         self.assertFalse(kw.get("wait", True))
         self.dispatches.append(argv)
@@ -100,12 +133,13 @@ class MasterFixture(fixtures.SelectiveFixture):
     def tick(self):
         return self.mf.tick("albert-scott")
 
-    def ready(self, kind="full", *, rid=1, ids=None, conclusion="success", **changes):
+    def stage(self, kind="full", *, rid=1, ids=None, conclusion="success", **changes):
         if ids is None: ids = []
         mode = "full" if kind == "full" else "selected"
-        self.artifacts[rid] = dict(mode=mode, reason="fixture")
+        reason = "suite-full" if kind == "full" else "fixture"
+        self.artifacts[rid] = dict(mode=mode, reason=reason)
         if mode == "selected": self.artifacts[rid]["pytest_files"] = ["api/tests/test_canary.py"]
-        text = (f"CI-SELECTION mode={mode} reason=fixture files=1\n"
+        text = (f"CI-SELECTION mode={mode} reason={reason} files=1\n"
                 + "".join("NEW failed: " + i + "\n" for i in ids)
                 + f"SUMMARY pytest_baseline_gate.py check: {'FAIL' if ids else 'PASS'} new={len(ids)} changed=0\n")
         self.zips[rid] = fixtures.archive(**{"pytest.txt": text})
@@ -116,18 +150,58 @@ class MasterFixture(fixtures.SelectiveFixture):
                            created_at=self.clock.isoformat())
         run.update(conclusion=conclusion, **changes)
         self.runs.append(run)
-        intent = dict(kind=kind, sha=self.sha, slot=0, run_id=str(rid),
-                      sent_at=self.clock.isoformat(), before_ids=[],
+        return run
+
+    def intent(self, kind="full", *, sha=None, sent=None, before=(), run_id=None):
+        result = dict(kind=kind, sha=sha or self.sha, slot=0, sent_at=(sent or self.clock).isoformat(),
+                      before_ids=list(before),
                       inputs=dict(suite="full" if kind == "full" else "window", full_run=True,
                                   select_base="" if kind == "full" else self.base, rerun_ids="", checks=""))
+        if run_id is not None: result["run_id"] = str(run_id)
+        return result
+
+    def put_intent(self, intent):
         directory = self.root / "master-full/albert-scott"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / "state.json"
         state = json.loads(path.read_text()) if path.exists() else dict(pending=[], slots={}, last_full=self.sha)
-        state["slots"] = dict(full=int(self.clock.timestamp()) // 10800,
-                              canary=int(self.clock.timestamp()) // 43200)
         state["pending"].append(intent)
         self.mf._save(path, state)
+        self.quiet()
+
+    def quiet(self):
+        """Mark the cadence slots used at the current clock so a tick never dispatches."""
+        path = self.root / "master-full/albert-scott/state.json"
+        state = json.loads(path.read_text())
+        state["slots"] = dict(full=int(self.clock.timestamp()) // 10800,
+                              canary=int(self.clock.timestamp()) // 43200)
+        state["last_full"] = self.sha
+        self.mf._save(path, state)
+
+    def state(self):
+        return json.loads((self.root / "master-full/albert-scott/state.json").read_text())
+
+    def reset(self):
+        for name in ("master-full/albert-scott/state.json", "events/L-base-red-local.jsonl"):
+            (self.root / name).unlink(missing_ok=True)
+        self.runs, self.artifacts, self.api_calls, self.paths = [], {}, [], []
+        self.run_reply, self.listing_error, self.no_artifact = None, False, set()
+
+    def rows(self, event=None):
+        return [r for r in br._nightly_rows("albert-scott") if event is None or r.get("type") == event]
+
+    def candidate(self, rid, mode, reason, *, head=None, minutes=5):
+        self.artifacts[rid] = dict(mode=mode, reason=reason)
+        if mode == "selected": self.artifacts[rid]["pytest_files"] = ["api/tests/test_canary.py"]
+        run = self.run_doc(rid, "Python Tests", event="workflow_dispatch", head_branch="master",
+                           created_at=(self.clock + timedelta(minutes=minutes)).isoformat())
+        if head: run["head_sha"] = head
+        self.runs.append(run)
+        return run
+
+    def ready(self, kind="full", *, rid=1, ids=None, conclusion="success", intent_sha=None, **changes):
+        run = self.stage(kind, rid=rid, ids=ids, conclusion=conclusion, **changes)
+        self.put_intent(self.intent(kind, sha=intent_sha, run_id=rid))
         return run
 
     def receipt(self, criterion, body):
@@ -322,6 +396,47 @@ class TestCollection(MasterFixture):
                     [], 0, fixtures.archive(**members), b"")):
                 with self.assertRaises(ValueError): self.mf._artifact("example/demo", "1")
 
+    def test_descendant_full(self):
+        old = self.sha
+        (self.repo / "api/tests/test_later.py").write_text("def test_later(): pass\n")
+        self.commit("later merge")
+        later = self.sha
+        self.git("checkout", "-qb", "side", old)
+        (self.repo / "api/tests/test_side2.py").write_text("def test_s(): pass\n")
+        self.commit("diverged")
+        side = self.sha
+        self.git("checkout", "-q", "master")
+        self.sha = later
+        self.ready(rid=1, intent_sha=old, head_sha=later)
+        self.assertTrue(self.tick()["collected"])
+        row = next(r for r in self.rows() if rid_of(r) == "1")
+        self.assertTrue(row["complete"], row)
+        self.assertTrue(row["green"])
+        self.assertEqual(row["sha"], later)
+        self.assertFalse([u for u in row["undetermined"] if "master advanced" in u])
+        cases = {2: ("diverged", later, side), 3: ("unreadable", old, later),
+                 4: ("invalid intent sha", "bad", later)}
+        real_git = br.window_gate.git
+        def flaky(repo, *args, **kw):
+            if args[:2] == ("rev-list", "--first-parent") and not flaky.failed:
+                flaky.failed = True
+                raise RuntimeError("git rev-list: unreadable")
+            return real_git(repo, *args, **kw)
+        for rid, (label, intent_sha, head) in cases.items():
+            with self.subTest(label):
+                self.ready(rid=rid, intent_sha=intent_sha, head_sha=head)
+                flaky.failed = label != "unreadable"
+                with patch.object(br.window_gate, "git", side_effect=flaky):
+                    self.tick()
+                row = next(r for r in self.rows() if rid_of(r) == str(rid))
+                self.assertFalse(row["complete"])
+                self.assertIn("master advanced before dispatch acceptance", row["undetermined"])
+        self.ready("canary", rid=5, intent_sha=old, head_sha=later)
+        self.tick()
+        row = next(r for r in self.rows() if rid_of(r) == "5")
+        self.assertFalse(row["complete"])
+        self.assertIn("master advanced before dispatch acceptance", row["undetermined"])
+
 
 class TestCanary(MasterFixture):
     def test_selected_request_without_executed_pytest_is_undetermined(self):
@@ -409,6 +524,7 @@ class TestRoundTrip(MasterFixture):
                 f" stack.enter_context(patch.object(master_full, '_now', return_value=datetime.fromisoformat({self.clock.isoformat()!r})))\n"
                 f" stack.enter_context(patch.object(master_full, '_tip', return_value={self.sha!r}))\n"
                 f" stack.enter_context(patch.object(master_full.br, '_api', side_effect=lambda path,key: {self.runs!r} if key=='workflow_runs' else {self.jobs[1]!r}))\n"
+                f" stack.enter_context(patch.object(master_full, '_run', return_value={self.runs[0]!r}))\n"
                 " stack.enter_context(patch.object(master_full, '_artifact', return_value={'mode':'full'}))\n"
                 " stack.enter_context(patch.object(master_full.br, '_logs', return_value=[('pytest.txt','CI-SELECTION mode=full reason=fixture files=1\\nSUMMARY pytest_baseline_gate.py check: PASS new=0 changed=0')]))\n"
                 " result=master_full.tick('albert-scott')\n"
@@ -419,6 +535,317 @@ class TestRoundTrip(MasterFixture):
         for t in threads: t.join()
         self.assertEqual(len([r for r in br._rows("albert-scott") if r["type"] == "master-full-run"]), 1)
 
+    def test_accept_expire_fresh_reader(self):
+        self.stage("full", rid=1)
+        self.put_intent(self.intent("full"))
+        old = self.intent("canary", sent=NOW - timedelta(hours=25))
+        self.put_intent(old)
+        self.assertTrue(self.tick()["collected"])
+        read = ("import json,fold,base_red; ev=fold.read_events(use_cache=False); "
+                "state=json.loads((fold.ROOT/'master-full/albert-scott/state.json').read_text()); "
+                "print(json.dumps(dict(state=state, rows=base_red._nightly_rows('albert-scott'), "
+                "types=[e['type'] for e in ev])))")
+        first = json.loads(self.fresh(read))
+        self.assertEqual([p["kind"] for p in first["state"]["pending"]], ["canary"])
+        expired = first["state"]["pending"][0]
+        self.assertEqual(expired["expired"]["reason"], "no-run-found")
+        full = [r for r in first["rows"] if r["type"] == "master-full-run"]
+        canary = [r for r in first["rows"] if r["type"] == "selected-canary"]
+        self.assertEqual(len(full), 1)
+        self.assertEqual(full[0]["run_ids"], ["1"])
+        self.assertEqual(len(canary), 1)
+        self.assertEqual(canary[0]["expired_intent"], expired["sent_at"])
+        self.assertIn("mode=full", canary[0]["last_reason"])
+        self.assertTrue(all("actor" not in r for r in first["rows"]))
+        self.assertEqual(first["types"].count("master-full-run"), 1)
+        self.assertEqual(first["types"].count("selected-canary"), 1)
+        body = ("with contextlib.ExitStack() as stack:\n"
+                f" stack.enter_context(patch.object(master_full, '_now', return_value=datetime.fromisoformat({self.clock.isoformat()!r})))\n"
+                f" stack.enter_context(patch.object(master_full, '_tip', return_value={self.sha!r}))\n"
+                " stack.enter_context(patch.object(master_full.br, '_api', side_effect=lambda path,key: []))\n"
+                " result=master_full.tick('albert-scott')\n"
+                " assert not result['collected'] and not result['dispatched'], result\n")
+        self.fresh("import json,master_full,contextlib; from unittest.mock import patch; "
+                   "from datetime import datetime; exec(" + repr(body) + ")")
+        self.assertEqual(json.loads(self.fresh(read))["rows"], first["rows"])
+
+
+
+class TestAccept(MasterFixture):
+    LIST = ("repos/example/demo/actions/workflows/python-tests.yml/runs?event=workflow_dispatch"
+            "&branch=master&created=>=2026-11-07T00:00:00Z&per_page=100")
+
+    def test_workflow_scoped_listing(self):
+        for kind in ("full", "canary"):
+            with self.subTest(kind=kind):
+                self.reset()
+                mode, reason = ("full", "suite-full") if kind == "full" else ("selected", "fixture")
+                self.all_runs = [self.run_doc(1000 + i, "Other", event="push", head_branch="main")
+                                 for i in range(150)]
+                pending = self.intent(kind, before=["5"])
+                self.candidate(5, mode, reason)                    # already in before_ids
+                self.candidate(6, mode, reason, minutes=-60)       # created before sent_at
+                self.assertEqual(self.mf.accept("albert-scott", self.repo, "example/demo", pending), None)
+                self.candidate(7, mode, reason, head=self.base)
+                self.paths.clear()
+                self.assertEqual(self.mf.accept("albert-scott", self.repo, "example/demo", pending), "7")
+                self.assertEqual([p for p in self.paths if "/artifacts" not in p], [self.LIST])
+                self.candidate(8, mode, reason)                    # head equals the intent's sha: wins
+                self.assertEqual(self.mf.accept("albert-scott", self.repo, "example/demo", pending), "8")
+                self.candidate(9, mode, reason, head=self.base)
+                self.candidate(10, mode, reason, head=self.base)
+                self.runs = [r for r in self.runs if r["id"] not in (8,)]
+                with self.assertRaises(ValueError):
+                    self.mf.accept("albert-scott", self.repo, "example/demo", pending)
+        self.receipt("AC1", dict(path=self.LIST))
+
+    def test_artifact_failure_and_quota_are_never_none(self):
+        for kind in ("full", "canary"):
+            self.reset()
+            mode, reason = ("full", "suite-full") if kind == "full" else ("selected", "fixture")
+            pending = self.intent(kind)
+            self.candidate(7, mode, reason)
+            with patch.object(self.mf, "_artifact", side_effect=ValueError("selection artifact unavailable or oversized")):
+                with self.assertRaises(ValueError):
+                    self.mf.accept("albert-scott", self.repo, "example/demo", pending)
+            self.assertIn("7", pending["last_reason"])
+            pending = self.intent(kind)
+            with patch.object(br.ghlimit, "gate", return_value={"ok": False}):
+                with self.assertRaises(ValueError):
+                    self.mf.accept("albert-scott", self.repo, "example/demo", pending)
+            self.assertIn("quota", pending["last_reason"])
+            with patch.object(br, "_api", side_effect=OSError("down")):
+                with self.assertRaises(ValueError):
+                    self.mf.accept("albert-scott", self.repo, "example/demo", self.intent(kind))
+
+    def test_reason_and_mode_proof(self):
+        accept = lambda p: self.mf.accept("albert-scott", self.repo, "example/demo", p)
+        pending = self.intent("full")
+        self.candidate(11, "full", "suite-nightly")
+        self.candidate(12, "full", "suite-nightly", head=self.base)
+        self.candidate(13, "full", "default")
+        self.assertIsNone(accept(pending))
+        for rid in ("11", "12", "13"):
+            self.assertIn(rid, pending["last_reason"])
+        self.assertIn("mode=full reason=suite-nightly", pending["last_reason"])
+        self.assertIn("reason=default", pending["last_reason"])
+        self.candidate(14, "full", "suite-full")
+        self.assertEqual(accept(pending), "14")
+        canary = self.intent("canary")
+        self.reset()
+        self.candidate(21, "full", "selector-error")
+        self.candidate(22, "full", "bad\x1b[31m\nreason")
+        self.assertIsNone(accept(canary))
+        self.assertIn("21: mode=full reason=selector-error", canary["last_reason"])
+        self.assertIn("22", canary["last_reason"])
+        self.assertNotIn("\x1b", canary["last_reason"])
+        self.assertNotIn("\n", canary["last_reason"])
+        self.candidate(23, "selected", "fixture")
+        self.assertEqual(accept(canary), "23")
+
+
+class TestAcceptRunId(MasterFixture):
+    def test_old_run_collected_by_id_not_listing(self):
+        for kind, event in (("canary", "selected-canary"), ("full", "master-full-run")):
+            with self.subTest(kind=kind):
+                self.reset()
+                self.ready(kind)
+                with patch.object(self.mf.br, "_api", side_effect=lambda path, key: []
+                                  if "workflows/" in path else self.api(path, key)):
+                    result = self.tick()
+                self.assertTrue(result["collected"], result)
+                self.assertEqual(len(self.rows(event)), 1)
+                self.assertEqual(self.state()["pending"], [])
+                self.assertEqual(self.api_calls, [["gh", "api", "repos/example/demo/actions/runs/1"]])
+
+    def test_not_found_versus_undetermined(self):
+        self.ready()
+        self.run_reply = (1, "", "gh: Not Found (HTTP 404)")
+        self.assertIsNone(self.mf._run("example/demo", "1"))
+        replies = [(1, "", "HTTP 502"), (75, "", "ghlimit: quota low, skipped"), (1, "", ""),
+                   (0, "not json", ""), (0, json.dumps(dict(id=2)), ""), (0, "[]", "")]
+        for reply in replies:
+            with self.subTest(reply=reply):
+                self.run_reply = reply
+                with self.assertRaises(ValueError):
+                    self.mf._run("example/demo", "1")
+                result = self.tick()
+                self.assertTrue(result["undetermined"])
+                pending = self.state()["pending"]
+                self.assertEqual(len(pending), 1)
+                self.assertNotIn("expired", pending[0])
+                self.assertTrue(pending[0]["last_reason"])
+        self.assertEqual(self.rows(), [])
+        self.run_reply = (1, "", "gh: Not Found (HTTP 404)")
+        self.tick()
+        self.assertEqual(self.state()["pending"][0]["expired"]["reason"], "run-missing")
+        self.assertEqual(len(self.rows("master-full-run")), 1)
+
+
+class TestExpiry(MasterFixture):
+    def at(self, hours):
+        self.clock = NOW + timedelta(hours=hours)
+        self.quiet()
+
+    def settle(self, make, slug, hours=25):
+        """An intent is pending when young and expired with slug when old."""
+        for age, expected in ((1, None), (hours, slug)):
+            self.reset()
+            self.clock = NOW
+            make()
+            self.at(age)
+            self.tick()
+            pending = self.state()["pending"]
+            self.assertEqual(len(pending), 1)
+            if expected is None:
+                self.assertNotIn("expired", pending[0])
+                self.assertEqual(self.rows(), [])
+            else:
+                self.assertEqual(pending[0]["expired"],
+                                 {"at": self.clock.isoformat(), "reason": slug})
+                rows = self.rows()
+                self.assertEqual(len(rows), 1)
+                self.assertIn("last_reason", rows[0])
+                self.assertEqual(rows[0]["undetermined"], ["intent expired: " + slug])
+                self.assertFalse(rows[0]["complete"])
+                self.assertFalse(rows[0]["green"])
+                self.assertEqual((rows[0]["ids"], rows[0]["run_ids"]), ([], []))
+                self.assertEqual(rows[0]["expired_intent"], pending[0]["sent_at"])
+
+    def test_slugs_and_transient(self):
+        # no-run-found, with the dropped candidate cause carried onto the row
+        self.settle(lambda: (self.put_intent(self.intent("canary")), self.candidate(31, "full", "selector-error")),
+                    "no-run-found")
+        self.assertIn("31: mode=full reason=selector-error", self.rows()[0]["last_reason"])
+        # ambiguous-runs
+        def ambiguous():
+            self.put_intent(self.intent("full"))
+            self.candidate(41, "full", "suite-full", head=self.base)
+            self.candidate(42, "full", "suite-full", head=self.base)
+        self.settle(ambiguous, "ambiguous-runs")
+        # run-not-completed
+        self.settle(lambda: self.ready(status="in_progress"), "run-not-completed")
+        # collection-unprovable, once per named cause
+        def retention():
+            self.ready(); self.no_artifact.add(1)
+        def mode_proof():
+            self.ready(); self.artifacts[1] = dict(mode="selected", pytest_files=["api/tests/test_canary.py"])
+        def empty_selection():
+            self.ready("canary"); self.artifacts[1]["pytest_files"] = []
+        def bad_head():
+            self.ready(head_sha="not-a-sha")
+        for make in (retention, mode_proof, empty_selection, bad_head):
+            with self.subTest(make=make.__name__):
+                self.settle(make, "collection-unprovable")
+        # run-missing needs no age
+        self.reset(); self.clock = NOW
+        self.ready(); self.runs.clear(); self.at(1); self.tick()
+        self.assertEqual(self.state()["pending"][0]["expired"]["reason"], "run-missing")
+        # transient failures never expire, at any age
+        def stays(label):
+            self.at(48)
+            self.tick()
+            pending = self.state()["pending"]
+            self.assertEqual(len(pending), 1, label)
+            self.assertNotIn("expired", pending[0], label)
+            self.assertEqual(self.rows(), [], label)
+        for message in sorted(self.mf.TRANSIENT):
+            self.reset(); self.clock = NOW; self.ready()
+            with patch.object(self.mf, "_collect", side_effect=ValueError(message)):
+                stays(message)
+        for error in (OSError("io"), subprocess.SubprocessError("sub")):
+            self.reset(); self.clock = NOW; self.ready()
+            with patch.object(self.mf, "_collect", side_effect=error):
+                stays(repr(error))
+        self.reset(); self.clock = NOW; self.put_intent(self.intent("full"))
+        self.listing_error = True
+        stays("listing")
+        self.reset(); self.clock = NOW; self.put_intent(self.intent("full")); self.candidate(51, "full", "suite-full")
+        with patch.object(br.ghlimit, "gate", return_value={"ok": False}):
+            stays("quota")
+        self.reset(); self.clock = NOW; self.ready()
+        self.run_reply = (1, "", "HTTP 502")
+        stays("run lookup")
+        # an expired intent costs no artifact, log or jobs call on later ticks
+        self.reset(); self.clock = NOW; self.put_intent(self.intent("canary")); self.at(25)
+        self.tick()
+        self.paths.clear(); self.api_calls.clear()
+        with patch.object(self.mf, "_artifact", side_effect=AssertionError), \
+                patch.object(br, "_logs", side_effect=AssertionError):
+            self.tick()
+        self.assertFalse([p for p in self.paths if "/jobs" in p or "/artifacts" in p or "workflows/" in p])
+        self.assertEqual(self.api_calls, [])
+        import guards_live
+        row = self.rows("selected-canary")[0]
+        self.assertIsNotNone(guards_live._observation(row, "r1")[1])
+
+    def test_crash_before_save(self):
+        def expired(count):
+            return [r for r in self.rows("selected-canary") if r.get("expired_intent")] if count is None else \
+                self.assertEqual(len([r for r in self.rows("selected-canary") if r.get("expired_intent")]), count)
+        self.put_intent(self.intent("canary"))
+        self.at(25)
+        self.tick(); expired(1)
+        self.tick(); expired(1)
+        path = self.root / "master-full/albert-scott/state.json"
+        state = self.state()
+        del state["pending"][0]["expired"]
+        self.mf._save(path, state)
+        self.tick(); expired(1)
+        self.assertIn("expired", self.state()["pending"][0])
+        self.reset(); self.clock = NOW
+        self.put_intent(self.intent("canary")); self.at(25)
+        with patch.object(br, "_append", side_effect=ValueError("base-red ledger append failed")):
+            self.assertTrue(self.tick()["undetermined"])
+        self.assertNotIn("expired", self.state()["pending"][0])
+        expired(0)
+        self.tick(); expired(1)
+        self.assertIn("expired", self.state()["pending"][0])
+        self.tick(); expired(1)
+
+
+class TestShardNames(MasterFixture):
+    def collect(self, kind, rid, jobs, conclusion="success"):
+        self.ready(kind, rid=rid, conclusion=conclusion)
+        base = [dict(name="pytest", conclusion=conclusion),
+                dict(name="pg-parity (Postgres)", conclusion="success", steps=[])]
+        self.jobs[1] = base + jobs
+        self.tick()
+        return next(r for r in self.rows() if rid_of(r) == str(rid))
+
+    def shards(self, **conclusions):
+        return [dict(name=f"pytest — shard {k} of 4", conclusion=conclusions.get(f"s{k}", "success" if k <= 4 else "skipped"))
+                for k in range(1, 9)]
+
+    def test_by_design_skips_do_not_block(self):
+        for kind, rid in (("full", 1), ("canary", 2)):
+            with self.subTest(kind=kind):
+                row = self.collect(kind, rid, self.shards())
+                self.assertTrue(row["complete"], row)
+                self.assertTrue(row["green"], row)
+                self.assertFalse([u for u in row["undetermined"] if "shard" in u])
+
+    def test_real_skips_and_unparsable_names_block(self):
+        cases = [("s3 skipped", self.shards(s3="skipped"), "pytest — shard 3 of 4: skipped"),
+                 ("s3 cancelled", self.shards(s3="cancelled"), "pytest — shard 3 of 4: cancelled"),
+                 ("unparsable", self.shards() + [dict(name="pytest — shard api-2", conclusion="skipped")],
+                  "pytest — shard api-2: skipped"),
+                 ("5 of 8", self.shards() + [dict(name="pytest — shard 5 of 8", conclusion="skipped")],
+                  "pytest — shard 5 of 8: skipped")]
+        rid = 10
+        for kind in ("full", "canary"):
+            for label, jobs, text in cases:
+                rid += 1
+                with self.subTest(kind=kind, case=label):
+                    row = self.collect(kind, rid, jobs)
+                    self.assertFalse(row["complete"])
+                    self.assertFalse(row["green"])
+                    self.assertTrue([u for u in row["undetermined"] if text in u], row["undetermined"])
+                    self.assertTrue(all(len(u) <= 400 and "\n" not in u for u in row["undetermined"]))
+
+
+def rid_of(row):
+    return (row.get("run_ids") or [row.get("run_id")])[0]
 
 
 class TestKnownRed(fixtures.SelectiveFixture):
