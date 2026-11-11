@@ -219,7 +219,7 @@ class Rehearsal(unittest.TestCase):
         candidate = calls[0].args[1]
         self.assertEqual(calls[0].args[2], CHECKS)
         rows = fold.read_events()
-        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed'})
+        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed', 'window-dispatch-verdict'})
         receipt = next(e for e in rows if e['type'] == 'window-tree-verified')
         self.assertEqual((receipt['rehearsal'], receipt['base_sha']), (True, self.future))
         self.assertFalse(wg.in_flight(rows))
@@ -334,7 +334,7 @@ class Rehearsal(unittest.TestCase):
         self.assertIn('ATTRIBUTED B ' + NODE, output)
         self.assertIn('UNRESOLVED ' + UNKNOWN, output)
         rows = fold.read_events()
-        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed', 'window-flake'})
+        self.assertEqual({e['type'] for e in rows}, {'window-tree-verified', 'window-rehearsed', 'window-flake', 'window-dispatch-verdict'})
         event = next(e for e in reversed(rows) if e['type'] == 'window-rehearsed')
         self.assertEqual(event['state'], 'red')
         self.assertEqual(event['flakes'], [FLAKE])

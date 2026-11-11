@@ -93,6 +93,7 @@ class HowtoTests(unittest.TestCase):
         page = howto.render(str(self.repo))
         self.assertIn('## Member verdicts', page)
         self.assertIn('`src/window_dispatch.py`: predeploy tree, window, suite, quick ids', ' '.join(page.split()))
+        self.assertIn('`src/window_known_red.py`: `window-dispatch-verdict` completion receipts', ' '.join(page.split()))
         self.assertIn('at most 4 CI runs at once', page)
         self.assertIn('reused for 24 hours', ' '.join(page.split()))
         self.write('look.toml', '[merge_queue]\nmember_verify_parallel = 2\nverdict_fresh_hours = 6\n')
@@ -150,7 +151,7 @@ class HowtoTests(unittest.TestCase):
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))
-            self.assertLessEqual(len(page.splitlines()), 137)
+            self.assertLessEqual(len(page.splitlines()), 140)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
             self.assertEqual(page.count('\n## '), 6)

@@ -45,6 +45,7 @@ import quarantine
 import window_prewindow
 import window_members
 import window_dispatch
+import window_known_red
 
 PROJECT = "albert-scott"
 PREDEPLOY = "scripts/ci/predeploy_gate.sh"
@@ -827,6 +828,10 @@ def parse_verdict(out):
         url = m.group(0) if m else ""
     return doc, nodes, url
 
+def quick_ids(events, specs):
+    return window_known_red.quick_ids(events, specs)
+
+
 def verify(repo, cand, required, window, *, rehearsal=False, tree=None, quick=()):
     return __import__("ci_infra").verify_with_rerun(
         lambda *a, **k: _verify_once(*a, **k, **({} if tree is None and not quick else dict(tree=tree, quick=quick))), ev, repo, cand, required, window, rehearsal=rehearsal)
@@ -1509,6 +1514,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
     conflicted_all = {}
     fingerprint_failed = rechain.FailedFingerprints()
     judgments, judgment_limit = 0, 2 * len(entries) + 1
+    seen = {}
 
     def policy_candidate(candidate):
         import quarantine_file
@@ -1581,7 +1587,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                tree=tree, green=res["state"] == "green", new_ids=res["nodes"], required=required,
                **({"flakes": res["flakes"], "flake_only": res.get("flake_only", False)} if res.get("flakes") else {}))
 
-    def judge(cand, kept, *, half=False):
+    def judge_once(cand, kept, *, half=False):
         nonlocal runs, dashboard, actions_minutes, baseline, base_failures, opened, judgments, base_red_answer
         if judgments >= judgment_limit:
             escalate(window, "candidate judgment budget exhausted; affected specs remain pending", "undetermined")
@@ -1597,6 +1603,12 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
             prior = None
         cached = covers(prior, candidate_required)
+        if not cached and tree is not None:
+            # A positive known-red decision precedes any baseline ensure dispatch.
+            skipped = window_known_red.guard(sys.modules[__name__], repo, cand, tree, candidate_required, window,
+                                             project=project, base_sha=root_base, specs=[s for s in kept])
+            if skipped is not None:
+                return skipped
         if not cached and base_red_answer is None:
             base_red_answer = base_red_snapshot(project, root_base)
         if not cached and PG_CHECK in candidate_required and baseline is None:
@@ -1617,7 +1629,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
             flakes_all.update(prior.get("flakes", []))
             print(f"gate-window: tree {tree} already verified in {prior.get('window', prior.get('subject'))}")
             return dict(state="green", nodes=[], url="", doc={})
-        with window_dispatch.managed(tree):
+        with window_dispatch.managed(tree, known=dict(project=project, base_sha=root_base, specs=list(kept))):
             res = dict(verify(repo, cand, candidate_required, window), candidate=cand)
         ev('window-verification-result', window, state=res['state'], first_run=judgments == 1,
            sha=cand, specs=kept, nodes=res.get('nodes', []))
@@ -1662,6 +1674,7 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
                 record(res, tree, candidate_required)
             return dict(res, state="undetermined")
         nodes = sorted(set().union(*(failures[k] for k in ("pytest", "pg-parity", "vitest", "suite-error"))))
+        seen["failing"] = list(nodes)
         if failures["undetermined"] or not nodes:
             outcome = "half remains pending" if half else "master unmoved"
             escalate(window, f"unnamed new failures: {failures['undetermined']}; NEW ids={json.dumps(nodes)}; {outcome}, no spec dropped", "undetermined")
@@ -1784,6 +1797,23 @@ def _run_attempt(window, project, spec_args, main, fixes_base, base, root_base, 
         paths = OwnershipPaths({s: touched[s] for s in kept}, failures["pg_files"])
         unattributed = unattributed_ids(repo, cand, res["nodes"], paths)
         return dict(res, repo=repo, paths=paths, unattributed=unattributed)
+
+    def judge(cand, kept, *, half=False):
+        seen.clear()
+        res = judge_once(cand, kept, half=half)
+        if not res.get("skipped_known"):
+            try:
+                tree = tree_of(repo, cand)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                tree = ""
+            failing = seen.get("failing", [])
+            window_known_red.receipt(
+                sys.modules[__name__], window, project=project, base_sha=root_base, sha=cand, tree=tree,
+                required=candidate_scopes.get(cand, {}).get("checks", []), state=res["state"], failing_ids=failing,
+                new_ids=res.get("nodes", []) + res.get("guards", []), flakes=res.get("flakes", []),
+                pre_existing=[n for n in failing if n in pre_existing_all],
+                quarantined=[n for n in failing if n in quarantined_all])
+        return res
 
     def charge_guards(result, kept):
         guards = result.get("guards", [])
