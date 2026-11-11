@@ -438,6 +438,117 @@ class TestCollection(MasterFixture):
         self.assertIn("master advanced before dispatch acceptance", row["undetermined"])
 
 
+class TestShardActivity(MasterFixture):
+    def shard_jobs(self, plan, conclusions=None, total=8):
+        jobs = [dict(name="pytest", conclusion="success"),
+                dict(name="pg-parity (Postgres)", conclusion="success", steps=[])]
+        for k in range(1, total + 1):
+            jobs.append(dict(name=f"pytest \u2014 shard {k} of {plan}",
+                             conclusion="success" if k <= plan else "skipped"))
+        for k, v in (conclusions or {}).items():
+            jobs[2 + k - 1]["conclusion"] = v
+            if v == "failure": jobs[0]["conclusion"] = "failure"
+        return jobs
+
+    def collect(self, kind, jobs, **kw):
+        self.rid = getattr(self, "rid", 0) + 1
+        self.ready(kind, rid=self.rid, **kw)
+        self.jobs[1] = jobs
+        self.tick()
+        kinds = {"master-full-run", "selected-canary"}
+        return [r for r in br._nightly_rows("albert-scott") if r["type"] in kinds][-1]
+
+    def names_shard(self, row):
+        return any("pytest \u2014 shard" in u for u in row["undetermined"])
+
+    def test_inactive_shards_full_run_complete(self):
+        results = []
+        for plan in (2, 4, 6, 8):
+            for failing in (False, True):
+                with self.subTest(plan=plan, failing=failing):
+                    row = self.collect("full", self.shard_jobs(plan, {1: "failure"} if failing else None),
+                                       **(dict(ids=[PY], conclusion="failure") if failing else {}))
+                    self.assertTrue(row["complete"], row["undetermined"])
+                    self.assertFalse(self.names_shard(row))
+                    self.assertEqual(row["green"], not failing)
+                    results.append(dict(plan=plan, failing=failing, complete=row["complete"],
+                                        green=row["green"], undetermined=row["undetermined"]))
+        self.receipt("AC1", results)
+
+    def test_active_shard_not_executed_incomplete(self):
+        four = self.shard_jobs
+        cases = {}
+        for v in ("cancelled", "timed_out", "skipped", None):
+            cases[f"shard3-{v}"] = four(4, {3: v})
+        cases["inactive-numbered-cancelled"] = four(4, {6: "cancelled"})
+        unparseable = four(4)
+        unparseable.append(dict(name="pytest \u2014 shard api-2", conclusion="skipped"))
+        cases["unparseable"] = unparseable
+        mixed = four(4)
+        mixed[2 + 4] = dict(name="pytest \u2014 shard 5 of 8", conclusion="skipped")
+        cases["mixed-counts"] = mixed
+        only_inactive = four(4)[:2] + four(4)[2 + 4:]
+        cases["only-inactive"] = only_inactive
+        missing = four(4)
+        del missing[2 + 2]
+        cases["missing-shard-3"] = missing
+        zero = [dict(j, name=f"pytest \u2014 shard {k} of 0", conclusion="skipped")
+                for k, j in enumerate(four(4)[2:], 1)]
+        cases["of-zero"] = four(4)[:2] + zero
+        newline = four(4)
+        newline[2 + 5] = dict(name="pytest \u2014 shard 6 of 4\n", conclusion="skipped")
+        cases["trailing-newline"] = newline
+        digits = four(4)
+        digits[2 + 5] = dict(name="pytest \u2014 shard \u0666 of 4", conclusion="skipped")
+        cases["non-ascii-digit"] = digits
+        offending = {
+            **{f"shard3-{v}": "pytest — shard 3 of 4"
+               for v in ("cancelled", "timed_out", "skipped", None)},
+            "inactive-numbered-cancelled": "pytest — shard 6 of 4",
+            "unparseable": "pytest — shard api-2",
+            "mixed-counts": "pytest — shard 5 of 8",
+            "only-inactive": "pytest — shard 5 of 4",
+            "missing-shard-3": "pytest — shard 5 of 4",
+            "of-zero": "pytest — shard 1 of 0",
+            "trailing-newline": "pytest — shard 6 of 4",
+            "non-ascii-digit": "pytest — shard \u0666 of 4",
+        }
+        results = []
+        for label, jobs in cases.items():
+            with self.subTest(label):
+                active = self.mf._active_shards(jobs)
+                self.assertTrue(any(j.get("conclusion") not in {"success", "failure"} for j in active))
+                row = self.collect("full", jobs)
+                self.assertFalse(row["complete"])
+                self.assertFalse(row["green"])
+                self.assertTrue(any(offending[label] in why for why in row["undetermined"]), row)
+                results.append(dict(case=label, complete=row["complete"], green=row["green"],
+                                    undetermined=row["undetermined"]))
+        self.receipt("AC2", results)
+
+    def test_canary_inactive_shards(self):
+        row = self.collect("canary", self.shard_jobs(4))
+        self.assertTrue(row["complete"])
+        self.assertTrue(row["green"])
+        self.assertFalse(self.names_shard(row))
+        self.assertFalse(any("incomplete pytest coverage" in u for u in row["undetermined"]))
+        results = [dict(case="valid", complete=row["complete"], green=row["green"],
+                        undetermined=row["undetermined"])]
+        bad = {
+            "active-skipped": self.shard_jobs(4, {2: "skipped"}),
+            "of-zero": self.shard_jobs(4)[:2] + [
+                dict(name=f"pytest \u2014 shard {k} of 0", conclusion="skipped") for k in range(1, 9)],
+            "only-inactive": self.shard_jobs(4)[:2] + self.shard_jobs(4)[2 + 4:],
+        }
+        for label, jobs in bad.items():
+            with self.subTest(label):
+                row = self.collect("canary", jobs)
+                self.assertFalse(row["complete"])
+                self.assertFalse(row["green"])
+                results.append(dict(case=label, complete=row["complete"], green=row["green"],
+                                    undetermined=row["undetermined"]))
+        self.receipt("AC3", results)
+
 class TestCanary(MasterFixture):
     def test_selected_request_without_executed_pytest_is_undetermined(self):
         self.ready("canary")

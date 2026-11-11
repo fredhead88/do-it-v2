@@ -22,7 +22,7 @@ SHA = re.compile(r"[a-f0-9]{40}")
 COVERED = ["pg-parity", "pytest"]
 MAX_BYTES = 8 * 1024 * 1024
 EXPIRY_AGE = timedelta(hours=24)
-SHARD_NAME = re.compile(r"pytest — shard (\d+) of (\d+)")
+SHARD_NAME = re.compile(r"pytest — shard ([0-9]+) of ([0-9]+)")
 # Failures that say nothing about the run itself: never a reason to expire an intent.
 TRANSIENT = frozenset({
     "GitHub API failed", "missing GitHub API pages", "invalid GitHub API page",
@@ -163,18 +163,21 @@ def _descendant(repo, base, head):
         return False
 
 
-def _shards(jobs):
-    """Pytest shard jobs, minus a skipped shard numbered past the count in its own name."""
-    result = []
-    for job in jobs:
-        name = job.get("name", "")
-        if not name.startswith("pytest — shard "):
-            continue
-        parsed = SHARD_NAME.fullmatch(name)
-        if parsed and job.get("conclusion") == "skipped" and int(parsed[1]) > int(parsed[2]):
-            continue
-        result.append(job)
-    return result
+def _active_shards(jobs):
+    """Required shard jobs; keep every shard when its run's plan is unproven."""
+    shards = [j for j in jobs if j.get("name", "").startswith("pytest — shard ")]
+    parsed = [SHARD_NAME.fullmatch(j["name"]) for j in shards]
+    if not shards or any(m is None for m in parsed):
+        return shards
+    counts = {int(m[2]) for m in parsed}
+    if len(counts) != 1:
+        return shards
+    plan = counts.pop()
+    # A complete plan cannot require more shard numbers than there are jobs.
+    if plan < 1 or plan > len(shards) or not set(range(1, plan + 1)) <= {int(m[1]) for m in parsed}:
+        return shards
+    return [j for j, m in zip(shards, parsed)
+            if not (int(m[1]) > plan and j.get("conclusion") == "skipped")]
 
 
 def _shard_text(shards):
@@ -378,7 +381,7 @@ def _collect(project, repo, owner, pending, run):
             fields["covered"] = snapshot["kinds_covered"]
             fields["undetermined"] = snapshot["undetermined"]
             jobs = br._api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
-            partial = [j for j in _shards(jobs) if j.get("conclusion") not in {"success", "failure"}]
+            partial = [j for j in _active_shards(jobs) if j.get("conclusion") not in {"success", "failure"}]
             if partial:
                 fields["undetermined"].append(f"{len(partial)} pytest shards did not execute completely: "
                                                + _shard_text(partial))
@@ -405,7 +408,7 @@ def _collect(project, repo, owner, pending, run):
             fields["undetermined"] = [why for p in parsed for why in p["undetermined"]]
             jobs = br._api(f"repos/{owner}/actions/runs/{rid}/jobs?per_page=100", "jobs")
             executed = {"success", "failure"}
-            shards = _shards(jobs)
+            shards = _active_shards(jobs)
             partial = [j for j in shards if j.get("conclusion") not in executed]
             if partial:
                 fields["undetermined"].append("pytest shards did not execute completely: " + _shard_text(partial))
