@@ -72,6 +72,7 @@ class CacheTests(unittest.TestCase):
             'branch_refresh.py': 'reservation, adoption and post-gate decisions under the branch lock',
             'empty_grade.py': 'double-read under the grading lock before an automatic verdict',
             'owed_backfill.py': 'read back committed backfill appends',
+            'speed_report.py': 'fresh cross-project instrumentation and release census before project scoping',
             'tick.py': 'post-dispatch held-step evidence under the tick lock',
         }
         bypasses, fresh = [], set()
