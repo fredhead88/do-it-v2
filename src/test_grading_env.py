@@ -540,8 +540,8 @@ print("AC7 (support) ok")
 write_spec_verify("L-spec-9601", "grader", "spec", "git log -1")
 failures6 = grading_env.preflight("grader", "L-spec-9601", view6, "testproj", repo=str(REPO))
 gitfail = dict(failures6).get("git")
-check(gitfail is None, "AC8(i): git routes instead of failing preflight")
-print("PASS git routed, never a preflight failure")
+check(bool(gitfail), "AC8(i): missing history fails git preflight")
+print("PASS missing git history fails preflight")
 check("git" in grading_env.required("grader", "spec", "cd $BASE && git diff --stat && /usr/bin/python3 t.py",
                                      "testproj"), "AC8(i): a git argv word in a &&-segment after $BASE subst")
 check("git" not in grading_env.required(
@@ -1064,7 +1064,7 @@ VERIFY_0469 = 'run_checks.sh && BASE_LINES=$(git show $BASE:deploy.sh | wc -l)'
 caps_0469 = grading_env.criterion_caps("", VERIFY_0469, "testproj")
 check(caps_0469.get("verify") == ["git"], f"AC3(8034): unattributed verify git -> pseudo-criterion 'verify': {caps_0469}")
 route_0469 = grading_env.route("", VERIFY_0469, "testproj")
-check(route_0469.get("verify") == ("git", "owed"), f"AC3(8034): route()['verify']: {route_0469}")
+check("verify" not in route_0469, f"AC3(8034): route()['verify']: {route_0469}")
 check("git" in grading_env.required("grader", "", VERIFY_0469, "testproj"),
       "AC3(8034): required() with routed empty still includes the verify-only git")
 check("git" not in grading_env.required("grader", "", VERIFY_0469, "testproj", routed={"verify"}),
@@ -1098,10 +1098,10 @@ AC3 [backend]: deploy.
 review_path: curl /version
 """
 routes_0469 = grading_env.route(SPEC_0469SHAPE, VERIFY_0469, "testproj")
-check(set(routes_0469) >= {"AC2", "AC3", "verify"}, routes_0469)
+check(set(routes_0469) == {"AC2", "AC3"}, routes_0469)
 req_0469_routed = grading_env.required("grader", SPEC_0469SHAPE, VERIFY_0469, "testproj",
                                        routed=set(routes_0469))
-check(not ({"git", "browser", "deploy"} & set(req_0469_routed)), req_0469_routed)
+check("git" in req_0469_routed and not ({"browser", "deploy"} & set(req_0469_routed)), req_0469_routed)
 check("tools" in req_0469_routed, req_0469_routed)  # AC1's plain python need survives
 
 # (b) 0484-shaped: three [backend] criteria whose review_path is a temp-repo
@@ -1145,7 +1145,7 @@ print("AC4 (8034)(a)(b)(c) ok — (d) (fold.held_specs) lives in test_fold.py")
 
 
 # ═══════════════════════════ AC5 — route()/GRADER_NEVER exact table ═════════
-check(grading_env.GRADER_NEVER == ("browser", "deploy", "git"), grading_env.GRADER_NEVER)
+check(grading_env.GRADER_NEVER == ("browser", "deploy"), grading_env.GRADER_NEVER)
 
 # `_look_toml(DOIT_SRC)` reads the REAL repo-root look.toml, not the fixture
 # REPO above (route()/required() always resolve `[[prod]]` against
@@ -1164,10 +1164,10 @@ try:
     r_gone = grading_env.route(SPEC8034, "", "noprod")
     check(r_hasprod.get("AC4") == ("browser", "reviewer"), r_hasprod)
     check(r_hasprod.get("AC5") == ("deploy", "reviewer"), r_hasprod)
-    check(r_hasprod.get("AC2") == ("git", "owed"), r_hasprod)  # git always owed
+    check("AC2" not in r_hasprod, r_hasprod)  # pinned history stays with grader
     check(r_gone.get("AC4") == ("browser", "owed"), r_gone)
     check(r_gone.get("AC5") == ("deploy", "owed"), r_gone)
-    check(r_gone.get("AC2") == ("git", "owed"), r_gone)
+    check("AC2" not in r_gone, r_gone)
     # several GRADER_NEVER needs -> first in GRADER_NEVER order (browser, deploy, git)
     multi = grading_env.criterion_caps(
         "## Acceptance criteria\n\nAC9 [ui]: multi.\nreview_path: git log -1, log in as x, go to /, curl /version\n",

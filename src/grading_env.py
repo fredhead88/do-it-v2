@@ -31,10 +31,8 @@ CAPABILITIES = ("env-file", "view-paths", "tools", "node_modules", "git",
                 "db", "db-schema", "browser", "review-account", "deploy")
 # Every preflight gap belongs to the spec whose view failed its proof.
 SPEC_LOCAL = frozenset(CAPABILITIES)
-# L-spec-8034/R12.g: capabilities a grader never has, by construction (R8's
-# git-less invariant, no browser, no deploy target) — a criterion needing one
-# of these routes to the reviewer or to owed instead of holding the grade.
-GRADER_NEVER = ("browser", "deploy", "git")
+# SD11: pinned read-only history is available; browser/deploy still route.
+GRADER_NEVER = ("browser", "deploy")
 
 # Unset in the environment of every process this module starts (Constraints).
 PROD_DSN_VARS = ("SUPABASE_DB_URL", "SUPABASE_DB_URL_DIRECT",
@@ -316,9 +314,8 @@ def route(spec_text, verify_text, project):
     """R12.g/AC5: `{criterion_id: (capability, "reviewer"|"owed")}` for every
     grader criterion (or the pseudo-criterion `"verify"`) whose block needs a
     `GRADER_NEVER` capability. Browser and deploy route to `"reviewer"` when
-    the project has a `[[prod]]` row, to `"owed"` when it has none; `git`
-    always routes to `"owed"` (nothing is deployed to drive a git-less grader
-    into having history). A criterion needing several `GRADER_NEVER`
+    the project has a `[[prod]]` row, to `"owed"` when it has none.
+    A criterion needing several `GRADER_NEVER`
     capabilities routes on the first in `GRADER_NEVER` order (Assumption 6).
     Pure: text and `look.toml` only. These are capability routes; dispatch uses
     routing.diff_routes with standing rejections to decide actual ownership.
@@ -329,7 +326,7 @@ def route(spec_text, verify_text, project):
         hit = next((c for c in GRADER_NEVER if c in caps), None)
         if hit is None:
             continue
-        to = "owed" if hit == "git" else ("reviewer" if has_prod else "owed")
+        to = "reviewer" if has_prod else "owed"
         out[cid] = (hit, to)
     return out
 
@@ -587,8 +584,8 @@ def _sandboxed_run(view, project, repo, argv):
     """Inside `bwrap_argv`'s sandbox, or on the host with `pane_env` (Assumption 6)."""
     if _bwrap_available():
         import grader_view
-        wrap = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, binds=sandbox_binds(view, project))
         try:
+            wrap = grader_view.bwrap_argv(view, doit_src=DOIT_SRC, binds=sandbox_binds(view, project))
             r = _run(wrap + ["--"] + argv, capture_output=True, text=True, timeout=30)
         except Exception as exc:
             return False, f"sandboxed run raised: {exc}"
@@ -743,7 +740,46 @@ def preflight(role, subject, view, project, *, repo, mcp_config=None, owed=froze
     kwargs = dict(repo=repo, mcp_config=mcp_config, owed=owed, routed=routed, bundled=bundled)
     with provision.context(tree=pathlib.Path(view) / "tree", grading=(args, kwargs)):
         prepared = provision.prepare(record, lane="grading")
-    return prepared.failures
+    reasons = dict(prepared.failures)
+    spec_text, verify_text = _spec_verify_text(subject, role)
+    caps = required(role, spec_text, verify_text, project,
+                    owed=owed, routed=routed, bundled=bundled)
+    if role == "grader" and "git" in caps:
+        ok, reason = _prove_git(view, project)
+        if not ok:
+            if failure_kind(reason) == "infra":
+                raise InfraFailure(infra_class(reason))
+            reasons["git"] = reason
+    return [(c, reasons[c]) for c in CAPABILITIES if c in reasons]
+
+
+def _prove_git(view, project):
+    """No host fallback: history evidence requires the actual sandbox."""
+    import grader_view
+    try:
+        view = pathlib.Path(view)
+        sha = json.loads((view / "view.json").read_text())["ready_sha"]
+        grader_view.history_argv(view, sha)
+        if not _bwrap_available():
+            raise InfraFailure("runner-or-network")
+        wrap = grader_view.bwrap_argv(view, doit_src=DOIT_SRC,
+                                     binds=sandbox_binds(view, project))
+        git = ["/usr/bin/git", "-C", str(view / "tree")]
+        for args in (["rev-parse", "HEAD"], ["log", "-1", "--format=%H"],
+                     ["show", "HEAD^{tree}"], ["fsck", "--full", "--no-reflogs"]):
+            r = _run(wrap + ["--"] + git + args, capture_output=True, text=True, timeout=30)
+            if r.returncode:
+                reason = "git history sandbox proof failed: " + (r.stderr or "")[-200:]
+                if grader_view._sandbox_unavailable(r) or (r.stderr or "").startswith("bwrap:"):
+                    raise InfraFailure(infra_class(reason))
+                return False, reason
+            if args[0] in ("rev-parse", "log") and r.stdout.strip() != sha:
+                return False, "git history HEAD disagrees with build identity"
+    except FileNotFoundError:
+        return False, "git history or sandbox executable is missing"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        return False, f"git history proof failed: {exc}"
+    return True, None
 
 
 def sandbox_binds(view, project):
