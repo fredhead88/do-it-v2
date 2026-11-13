@@ -109,6 +109,12 @@ class HowtoTests(unittest.TestCase):
                        'claude-opus-5-5', '14 days', 'axis=K'):
             self.assertIn(marker, page)
 
+    def test_base_failure_handoff_entry(self):
+        page = howto.render(str(REPO))
+        for marker in ('DONE+notes', 'BLOCKED+base_only/cited',
+                       'current proof with `n_new=0`', 'existing gates apply'):
+            self.assertIn(marker, page)
+
     def test_direct_merge_entry(self):
         page = ' '.join(howto.render(str(REPO)).split())
         for marker in ('src/direct_merge.py', 'merge_one', 'one do-it-v2 queue row',

@@ -441,8 +441,9 @@ def _launch_bundle(step, *, dispatcher, reconcile_only=False):
         identity = nextstep._bundle_context(evs, step.item, step.trigger)
         if identity is None:
             return None
+        main_sha = getattr(dispatcher, 'mains', {}).get(identity['project'])
         now = getattr(dispatcher, 'now', datetime.now(timezone.utc))
-        if nextstep._bundle_usable(evs, step.item, identity['sha']):
+        if nextstep._bundle_usable(evs, step.item, identity['sha'], main_sha=main_sha):
             return None
         if grader_packet.snapshot_identity_missing(evs, step.item, identity['sha']):
             return None
@@ -487,7 +488,8 @@ def _launch_bundle(step, *, dispatcher, reconcile_only=False):
             return None
         # A stale caller cannot release a lifecycle hold or dispatch an old SHA.
         specs = fold.fold(raw_events)[0]
-        mains = {} if raw_events is not events else None
+        mains = ({identity['project']: main_sha} if main_sha is not None else
+                 {} if raw_events is not events else None)
         fresh = next((s for s in nextstep.next_steps(raw_events, specs, now, __import__('lane_rules').load(), mains=mains)
                       if s.item == step.item and s.item_kind == 'spec'), None)
         if fresh is None or fresh.action != 'bundle' or fresh.trigger != step.trigger:

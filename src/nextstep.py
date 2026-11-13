@@ -561,7 +561,7 @@ def _regrade(c):
                 and _time(unblocked['ts']) > _time(hold['ts'])
                 and not routing.hold_ruled(c['evs'], hold, c['sid'])):
             triggers.append(unblocked)
-    decision, kind = autodispatch._grader_trigger(c['evs'])
+    decision, kind = autodispatch._grader_trigger(c['evs'], main_sha=_main_identity(c))
     if decision and kind == 'regrade':
         triggers.append(decision)
     trigger = max(triggers, key=lambda e: _time(e['ts']), default=None)
@@ -644,10 +644,33 @@ def _build(c):
 
 
 
+def _main_identity(c):
+    import project_scope
+    if c.get('mains') is None:
+        return None
+    return c['mains'].get(project_scope.subject_project(c.get('events', c['evs']), c['sid']))
+
+
+def _base_attempt(c):
+    return autodispatch.base_only_attempt(c['evs'], main_sha=_main_identity(c))
+
+
+def _base_question(question, block):
+    return (question.get('type') == 'question' and question.get('actor') == 'builder'
+            and question.get('subject') == block.get('subject') and bool(block.get('spawn'))
+            and question.get('spawn') == block.get('spawn')
+            and question.get('asks') == block.get('reason')
+            and isinstance(question.get('blocks'), list) and block.get('subject') in question['blocks'])
+
+
 def _grade(c):
     if c['dependency']:
         return None
-    trigger, kind = autodispatch._grader_trigger(c['evs'])
+    trigger, kind = autodispatch._grader_trigger(c['evs'], main_sha=_main_identity(c))
+    attempt = _base_attempt(c)
+    if not trigger and attempt and attempt[1].state == 'failed':
+        # Dispatch's existing preflight:runner failure/item path remains authoritative.
+        trigger = __import__('fold_stalls').newest_builder_outcome(c['evs'])
     if not trigger or kind == 'regrade' or _rebuild(c) or _regrade(c) or _close(c):
         return None
     if _after(c['evs'], trigger, JUDGING | {'queue-add', 'merge-gate-clean'}):
@@ -1268,9 +1291,12 @@ def _bundle_context(events, subject, trigger):
                 ref=trigger, spec_sha256=revision, acquisition_key=key)
 
 
-def _bundle_usable(events, subject, ready):
+def _bundle_usable(events, subject, ready, *, main_sha=None):
     import grader_packet
     import evidence_revision
+    if main_sha is not None and grader_packet.evidence_state(
+            events, subject, main_sha=main_sha).state != 'ready':
+        return False
     found = grader_packet.bundle_for(events, subject, ready, record=False)
     if found is None:
         return False
@@ -1534,16 +1560,6 @@ def next_steps(events, specs, now, rules, waves=None, mains=None):
                     steps.append(_hold(sid, 'spec', 'planned', trigger, reason, clears,
                                        'executor' if exhausted else 'tick', audit['since']))
                 continue
-            import bundle_wait
-            base_pending = bundle_wait.base_hold(events, sid, mains)
-            if base_pending and not c['dependency'] and sid not in busy:
-                block, view, main = base_pending
-                recovery = dict(c, evs=[e for e in view if e.get('subject') == sid], events=view)
-                row = dict(trigger=_source(block), since=block['ts'], reason='not-ready:bundle-pending')
-                steps.append(_bundle_step(recovery, row) or _hold(
-                    sid, 'spec', 'checking', block, 'base-only evidence ready',
-                    'thinker/operator release the base-only block', 'thinker'))
-                continue
             tooling = _gate_tooling(c)
             if tooling and (tooling['hold'] or tooling['due'] and now < _time(tooling['due'])):
                 reason = tooling['hold'] or ('gate-tooling: waiting; retry_at=' + tooling['due'])
@@ -1572,7 +1588,10 @@ def next_steps(events, specs, now, rules, waves=None, mains=None):
                 steps.append(_hold(sid, 'spec', stage, failure, reason, 'infra-retry backoff or freed disk'
                                    if classification == 'infra' else 'classified failure'))
                 continue
+            base_attempt = _base_attempt(c)
             questions = _unanswered(evs, events)
+            if base_attempt and (base_attempt[1].state == 'pending' or autodispatch.base_only_proven(base_attempt)):
+                questions = [q for q in questions if not _base_question(q, base_attempt[0])]
             if questions:
                 steps.append(_hold(sid, 'spec', stage, questions[-1], 'judgment: open question/escalation', 'decision'))
                 continue
@@ -1584,6 +1603,27 @@ def next_steps(events, specs, now, rules, waves=None, mains=None):
                 steps.append(_hold(sid, 'spec', stage, trigger if conflict and trigger else attempts[spawn],
                                    ('grade-wait: conflict ' if conflict else 'in flight: ') + spawn,
                                    spawn + ' spawn-done/spawn-failed', 'tick'))
+                continue
+            if base_attempt and not c['dependency'] and base_attempt[1].state == 'pending':
+                import bundle_wait
+                block, state = base_attempt
+                # The predecessor uses action=bundle as its fresh-admission marker;
+                # state=hold keeps this out of paid-role scheduling.
+                steps.append(Step(sid, 'spec', 'checking', 'hold', 'bundle', 'tick', _source(block),
+                    'not-ready:bundle-pending',
+                    bundle_wait.clears(evs, sid, _main_identity(c), 'Current base-only comparison required'),
+                    block['ts']))
+                continue
+            import bundle_wait
+            # Preserve the predecessor's operator-marked (non-builder) recovery lane.
+            legacy = bundle_wait.base_hold(events, sid, mains)
+            if legacy and legacy[0].get('type') != 'build-blocked' and not c['dependency']:
+                block, view, main = legacy
+                recovery = dict(c, evs=[e for e in view if e.get('subject') == sid], events=view)
+                row = dict(trigger=_source(block), since=block['ts'], reason='not-ready:bundle-pending')
+                steps.append(_bundle_step(recovery, row) or _hold(
+                    sid, 'spec', 'checking', block, 'base-only evidence ready',
+                    'thinker/operator release the base-only block', 'thinker'))
                 continue
             contexts.append(c)
         except Exception as exc:

@@ -118,7 +118,7 @@ Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_r
   worktree-reaped
 `src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.
 `bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.
-
+`DONE+notes`; `BLOCKED+base_only/cited`: current proof with `n_new=0` → grade; existing gates apply.
 ## Member verdicts
 Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).
 - After a red window with unnamed owners, each remaining member is verified alone on the window

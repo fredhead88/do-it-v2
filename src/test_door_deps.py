@@ -1681,6 +1681,18 @@ def check_inventory(analysis, roots, inputs, surfaces, committed, exclusions=Non
 # any other answer root; the guard re-derives reachability, so a function that
 # an answer root starts to call loses this exemption.
 SURFACE_GROUPS = (
+    (r'fable_dossier',
+     'offline test-review dossier builder/checker: reads tracked tests and evidence files for '
+     'an operator proposal, never called by tick or an answer root'),
+    (r'rehearsal_replay',
+     'offline rehearsal-replay CLI: reads a supplied CSV for modeled metrics, never called '
+     'by tick or an answer root'),
+    (r'migration_cut',
+     'planner migration-cut advice over supplied declarations and repository paths: '
+     'not called by tick or an answer root'),
+    (r'selection_switch',
+     'merge execution canary gate: reads selected-canary history and Git ancestry after '
+     'step selection, never called by tick or an answer root'),
     (r'(fold|nextstep|tick|dispatch|autodispatch|merge_queue|proving|rulings|dependency_holds|'
      r'lane_rules|attempts|bundle_wait|routing|spawns|start_check|window_policy|window_prewindow|'
      r'grader_packet|grading_env|checks|owed|owed_failures|owed_routes|owed_verdicts|panes|'

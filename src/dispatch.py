@@ -773,19 +773,17 @@ def pinned_base_explicit(packet_path):
         return False
     return _pinned_base_explicit_in(text)
 
-def commit_shape_events(subject, status, pinned, ready_sha, worktree, *, events=None):
+def commit_shape_events(subject, status, pinned, ready_sha, worktree, *, events=None, base_only=False):
     """Check COMMIT-SHAPE on DONE rework rounds against prior build-done events."""
     import fold
     specs, *_ = fold.fold(current_events(events))
-    if not any(e["type"] == "build-done" for e in specs.get(subject, {"evs": []})["evs"]):
-        return []
-    if status != "DONE":
-        return []
-    r = subprocess.run(["git", "-C", str(worktree), "rev-list", "--count", f"{pinned}..{ready_sha}"],
-                       capture_output=True, text=True)
+    if not base_only and not any(e["type"] == "build-done" for e in specs.get(subject, {"evs": []})["evs"]): return []
+    if status != "DONE" and not (status == "BLOCKED" and base_only): return []
+    r = subprocess.run(["git", "-C", str(worktree), "rev-list", "--count", f"{pinned}..{ready_sha}"], capture_output=True, text=True)
     n = r.stdout.strip()
     if r.returncode == 0 and n.isdigit():
-        if int(n) == 1:
+        ancestor = subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", pinned, ready_sha], capture_output=True, text=True) if base_only else None
+        if int(n) == 1 and (ancestor is None or ancestor.returncode == 0):
             return [("criterion-cleared", dict(criterion="COMMIT-SHAPE"))]
         count_desc = n
     else:
@@ -974,8 +972,9 @@ def events_for(role, out, a, base, *, events=None):
         handin = getattr(a, "_handin", None)     # set by _main's completion guard
         if out["status"] == "DONE" and handin in ("clean", "undetermined"):
             bd_kv.update(handin_check=handin, **({"handin_reason": "handin-check:undetermined"} if handin == "undetermined" else {}))
+        if out["status"] == "DONE" and "notes" in out: bd_kv["notes"] = out["notes"]
         ev.append(("build-done", bd_kv))
-        ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd, events=current_events(events))
+        ev += commit_shape_events(a.subject, out["status"], pinned, i["ready_sha"], a.cwd, events=current_events(events), base_only=out.get("base_only") is True and handin != "secret-scan")
         for d in out["deviations"]:
             e = dict(deviation=d["type"], what=d["what"])   # `type` is the event's (found on the first real build)
             if d["type"] == "significant":      # owes an ADR; the wrapper files it from `why`
@@ -987,7 +986,8 @@ def events_for(role, out, a, base, *, events=None):
             ev.append(("build-blocked", dict(reason="handin-check:secret-scan")))
         elif out["status"] == "BLOCKED":
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
-                                             or next((d["line"] for d in out["declarations"]), "unstated"))))
+                                             or next((d["line"] for d in out["declarations"]), "unstated"),
+                                             ready_sha=i["ready_sha"], base_only=out.get("base_only", False), cited=out.get("cited", []))))
     elif role in ("owed-sweeper", "owed-verifier"):
         ev.extend(__import__('owed_verdicts').events(out['results'], a.subject))
     return ev + qs + decl
