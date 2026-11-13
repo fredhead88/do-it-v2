@@ -71,12 +71,15 @@ class Scratch(unittest.TestCase):
 
     def baseline(self):
         repo = Path(__file__).resolve().parent.parent
-        before = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD^'],
+        # Pin the parent of the reader optimization, so later commits cannot
+        # turn the comparison into optimized code versus itself.
+        before = subprocess.check_output(['git', '-C', str(repo), 'rev-parse',
+                                          '789959d0f286ccbb61042096d54766df4239e1a0'],
                                          text=True).strip()
         merged = subprocess.check_output(['git', '-C', str(repo), 'log', before,
                                           '--format=%s', '--grep=L-charter-0086'], text=True)
         self.assertEqual(merged, '', 'resolve actual first charter merge parent before extending this fixture')
-        print('BEFORE_SHA:', before, '(provisional main base)', flush=True)
+        print('BEFORE_SHA:', before, '(pinned reader optimization baseline)', flush=True)
         source = self.root / 'baseline'
         source.mkdir()
         archive = subprocess.check_output(['git', '-C', str(repo), 'archive', before,

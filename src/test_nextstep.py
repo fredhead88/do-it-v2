@@ -1229,6 +1229,45 @@ class NoSilentUndeterminedTests(unittest.TestCase):
                     self.assertEqual(self.one(events + [refused]), step)
         self.signed('L-spec-1853/AC2', asdict(step))
 
+    def test_enqueue_ignores_clean_gate_older_than_rebuild(self):
+        original = self.built() + [event('verdict', -70, confirmed=True),
+                                  event('review', -60, n_blocking=0),
+                                  event('merge-gate-clean', -50)]
+        checked = []
+        for kind in ('build-done', 'build-blocked'):
+            with self.subTest(kind=kind):
+                rebuilt = event(kind, -40, actor='builder',
+                                status='DONE' if kind == 'build-done' else 'BLOCKED')
+                events = original + [rebuilt]
+                self.assertGreater(ns._time(rebuilt['ts']), ns._time(original[-1]['ts']))
+                self.assertIsNone(ns._enqueue(self.context(events)))
+                step = ns.step_for(events, specs_for(events), SID, NOW, self.rules)
+                self.assertEqual(self.steps(events), [step])
+                self.assertNotEqual(step.action, 'enqueue')
+                self.assertFalse(step.reason.startswith('undetermined:'), step)
+                checked.append(dict(build=kind, enqueue=None, step=asdict(step)))
+        self.assertEqual(len(checked), 2)
+        self.signed('L-spec-2436/AC1', checked)
+
+    def test_enqueue_clean_gate_current_behaviour_unchanged(self):
+        original = self.built() + [event('verdict', -70, confirmed=True),
+                                  event('review', -60, n_blocking=0),
+                                  event('merge-gate-clean', -50)]
+        result = ns._enqueue(self.context(original))
+        self.assertEqual(result['since'], original[-2]['ts'])
+        malformed = self.built() + [event('verdict', -70, confirmed=True),
+                                    event('merge-gate-clean', -50)]
+        with self.assertRaisesRegex(ValueError, 'clean review timestamp'):
+            ns._enqueue(self.context(malformed))
+        # A build tied with the gate does not make the gate stale.
+        for kind in ('build-done', 'build-blocked'):
+            with self.subTest(tied_build=kind):
+                tied = malformed[:-1] + [event(kind, -50, actor='builder'), malformed[-1]]
+                with self.assertRaisesRegex(ValueError, 'clean review timestamp'):
+                    ns._enqueue(self.context(tied))
+        self.signed('L-spec-2436/AC2', dict(enqueue=result, inconsistent_gate_raises=True,
+                                         equal_timestamps_current=True))
+
     def test_stale_gate_review_and_controls(self):
         original = self.built() + [event('verdict', -70, confirmed=True),
                                   event('review', -60, n_blocking=0),

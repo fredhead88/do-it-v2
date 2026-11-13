@@ -752,6 +752,9 @@ def _enqueue(c):
     trigger = _latest(c['evs'], {'merge-gate-clean', 'merge-gate-undetermined', 'merge-gate-rework', 'conflict-rework'})
     if not trigger or trigger['type'] != 'merge-gate-clean':
         return None
+    build = _latest(c['evs'], {'build-done', 'build-blocked'})
+    if build and _time(trigger['ts']) < _time(build['ts']):
+        return None
     judgment = _latest(c['evs'], {'verdict', 'cannot-assess'})
     if judgment and _time(trigger['ts']) < _time(judgment['ts']):
         return None
