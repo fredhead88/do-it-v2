@@ -10,7 +10,8 @@ passes launch routine roles, including due charter close reviews. The ordinary
 tick event is the durable heartbeat and close-review fork receipt. The Executor
 is a supervised pane that reads the same lane for itself.
 """
-from contextvars import ContextVar
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar, copy_context
 from itertools import chain
 
 import ledger_files
@@ -54,6 +55,7 @@ LANE_LOG_BYTES = 1024 * 1024
 # Only the current guarded pass owns these observations and accepted launches.
 # Context-local state also covers recovery without changing its public contract.
 _PASS = ContextVar('tick_pass', default=None)
+BUILDER_LAUNCH_WORKERS = 4
 
 
 def _committed(refused):
@@ -838,6 +840,64 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     merge_direct_done = False
     merged = _PASS_MERGED
     merged.clear()
+    pending_builders, reserved_items = [], set()
+
+    def act(step, role, get_spawn, lines, *, reserved=False):
+        nonlocal audit_launches, gate_disabled
+        accepted = False
+        try:
+            try:
+                spawned, raised = True, True  # Any exception may follow a started process.
+                try:
+                    if step.action == 'audit':
+                        audit_launches += 1
+                    spawn = get_spawn()
+                    spawned, raised = bool(spawn), False
+                finally:
+                    if gate is not None and not gate_disabled:
+                        try:
+                            gate.note_launch(step.item, spawned, raised=raised)
+                        except Exception as exc:
+                            gate_errors.append('note_launch: ' + str(exc))
+                            gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
+                if spawn:
+                    accepted = True
+                    if _PASS.get() is not None:
+                        _PASS.get()['launched'].add(step.item)
+                    lines.append(f'acted {step.item} {step.action} spawn={spawn}')
+                    if role in slots and not reserved:
+                        slots[role] -= 1
+                else:
+                    lines.append(f'hold {step.item}: standing dispatch failure')
+            except ValueError as exc:
+                if reporter and step.action != 'bundle':
+                    reporter.fail(step.item, exc, phase='launch')
+                lines.append(f'failed {step.item} {step.action}: {exc}')
+        finally:
+            if reserved and not accepted:
+                slots['builder'] += 1
+
+    def flush_builders():
+        if not pending_builders:
+            return
+        batch = list(pending_builders)
+        pending_builders.clear()
+        with ThreadPoolExecutor(max_workers=min(len(batch), BUILDER_LAUNCH_WORKERS)) as pool:
+            futures = [pool.submit(context.run, launch, step, dispatcher=runner)
+                       for step, index, context in batch]
+            for (step, index, context), future in zip(batch, futures):
+                lines = []
+                try:
+                    act(step, 'builder', future.result, lines, reserved=True)
+                except Exception as exc:
+                    if merged:
+                        _report_merge_pass_failure(merged, exc)
+                    if reporter:
+                        reporter.fail(step.item, exc, phase='dispatch')
+                    detail = ': ' + dispatch._failure_detail(exc) if isinstance(exc, ValueError) else ''
+                    lines.append(f'failed {step.item} {step.action}: {type(exc).__name__}{detail}')
+                out[index] = lines[0]
+
     try:
         try:
             grades_first = bool(gate is not None and gate.grades_first)
@@ -848,6 +908,13 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             return visit_key(step, grades_first, first)
         for step in sorted(steps, key=visit_order):
             try:
+                if not dry_run and step.item in reserved_items:
+                    continue
+                # Enforcement uses prior outcomes for headroom and escape/retry
+                # decisions. Non-builders also retain their inline launch order.
+                if pending_builders and (getattr(gate, 'mode', None) == 'enforce'
+                                         or ROUTINE_ROLES.get(step.action) != 'builder'):
+                    flush_builders()
                 if reporter and step.item in reporter.failed:
                     out.append(f'failed {step.item}: hold evaluation failed')
                     continue
@@ -950,32 +1017,15 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     if role in slots:
                         slots[role] -= 1
                     continue
-                try:
-                    spawned, raised = True, True  # Any exception may follow a started process.
-                    try:
-                        if step.action == 'audit':
-                            audit_launches += 1
-                        spawn = launch(step, dispatcher=runner)
-                        spawned, raised = bool(spawn), False
-                    finally:
-                        if gate is not None and not gate_disabled:
-                            try:
-                                gate.note_launch(step.item, spawned, raised=raised)
-                            except Exception as exc:
-                                gate_errors.append('note_launch: ' + str(exc))
-                                gate_disabled = getattr(gate, 'mode', 'observe') == 'enforce'
-                    if spawn:
-                        if _PASS.get() is not None:
-                            _PASS.get()['launched'].add(step.item)
-                        out.append(f'acted {step.item} {step.action} spawn={spawn}')
-                        if role in slots:
-                            slots[role] -= 1
-                    else:
-                        out.append(f'hold {step.item}: standing dispatch failure')
-                except ValueError as exc:
-                    if reporter and step.action != 'bundle':
-                        reporter.fail(step.item, exc, phase='launch')
-                    out.append(f'failed {step.item} {step.action}: {exc}')
+                if role == 'builder':
+                    slots['builder'] -= 1
+                    reserved_items.add(step.item)
+                    pending_builders.append((step, len(out), copy_context()))
+                    out.append(None)  # The result belongs at this Step's position.
+                    if slots['builder'] == 0 or len(pending_builders) >= BUILDER_LAUNCH_WORKERS:
+                        flush_builders()
+                    continue
+                act(step, role, lambda: launch(step, dispatcher=runner), out)
             except Exception as exc:
                 if merged:
                     _report_merge_pass_failure(merged, exc)
@@ -983,6 +1033,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     reporter.fail(step.item, exc, phase='dispatch')
                 detail = ': ' + dispatch._failure_detail(exc) if isinstance(exc, ValueError) else ''
                 out.append(f'failed {step.item} {step.action}: {type(exc).__name__}{detail}')
+        flush_builders()
     except Exception as exc:
         if merged:
             _report_merge_pass_failure(merged, exc)

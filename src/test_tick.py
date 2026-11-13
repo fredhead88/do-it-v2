@@ -431,6 +431,10 @@ class AdmissionTests(unittest.TestCase):
             (cron / 'memory.current').write_text('1073741824')
             stack.enter_context(patch.dict(os.environ, DOIT_ADMISSION=mode, DOIT_ADMISSION_TEST='1',
                 DOIT_ADMISSION_TEST_PROC=str(proc), DOIT_ADMISSION_TEST_CGROUP=str(cg), DOIT_ADMISSION_TEST_NCPU='8'))
+            # These fixtures compare the complete subprocess/event trace across
+            # admission modes. Concurrency itself has real-Git/sleep coverage in
+            # ParallelBuilderLaunch; retain deterministic admission accounting here.
+            stack.enter_context(patch.object(tick, 'BUILDER_LAUNCH_WORKERS', 1))
             stack.enter_context(patch.object(autodispatch, 'capacity', return_value=2))
             stack.enter_context(patch.object(lane_driver, 'capacity', return_value=1))
             stack.enter_context(patch.object(lane_driver, '_in_flight_role', return_value=0))

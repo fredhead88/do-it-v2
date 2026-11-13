@@ -25,9 +25,16 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, panes, relay, up
 import tick
 
+# The combined verification imports test_tick, whose legacy script stubs these
+# process-wide boundaries. Planner tests always exercise their real entrypoints.
+_PLANNER_BOUNDARIES = ((up, 'ensure_planner', up.ensure_planner),
+                       (tick.pane_resume, 'run', tick.pane_resume.run))
+
 
 class Scratch(unittest.TestCase):
     def setUp(self):
+        for module, name, real in _PLANNER_BOUNDARIES:
+            self.enterContext(patch.object(module, name, real))
         root = self.enterContext(tempfile.TemporaryDirectory(prefix='tick-launch-'))
         self.root = pathlib.Path(root)
         self.events = self.root / 'events'
@@ -768,6 +775,185 @@ class AC5(Scratch):
                                          f'{name}: new failing ids absent from base')
             finally:
                 git('worktree', 'remove', '--force', str(wt))
+
+class ParallelBuilderLaunch(Scratch):
+    """Real scratch Git worktrees and ledger appends, with costly detach calls."""
+    DELAY = 0.5
+
+    def setUp(self):
+        import contextlib
+        with patch.object(up, 'ensure_planner', up.ensure_planner):
+            from test_tick import _builder_project
+        super().setUp()
+        self.stack = self.enterContext(contextlib.ExitStack())
+        _builder_project(self.root, self.stack)
+        self.enterContext(patch.object(dispatch, 'CONTENT', self.root / 'content'))
+        self.enterContext(patch.object(fold, 'PROJECT', None))
+        (self.root / 'content').mkdir()
+        self.calls = []
+        self.failing = set()
+        self.main_thread = __import__('threading').get_ident()
+        self.worker_threads = set()
+        self.enterContext(patch('autodispatch.capacity', return_value=8))
+        self.enterContext(patch('loadgate.begin', return_value=None))
+
+    def seed(self, count):
+        import nextstep
+        self.subjects = [f'L-spec-{9100 + n}' for n in range(count)]
+        self.rows = [dict(type='spec-written', subject=sid, project='proj', actor='operator',
+                          ts=(self.now - timedelta(hours=1)).isoformat(), _src=f'fixture:{n}')
+                     for n, sid in enumerate(self.subjects)]
+        for sid in self.subjects:
+            (self.root / 'content' / (sid + '.md')).write_text('AC1 [backend]: fixture.\n')
+        self.steps = [nextstep.Step(sid, 'spec', 'checking', 'action', 'build', 'tick',
+                                   f'fixture:{n}', 'condition met', None, self.rows[n]['ts'])
+                      for n, sid in enumerate(self.subjects)]
+
+    def runner(self, argv):
+        if argv[0] == 'git':
+            done = subprocess.run(argv, capture_output=True, text=True)
+            return dict(code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+        if argv[:2] == ['doit', 'dispatch']:
+            import threading
+            sid = argv[4]
+            self.calls.append(sid)
+            self.worker_threads.add(threading.get_ident())
+            time.sleep(self.DELAY)
+            if sid in self.failing:
+                return dict(code=1, stdout='', stderr='fixture detach failure')
+            return dict(code=0, stdout=json.dumps(dict(detached='L-builder-' + sid[7:])), stderr='')
+        return dict(code=0, stdout='/packet.md', stderr='')
+
+    def run_pass(self):
+        state = dict(skips=[], launched=set(), wrote=False)
+        token = tick._PASS.set(state)
+        seats = {}
+        start = time.monotonic()
+        try:
+            lines = tick.run_steps(self.rows, {}, self.now, dispatcher=self.runner,
+                                   steps=self.steps, seat_state=seats)
+        finally:
+            tick._PASS.reset(token)
+        return lines, time.monotonic() - start, state, seats
+
+    def evidence(self, ac, body):
+        payload = json.dumps(body, sort_keys=True)
+        print(json.dumps(dict(url='cli://tick-parallel/' + ac, status=0,
+                              body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
+                              body_excerpt=payload)))
+
+    def test_ready_specs_start_within_one_pass(self):
+        self.seed(15)
+        lines, elapsed, state, seats = self.run_pass()
+        acted = [line for line in lines if line.startswith('acted ') and ' build spawn=' in line]
+        waiting = [line for line in lines if line.startswith('seat-wait ')]
+        events = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+        self.assertEqual(len(acted), 8, lines)
+        self.assertEqual(len(waiting), 7, lines)
+        self.assertEqual(sum(e['type'] == 'autodispatched' for e in events), 8)
+        self.assertEqual([line.split()[1].rstrip(':') for line in lines], self.subjects)
+        self.assertEqual(state['launched'], set(self.subjects[:8]))
+        self.assertTrue(state['wrote'])
+        self.assertEqual(seats, {'builder': 0})
+        self.assertNotIn(self.main_thread, self.worker_threads)
+        self.assertGreater(len(self.worker_threads), 1)
+        self.assertLessEqual(len(self.worker_threads), 4)
+        self.assertLess(elapsed, self.DELAY * 8 / 2)
+        self.evidence('AC1', dict(acted=len(acted), seat_wait=len(waiting),
+                                autodispatched=8, elapsed=elapsed, bound=self.DELAY * 8 / 2))
+
+    def test_bookkeeping_stays_on_main_thread_and_worker_errors_are_isolated(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        import dispatch_isolation
+        import threading
+        self.seed(4)
+        self.steps[0] = replace(self.steps[0], action='rebuild')
+        noted, reported = [], []
+        reporter = dispatch_isolation.Pass(self.rows, self.now)
+        original_fail = reporter.fail
+
+        def fail(item, error, **kwargs):
+            self.assertEqual(threading.get_ident(), self.main_thread)
+            reported.append(item)
+            original_fail(item, error, **kwargs)
+
+        def note(item, spawned, **kwargs):
+            self.assertEqual(threading.get_ident(), self.main_thread)
+            noted.append((item, spawned, kwargs['raised']))
+
+        def launch(step, **kwargs):
+            self.assertIsNotNone(tick._PASS.get())
+            if step.item == self.subjects[0]:
+                raise RuntimeError('worker failed')
+            if step.item == self.subjects[1]:
+                raise ValueError('launch refused')
+            if step.item == self.subjects[2]:
+                return None
+            return 'L-builder-9103'
+
+        gate = SimpleNamespace(grades_first=False, mode='observe',
+                               check=lambda *a, **kw: SimpleNamespace(hold=False, override=None),
+                               note_launch=note, finish=lambda: {})
+        with patch('autodispatch.capacity', return_value=4), \
+             patch('loadgate.begin', return_value=gate), \
+             patch('dispatch_isolation.Pass', return_value=reporter), \
+             patch.object(reporter, 'fail', side_effect=fail), \
+             patch.object(tick, 'launch', side_effect=launch):
+            lines, elapsed, state, seats = self.run_pass()
+        self.assertEqual([line.split()[1].rstrip(':') for line in lines], self.subjects)
+        self.assertIn('RuntimeError', lines[0])
+        self.assertIn('launch refused', lines[1])
+        self.assertEqual(lines[2], f'hold {self.subjects[2]}: standing dispatch failure')
+        self.assertEqual(reported, self.subjects[:2])
+        self.assertEqual(noted, [(self.subjects[0], True, True),
+                                 (self.subjects[1], True, True),
+                                 (self.subjects[2], False, False),
+                                 (self.subjects[3], True, False)])
+        self.assertEqual(seats, {'builder': 3})
+
+    def test_dry_run_uses_no_workers_or_dispatcher(self):
+        self.seed(15)
+        with patch.object(tick, 'ThreadPoolExecutor', side_effect=AssertionError('dry-run thread')):
+            lines = tick.run_steps(self.rows, {}, self.now, dispatcher=self.runner,
+                                   steps=self.steps, dry_run=True)
+        self.assertEqual(len([line for line in lines if line.startswith('would act ')]), 8)
+        self.assertEqual(len([line for line in lines if line.startswith('seat-wait ')]), 7)
+        self.assertEqual(self.calls, [])
+
+    def test_guards_and_seat_accounting_survive_parallel_launch(self):
+        self.seed(12)
+        standing, dependency, retry, failed = self.subjects[:4]
+        later = (self.now - timedelta(minutes=10)).isoformat()
+        self.rows.extend([
+            dict(type='autodispatch-failed', subject=standing, ts=later, reason='standing'),
+            dict(type='dependency-hold', subject=dependency, ts=later, waits_for='L-spec-9999', why='fixture'),
+            dict(type='escalation-blocking', kind='retries-exhausted', subject=retry, ts=later,
+                 actor='tick', role='builder', reason='fixture'),
+        ])
+        self.failing.add(failed)
+        self.steps.insert(5, self.steps[4])
+        lines, elapsed, state, seats = self.run_pass()
+        events = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+        success = self.subjects[4:]
+        self.assertEqual(len(success), 8)
+        self.assertCountEqual(self.calls, [failed] + success)
+        self.assertEqual(len(self.calls), len(set(self.calls)))
+        self.assertIn(f'hold {standing}: standing dispatch failure', lines)
+        self.assertTrue(any(line.startswith(f'hold {dependency}: held: waits for L-spec-9999') for line in lines), lines)
+        self.assertIn(f'hold {retry}: standing dispatch failure', lines)
+        self.assertTrue(any(line.startswith(f'failed {failed} build:') for line in lines), lines)
+        self.assertEqual([e['subject'] for e in events if e['type'] == 'autodispatch-failed'], [failed])
+        self.assertCountEqual([e['subject'] for e in events if e['type'] == 'autodispatched'], success)
+        self.assertEqual(state['launched'], set(success))
+        self.assertEqual(seats, {'builder': 0})
+        # Every successful launch used a real worktree in the same Git repository.
+        for sid in success:
+            wt = self.root / 'worktrees/proj' / sid.lower()
+            self.assertTrue((wt / '.git').is_file(), sid)
+        self.evidence('AC2', dict(successes=8, failed=[failed], guards=[standing, dependency, retry],
+                                duplicate_launches=0, remaining_seats=seats['builder']))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
