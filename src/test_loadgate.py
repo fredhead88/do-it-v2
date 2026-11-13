@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Hermetic admission observations; run directly with stdlib unittest."""
 import hashlib
+from contextlib import nullcontext
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 _isolation = tempfile.TemporaryDirectory(prefix='loadgate-tests-')
 os.environ['HOME'] = str(Path(_isolation.name) / 'home')
@@ -724,6 +727,260 @@ class EnforcementTests(unittest.TestCase):
         with patch.object(lg, 'save_state', side_effect=OSError('full disk')):
             self.assertIn('save-failed', g.finish()['admission_state'])
         signed('AC14-1649', dict(stale_and_future_bounds=True, invalid_times_fail_open=True, save_failed=True))
+
+
+class SharedReadinessFixture:
+    setUp = LoadgateTests.setUp
+    now = 1800000000.
+
+    def pass_gate(self, free=6, *, unreadable=False, **kwargs):
+        import dispatch
+        import reap_tmp
+        import scratch
+        scratch_path = self.root / 'scratch'
+        scratch_path.mkdir(exist_ok=True)
+        self.sample = self.enterContext(patch.object(
+            shutil, 'disk_usage', side_effect=OSError('unreadable') if unreadable else None,
+            return_value=shutil._ntuple_diskusage(10 * 2**30, 0, int(free * 2**30))))
+        self.room = self.enterContext(patch.object(dispatch, 'ensure_room', side_effect=AssertionError('receiver only')))
+        self.reaper = self.enterContext(patch.object(reap_tmp, 'reap_now', side_effect=AssertionError('receiver only')))
+        self.enterContext(patch.object(scratch, 'root', return_value=scratch_path))
+        options = dict(root=self.root, env={}, proc_root=self.proc, cgroup_root=self.cg,
+                       ncpu=8, clock=lambda: self.now)
+        options.update(kwargs)
+        result = lg.begin_pass(**options)
+        self.sample.assert_called_once_with(scratch_path)
+        return result
+
+    def assert_no_reclamation(self):
+        self.sample.assert_called_once()
+        self.room.assert_not_called()
+        self.reaper.assert_not_called()
+
+
+class SharedReadinessDiskTests(SharedReadinessFixture, unittest.TestCase):
+    def test_threshold_boundaries_and_grader_fits(self):
+        rows = []
+        for free in (1.99, 2, 2.01, 4.99, 5, 5.01):
+            with self.subTest(free=free):
+                gate = self.pass_gate(free)
+                for role, threshold in (('builder', 5), ('grader', 2)):
+                    d = gate.check(role, role, action='build' if role == 'builder' else 'grade')
+                    self.assertEqual(d.hold, free < threshold)
+                    self.assertEqual(d.would_hold, d.hold)
+                    self.assertEqual(d.reason, 'disk-space' if d.hold else 'ok')
+                    rows.append([free, role, d.hold])
+                self.assertIs(gate.gate.disk, gate.disk)
+                self.assert_no_reclamation()
+        signed('2428-AC1-boundaries', rows)
+
+    def test_configured_receiver_thresholds(self):
+        table = self.root / 'look.toml'
+        table.write_text('[thresholds]\nroom_builder_gb=7\nroom_grader_gb=3\n')
+        gate = self.pass_gate(5, toml_path=table)
+        self.assertTrue(gate.check('b', 'builder', action='build').hold)
+        self.assertFalse(gate.check('g', 'grader', action='grade').hold)
+        self.assert_no_reclamation()
+
+    def test_off_and_begin_error_cross_low_and_unreadable(self):
+        rows = []
+        for mode in ('off', 'begin-raises'):
+            for unreadable in (False, True):
+                with self.subTest(mode=mode, unreadable=unreadable):
+                    def broken_begin(**kwargs):
+                        self.sample.assert_called_once()
+                        raise RuntimeError('load unavailable')
+                    options = dict(env={'DOIT_ADMISSION': 'off'}) if mode == 'off' else {}
+                    with patch.object(lg, 'begin', side_effect=broken_begin) if mode == 'begin-raises' else nullcontext():
+                        gate = self.pass_gate(1, unreadable=unreadable, **options)
+                    self.assertIsNone(gate.gate)
+                    backend = Mock(side_effect=AssertionError('held work reached backend'))
+                    for role in ('builder', 'grader'):
+                        for action in ('build', 'grade', 'rebuild', 'regrade', 'bundle-check', None):
+                            d = gate.check(str((role, action)), role, action=action)
+                            if not d.hold:
+                                backend(role, action)
+                            self.assertEqual(d.reason, 'disk-unreadable' if unreadable else 'disk-space')
+                    backend.assert_not_called()
+                    fields = gate.finish()
+                    self.assertEqual(fields['admission_held'], 12)
+                    self.assert_no_reclamation()
+                    rows.append(dict(mode=mode, unreadable=unreadable, samples=1, launches=0, held=12))
+        signed('2428-AC1-off-and-error', rows)
+
+    def test_unreadable_and_disk_check_exception_fail_closed(self):
+        gate = self.pass_gate(unreadable=True)
+        for role in ('builder', 'grader'):
+            self.assertEqual(gate.check(role, role).reason, 'disk-unreadable')
+            self.assertTrue(gate.check(role, role).hold)
+        self.assert_no_reclamation()
+        gate = self.pass_gate()
+        with patch.object(gate.disk, 'check', side_effect=RuntimeError('check unavailable')):
+            for role in ('builder', 'grader'):
+                self.assertTrue(gate.check(role, role, action='rebuild').hold)
+                self.assertTrue(gate.gate.check(role, role, action='build').hold)
+        self.assert_no_reclamation()
+        signed('2428-AC1-disk-errors', dict(read_error_held=True, check_exception_held=True))
+
+    def test_disk_survives_load_check_failure_and_disabled_holds(self):
+        gate = self.pass_gate(3)
+        with patch.object(lg, 'admit', side_effect=RuntimeError('load check unavailable')):
+            self.assertFalse(gate.check('fits', 'grader', action='grade').hold)
+        self.assertFalse(gate.gate.holds_on)
+        for role in ('builder', 'grader'):
+            with patch.object(gate.disk, 'check', side_effect=RuntimeError('disk check unavailable')):
+                self.assertTrue(gate.check(role, role, action='build').hold)
+        self.assertTrue(gate.check('low', 'builder', action='build').hold)
+        self.assert_no_reclamation()
+
+    def test_load_begin_internal_error_keeps_disk(self):
+        with patch.object(lg, 'readings', side_effect=RuntimeError('proc unavailable')):
+            gate = self.pass_gate(1)
+        self.assertTrue(gate.gate.errors)
+        self.assertTrue(gate.check('b', 'builder', action='build').hold)
+        self.assertTrue(gate.check('g', 'grader', action='grade').hold)
+        self.assert_no_reclamation()
+
+    def test_nonworkers_retain_disk_policy(self):
+        gate = self.pass_gate(0, unreadable=True)
+        for role in ('reviewer', 'executor', 'tick', 'look', 'reaper', 'cleaner', 'spec-writer'):
+            self.assertFalse(gate.check(role, role, action='build').hold)
+        self.assert_no_reclamation()
+
+    def test_no_max_wait_or_idle_escape_from_disk_hold(self):
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        state = lg._fresh() | dict(t=self.now-60, trip_since=lg._iso(self.now-9999))
+        lg.save_state(self.root / 'state/admission.json', state)
+        (self.proc / 'meminfo').write_text('MemAvailable: 1048576 kB\nSwapFree: 0 kB\n')
+        gate = self.pass_gate(1, allow_enforce=True, running={})
+        self.assertTrue(gate.gate.holds_on)
+        self.assertTrue(gate.grades_first)
+        for since in (lg._iso(self.now-9999), lg._iso(self.now-60), None):
+            for role in ('builder', 'grader'):
+                d = gate.check(str((role, since)), role, action='build', since=since)
+                self.assertTrue(d.hold)
+                self.assertIsNone(d.override)
+        self.assertIsNone(gate.gate.pending_override)
+        self.assertEqual(gate.gate.escape_due, 0)
+        self.assert_no_reclamation()
+        signed('2428-AC1-escapes', dict(max_wait_held=True, idle_held=True))
+
+    def test_dry_run_samples_and_renders_without_persistence(self):
+        path = self.root / 'state/admission.json'
+        lg.save_state(path, lg._fresh() | dict(t=self.now-60))
+        before = path.read_bytes()
+        gate = self.pass_gate(1, dry_run=True)
+        self.assertTrue(gate.check('b', 'builder', action='build').hold)
+        gate.note_launch('b', True)
+        fields = gate.finish()
+        self.assertEqual(fields['admission_held'], 1)
+        self.assertEqual(fields['admission_reason'], {'disk-space': 1})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(gate.gate.admitted_jobs, 0)
+        self.assert_no_reclamation()
+        path.unlink()
+        gate = self.pass_gate(1, dry_run=True, env={'DOIT_ADMISSION': 'off'})
+        self.assertTrue(gate.check('b', 'builder').hold)
+        gate.finish()
+        self.assertFalse(path.exists())
+        self.assert_no_reclamation()
+
+    def test_shared_load_accounting_and_observe_policy(self):
+        table = self.root / 'look.toml'
+        table.write_text('[admission]\nheavy_jobs_max=1\n')
+        gate = self.pass_gate(6, toml_path=table, running={})
+        self.assertFalse(gate.check('first', 'builder', action='build').would_hold)
+        gate.note_launch('first', True, raised=True)
+        d = gate.check('second', 'grader', action='grade')
+        self.assertEqual(d.reason, 'job-slots')
+        self.assertTrue(d.would_hold)
+        self.assertFalse(d.hold)
+        self.assertEqual(gate.gate.admitted_jobs, 1)
+        self.assert_no_reclamation()
+
+    def test_ample_disk_preserves_load_enforcement_and_off_policy(self):
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        lg.save_state(self.root / 'state/admission.json', lg._fresh() | dict(t=self.now-60))
+        (self.proc / 'meminfo').write_text('MemAvailable: 1048576 kB\nSwapFree: 0 kB\n')
+        gate = self.pass_gate(6, allow_enforce=True)
+        decision = gate.check('pressure', 'builder', action='build', since=lg._iso(self.now))
+        self.assertTrue(decision.hold)
+        self.assertEqual(decision.reason, 'mem-hard-stop')
+        self.assert_no_reclamation()
+        for fail in (False, True):
+            with patch.object(lg, 'begin', side_effect=RuntimeError('unavailable')) if fail else nullcontext():
+                gate = self.pass_gate(6, env={'DOIT_ADMISSION': 'off'})
+            self.assertFalse(gate.check('fits', 'builder', action='build').hold)
+            self.assert_no_reclamation()
+
+
+class SharedReadinessStateTests(SharedReadinessFixture, unittest.TestCase):
+    def read_fresh_process(self, path):
+        code = ('import json, sys; import loadgate; '
+                'state, usable = loadgate.load_state(sys.argv[1]); '
+                'print(json.dumps(dict(state=state, usable=usable)))')
+        process = subprocess.run([sys.executable, '-c', code, str(path)],
+                                 cwd=Path(lg.__file__).parent, text=True, capture_output=True,
+                                 check=True, timeout=10)
+        return json.loads(process.stdout)
+
+    def test_committed_disk_holding_round_trip_and_next_pass(self):
+        path = self.root / 'state/admission.json'
+        gate = self.pass_gate(1)
+        for item, role in (('build-item', 'builder'), ('grade-item', 'grader')):
+            self.assertTrue(gate.check(item, role, action='build').hold)
+        gate.finish()
+        committed = self.read_fresh_process(path)
+        self.assertTrue(committed['usable'])
+        self.assertEqual(committed['state']['t'], self.now)
+        self.assertEqual(committed['state']['holding'],
+                         dict.fromkeys(('build-item', 'grade-item'), lg._iso(self.now)))
+        self.assertEqual(committed['state'].keys(), lg._fresh().keys())
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        following = self.pass_gate(1, allow_enforce=True, clock=lambda: self.now+60)
+        self.assertTrue(following.gate.holds_on)
+        self.assertTrue(following.check('build-item', 'builder', action='build').hold)
+        following.finish()
+        reread = self.read_fresh_process(path)
+        self.assertEqual(reread['state']['holding']['build-item'], lg._iso(self.now))
+        self.assertEqual(reread['state']['t'], self.now+60)
+        signed('2428-AC2-round-trip', dict(committed=committed, next_pass=reread, fresh_process=True))
+
+    def test_exact_prechange_v1_keys_remain_usable_and_enforcing(self):
+        keys = {'v', 't', 'pswpin', 'pswpout', 'psi_tripped', 'psi_release_streak',
+                'trip_since', 'holding', 'cpu_tripped', 'cpu_release_streak'}
+        self.assertEqual(lg._fresh().keys(), keys)
+        path = self.root / 'state/admission.json'
+        path.parent.mkdir()
+        legacy = lg._fresh() | dict(t=self.now-60, holding={'old': lg._iso(self.now-120)})
+        path.write_text(json.dumps(legacy))
+        self.assertTrue(lg.load_state(path)[1])
+        (self.root / 'admission.toml').write_text('mode="enforce"')
+        gate = self.pass_gate(1, allow_enforce=True)
+        self.assertTrue(gate.gate.holds_on)
+        self.assertTrue(gate.check('old', 'builder', action='rebuild').hold)
+        gate.finish()
+        committed = self.read_fresh_process(path)
+        self.assertTrue(committed['usable'])
+        self.assertEqual(committed['state'].keys(), keys)
+        self.assertEqual(committed['state']['t'], self.now)
+        self.assertEqual(committed['state']['holding'], legacy['holding'])
+        next_gate = self.pass_gate(6, allow_enforce=True)
+        self.assertTrue(next_gate.gate.holds_on)
+        signed('2428-AC2-v1', dict(committed=committed, next_pass_holds_on=True))
+
+    def test_off_and_begin_failure_persist_existing_state_shape(self):
+        for fail in (False, True):
+            with self.subTest(begin_failure=fail):
+                with patch.object(lg, 'begin', side_effect=RuntimeError('unavailable')) if fail else nullcontext():
+                    gate = self.pass_gate(1, env={'DOIT_ADMISSION': 'off'})
+                self.assertTrue(gate.check('held', 'builder', action='rebuild').hold)
+                gate.finish()
+                committed = self.read_fresh_process(self.root / 'state/admission.json')
+                self.assertTrue(committed['usable'])
+                self.assertEqual(committed['state']['t'], self.now)
+                self.assertEqual(committed['state'].keys(), lg._fresh().keys())
+                self.assertIn('held', committed['state']['holding'])
 
 
 if __name__ == '__main__':

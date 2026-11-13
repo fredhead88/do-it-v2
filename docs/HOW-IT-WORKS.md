@@ -27,7 +27,6 @@ Vendors are `codex` or `claude`; input includes cached input; absent usage is un
 unmeasured_specs excluded). Authors: Codex; judges: Claude. Executor: claude-sonnet-5-5;
 judgment: claude-opus-5-5 seat. Sonnet trial: log health at start and 14 days later; axis=K.
 SD10 migration cuts: audit reports migration-not-cut; merge the migration-only predecessor first.
-
 ## Lane rules
 Source: `lane_rules.toml`. Name | action | actor | limit_min.
 - build | dispatch-builder | tick | 30; - grade | dispatch-grader | tick | 15
@@ -119,6 +118,9 @@ Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_r
 `src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.
 `bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.
 `DONE+notes`; `BLOCKED+base_only/cited`: current proof with `n_new=0` → grade; existing gates apply.
+`src/loadgate.py` begin_pass: one scratch disk sample, before optional load admission.
+Builder/grader disk holds survive load off/errors; receiver thresholds default to 5/2 GiB.
+Holds use admission.json holding; dry runs never save. Receiver alone reclaims and rechecks.
 ## Member verdicts
 Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).
 - After a red window with unnamed owners, each remaining member is verified alone on the window
@@ -130,11 +132,9 @@ Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` 
 - `src/window_known_red.py`: `window-dispatch-verdict` completion receipts; master-known-red retries
   stay pending (`window-skipped-known`, never green).
 - `src/window_cancel.py`: confirm owned cancels before replacement; tombstones veto verdicts.
-
 ## Branch refresh
 Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; max 3/spec/day.
-- `src/direct_merge.py`: merge_one handles one do-it-v2 queue row: refuse overlapping dirty paths,
-  gate, require unchanged main/branch shas, merge --no-ff, then emit shipped. A moved ref requires
-  re-gating; a failed merge is aborted. cli_gate uses doit gate. Queue selection and tick wiring
-  belong to the caller.
+- `src/direct_merge.py`: merge_one handles one do-it-v2 queue row: refuse overlapping dirty paths;
+  gate with unchanged main/branch shas; merge --no-ff, emit shipped. A moved ref needs re-gating;
+  failed merge is aborted. cli_gate uses doit gate; caller owns queue selection and tick wiring.
 - `src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.
