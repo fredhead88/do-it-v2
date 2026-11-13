@@ -496,6 +496,7 @@ def _rebuild(c):
 
 
 SECRET_BLOCK = 'handin-check:secret-scan'
+HANDIN_BLOCKS = {SECRET_BLOCK, 'handin-check:rehearsal-guards'}
 
 
 def _attempt_key(evs, e):
@@ -526,16 +527,16 @@ def _dispatches(evs):
 
 
 def _secret_block_trigger(evs, blocked, regrade):
-    """The current handin-check:secret-scan block, only when it is the first distinct one in its authorization
+    """The current secret-scan or rehearsal-guards block, only when it is the first distinct one in its authorization
     interval (latest subject spec-written or operator decision, else the start of history). Exact reason only."""
-    if blocked.get('type') != 'build-blocked' or blocked.get('reason') != SECRET_BLOCK:
+    if blocked.get('type') != 'build-blocked' or blocked.get('reason') not in HANDIN_BLOCKS:
         return None
     if regrade and _time(regrade['ts']) > _time(blocked['ts']):
         return None
     marks = [e for e in evs if e.get('type') == 'spec-written'
              or e.get('type') == 'decision' and _admitted_actor(e) == 'operator']
     start = max((_time(e['ts']) for e in marks), default=None)
-    seen = {_attempt_key(evs, e) for e in evs if e.get('type') == 'build-blocked' and e.get('reason') == SECRET_BLOCK
+    seen = {_attempt_key(evs, e) for e in evs if e.get('type') == 'build-blocked' and e.get('reason') in HANDIN_BLOCKS
             and (start is None or _time(e['ts']) >= start)}
     if len(seen) != 1 or _attempt_key(evs, blocked) not in seen:
         return None
