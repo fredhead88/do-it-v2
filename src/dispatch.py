@@ -824,7 +824,7 @@ def _merge_new_rows(root, before):
     except (OSError, ValueError, KeyError, TypeError):
         view.loaded = False
 def handin_verdict(out, subject, worktree, *, root=None):
-    """L-spec-2209: "clean", "secret-scan" or "undetermined"; trusted only if HEAD before and after == identity.ready_sha."""
+    """L-spec-2209: "clean", "secret-scan", "rehearsal-guards" or "undetermined"; trusted only if HEAD before and after == identity.ready_sha."""
     root = root if root is not None else ROOT
     before = _ledger_lines(root)
     try:
@@ -832,7 +832,7 @@ def handin_verdict(out, subject, worktree, *, root=None):
         res = __import__("handin_check").run(worktree, subject, root=root)
         ok, failed, post = res.ok, res.failed_check, _committed_head(worktree)
         if len(ready) >= 7 and pre and pre == post and pre.startswith(ready):
-            return "clean" if ok is True and failed is None else "secret-scan" if ok is False and failed == "secret-scan" else "undetermined"
+            return "clean" if ok is True and failed is None else failed if ok is False and failed in {"secret-scan", "rehearsal-guards"} else "undetermined"
         return "undetermined"
     except (Exception, SystemExit):
         return "undetermined"
@@ -982,8 +982,8 @@ def events_for(role, out, a, base, *, events=None):
                 ev.append(("adr-filed", dict(adr=e["adr"], kind="architecture")))
             ev.append(("build-deviation", e))
         ev += [("build-stub", s) for s in out["stubs"]]
-        if out["status"] == "BLOCKED" and handin == "secret-scan":
-            ev.append(("build-blocked", dict(reason="handin-check:secret-scan")))
+        if out["status"] == "BLOCKED" and handin in {"secret-scan", "rehearsal-guards"}:
+            ev.append(("build-blocked", dict(reason="handin-check:" + handin)))
         elif out["status"] == "BLOCKED":
             ev.append(("build-blocked", dict(reason=next((q["asks"] for q in out["escalations"]), None)
                                              or next((d["line"] for d in out["declarations"]), "unstated"),
@@ -1736,7 +1736,7 @@ def _main(a):
             fail(f"nothing at {p} — the model reported {out.get('status') or out.get('answered')} "
                  "with no file on disk (D120 W3)")
     if builder and out.get("status") == "DONE":   # L-spec-2209: one independent hand-in check for every backend route
-        a._handin = handin_verdict(out, a.subject, a.cwd, root=ROOT); out = {**out, "status": "BLOCKED"} if a._handin == "secret-scan" else out
+        a._handin = handin_verdict(out, a.subject, a.cwd, root=ROOT); out = {**out, "status": "BLOCKED"} if a._handin in {"secret-scan", "rehearsal-guards"} else out
     # Repo movement across a non-builder spawn is an observation, not a verdict: the Executor merges into the very directory a concurrent spec-writer or spec-auditor was handed as --cwd, and voiding that audit lost three correct runs to hand-repair. Two things are still hard failures, because they are a broken observation rather than concurrency: an after-snapshot that cannot be read at all, and the repository itself coming or going under --cwd.
     moved = None
     if not builder:

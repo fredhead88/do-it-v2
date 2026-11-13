@@ -137,7 +137,7 @@ class ContractTests(unittest.TestCase):
         self.assertIn("must not describe it as a passed check", s)
         self.assertIn("merge gate remains authoritative", s)
         self.assertIn("wrapper checks\nindependently", s)
-        self.assertIn("Only secret-scan runs early", s)
+        self.assertIn("secret-scan, coupled-test-safety, and rehearsal-guards", s)
         self.assertIn("keeps all of its checks, unchanged", s)
 
     def test_protected_paragraph_untouched(self):
@@ -184,6 +184,7 @@ class WrapperTests(Repos):
         cases = [
             ("clean", result(True, None), "clean"),
             ("finding", result(False, "secret-scan", ["fixture:1 -- x"]), "secret-scan"),
+            ("guards", result(False, "rehearsal-guards"), "rehearsal-guards"),
             ("undetermined", result(False, "undetermined"), "undetermined"),
             ("no discriminator", result(False, None), "undetermined"),
             ("ok with discriminator", result(True, "secret-scan"), "undetermined"),
@@ -245,7 +246,7 @@ class WrapperTests(Repos):
             a._handin = handin
         base = dict(subject=SID, project="demo", spawn="L-builder-0001")
         with patch.object(dispatch, "CONTENT", content):
-            if handin == "secret-scan":
+            if handin in {"secret-scan", "rehearsal-guards"}:
                 out = {**out, "status": "BLOCKED"}
             events = dispatch.events_for("builder", out, a, base)
             written = json.loads((content / "L-card-9921.json").read_text())
@@ -277,6 +278,25 @@ class WrapperTests(Repos):
         events, _ = self.events_of(None)
         self.assertNotIn("handin_check", dict(events)["build-done"])
         self.assertIn("build-done", kinds)
+
+    def test_rehearsal_guards_block_completion(self):
+        events, written = self.events_of("rehearsal-guards")
+        self.assertEqual(written["status"], "BLOCKED")
+        self.assertEqual(dict(events)["build-blocked"]["reason"], "handin-check:rehearsal-guards")
+        self.assertFalse(any(t == "build-done" and kv["status"] == "DONE" for t, kv in events))
+        body = dict(status=written["status"], reason=dict(events)["build-blocked"]["reason"])
+        import hashlib
+        print(json.dumps(dict(url="cli://L-spec-2337/wrapper", status=0, body_excerpt=body,
+                              body_sha256=hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest())))
+
+    def test_rehearsal_guard_through_main(self):
+        with patch.object(hc, "run", return_value=result(False, "rehearsal-guards")):
+            code, _ = build_main_run(self)
+        self.assertIn(code, (None, 0))
+        rows = self.reader()
+        self.assertEqual([e["reason"] for e in rows if e["type"] == "build-blocked"],
+                         ["handin-check:rehearsal-guards"])
+        self.assertFalse(any(e["type"] == "build-done" and e["status"] == "DONE" for e in rows))
 
     def test_generic_escalation_cannot_replace_exact_reason(self):
         content = self.root / "content"
@@ -395,6 +415,16 @@ class RoutingTests(unittest.TestCase):
                 self.assertEqual(step.trigger, blocked["_src"])
                 self.assertFalse(step.reason.startswith("retries-exhausted"))
                 print("self-trigger receipt_first=%s -> %s" % (first, step.action))
+
+    def test_rehearsal_guards_rebuild(self):
+        self.block(-100, "L-builder-0001", reason="handin-check:rehearsal-guards")
+        step = self.step(0)
+        self.assertRebuild(step)
+        self.assertEqual(step.cause, "merge-gate")
+        body = dict(action=step.action, cause=step.cause)
+        import hashlib
+        print(json.dumps(dict(url="cli://L-spec-2337/rebuild", status=0, body_excerpt=body,
+                              body_sha256=hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest())))
 
     def test_repeated_snapshot_then_start_suppresses_duplicate(self):
         self.block(-100, "L-builder-0001")

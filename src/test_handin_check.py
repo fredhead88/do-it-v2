@@ -395,5 +395,164 @@ class HandinContractTests(unittest.TestCase):
         self.evidence()
 
 
+class GuardListTests(unittest.TestCase):
+    def test_shared_inventory_and_exclusion(self):
+        import preflight_sweep as sweep
+        self.assertEqual(hc.guard_inventory(), sweep.guard_inventory())
+        nodes, exclusion = hc.guard_inventory()
+        body = dict(nodes=nodes, exclusion=exclusion, second_inventory=False)
+        print(json.dumps(dict(url="cli://L-spec-2337/inventory", status=0, body_excerpt=body,
+                              body_sha256=hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest())))
+        self.assertTrue(nodes)
+        self.assertIsNotNone(exclusion)
+        self.assertFalse((REPO / "lane/guards.txt").exists())
+        subprocess.run(["bash", "-n", str(REPO / "lane/preflight.sh")], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = Path(tmp) / "inventory"
+            inventory.write_text("tests/test_guard.py\n# exclude: tests/test_guard.py::excluded | expensive\n")
+            with patch.dict(os.environ, DOIT_PREFLIGHT_GUARDS=str(inventory)):
+                self.assertEqual(hc.guard_inventory(), sweep.guard_inventory())
+                self.assertEqual(hc.guard_inventory()[0], ["tests/test_guard.py"])
+
+
+class GuardFixture(unittest.TestCase):
+    git = HandinContractTests.git
+    commit = HandinContractTests.commit
+    call = HandinContractTests.call
+    events = HandinContractTests.events
+
+    def setUp(self):
+        HandinContractTests.setUp(self)
+        self.inventory = self.home / "guards.txt"
+        self.inventory.write_text("tests/test_guard.py\n# exclude: tests/test_guard.py::excluded | expensive\n")
+        patch.dict(os.environ, DOIT_PREFLIGHT_GUARDS=str(self.inventory)).start()
+        patch.object(hc.fold, "subject_project", return_value="albert-scott").start()
+        self.python = self.home / "python"
+        self.python.write_text("#!/usr/bin/python3\n" + """
+import os, pathlib, sys, time, xml.etree.ElementTree as ET
+assert not any(k.startswith(('SUPABASE_DB_URL', 'PG')) or 'TOKEN' in k for k in os.environ)
+assert 'PYTHONPATH' not in os.environ
+assert os.getpriority(os.PRIO_PROCESS, 0) > 0
+args = sys.argv[1:]
+assert args[args.index('--deselect')+1] == 'tests/test_guard.py::excluded'
+report = next(x.split('=',1)[1] for x in args if x.startswith('--junitxml='))
+targets = args[args.index('--')+1:]
+suite = ET.Element('testsuite')
+for target in targets:
+    file = target.split('::')[0]
+    marker = pathlib.Path(file).read_text().strip()
+    if marker == 'TIMEOUT': time.sleep(60)
+    case = ET.SubElement(suite, 'testcase', file=file, classname=file[:-3].replace('/', '.'), name='test_guard')
+    if marker == 'FAIL': ET.SubElement(case, 'failure', message='synthetic')
+ET.ElementTree(suite).write(report)
+sys.exit(1 if any(c.find('failure') is not None for c in suite) else 0)
+""")
+        self.python.chmod(0o755)
+        import preflight_sweep
+        patch.object(preflight_sweep, "python_for", return_value=str(self.python)).start()
+        self.git("checkout", "main")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests/test_guard.py").write_text("PASS")
+        self.commit("guard base")
+        self.main = self.git("rev-parse", "HEAD")
+        self.git("checkout", "work")
+        self.git("merge", "--no-edit", "main")
+
+    def marker(self, value):
+        (self.repo / "tests/test_guard.py").write_text(value)
+        self.commit("guard candidate")
+
+    def evidence(self, result):
+        body = dict(ok=result.ok, failed_check=result.failed_check, findings=result.findings,
+                    checks=self.events()[-1]["checks"], cpu_s=result.cpu_s, wall_s=result.wall_s)
+        raw = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(url="cli://L-spec-2337/"+self._testMethodName, status=0,
+                              body_sha256=hashlib.sha256(raw).hexdigest(), body_excerpt=body)))
+        return body
+
+
+class GuardRunTests(GuardFixture):
+    def test_pass_and_report(self):
+        with patch.dict(os.environ, SUPABASE_DB_URL_FIXTURE="synthetic", PRIVATE_TOKEN="synthetic"):
+            result = self.call()
+        self.assertTrue(result.ok, result)
+        self.assertGreater(result.cpu_s, 0)
+        self.assertEqual(self.evidence(result)["checks"],
+                         ["secret-scan", "coupled-test-safety", "rehearsal-guards"])
+
+    def test_candidate_failure(self):
+        self.marker("FAIL")
+        result = self.call()
+        self.assertEqual(result.failed_check, "rehearsal-guards")
+        self.assertIn("tests/test_guard.py::test_guard", result.findings)
+        self.evidence(result)
+
+    def test_base_red(self):
+        self.git("checkout", "main")
+        (self.repo / "tests/test_guard.py").write_text("FAIL")
+        self.commit("base red")
+        self.git("checkout", "work")
+        self.git("merge", "--no-edit", "main")
+        result = self.call()
+        self.assertTrue(result.ok, result)
+        self.assertIn("base-red: tests/test_guard.py::test_guard", result.findings)
+        self.evidence(result)
+
+    def test_missing_files_skipped(self):
+        self.git("rm", "tests/test_guard.py")
+        self.commit("no guard file")
+        result = self.call()
+        self.assertTrue(result.ok, result)
+        self.assertTrue(any(x.startswith("skipped:") for x in result.findings))
+        self.evidence(result)
+
+    def test_dirty_bytes_cannot_replace_head(self):
+        self.marker("FAIL")
+        (self.repo / "tests/test_guard.py").write_text("PASS")
+        self.assertEqual(self.call().failed_check, "rehearsal-guards")
+
+    def test_preserves_prior_checks(self):
+        import preflight_sweep
+        with patch.object(mg, "coupled_test_safety", return_value=["unsafe grant"]), \
+             patch.object(preflight_sweep, "python_for", side_effect=AssertionError("guards ran")):
+            self.assertEqual(self.call().failed_check, "coupled-test-safety")
+        with patch.object(mg, "secret_scan", return_value=("rework", ["  fixture:1 -- Synthetic finding"])):
+            self.assertEqual(self.call().failed_check, "secret-scan")
+
+
+class GuardFaultTests(GuardFixture):
+    def test_timeout(self):
+        self.marker("TIMEOUT")
+        with patch.object(hc, "GUARD_SECONDS", .5):
+            result = self.call()
+        self.assertEqual(result.failed_check, "undetermined")
+        self.assertLess(result.wall_s, 5)
+        self.evidence(result)
+
+    def test_missing_interpreter(self):
+        self.python.unlink()
+        result = self.call()
+        self.assertEqual(result.failed_check, "undetermined")
+        self.evidence(result)
+
+    def test_failed_base_checkout(self):
+        self.marker("FAIL")
+        real = hc.sweep.checkout
+        def checkout(repo, target, tip):
+            if target.name == "base":
+                raise OSError("PRIVATE_DIAGNOSTIC")
+            return real(repo, target, tip)
+        with patch.object(hc.sweep, "checkout", side_effect=checkout):
+            result = self.call()
+        self.assertEqual(result.failed_check, "undetermined")
+        self.assertNotIn("PRIVATE_DIAGNOSTIC", str(result))
+        self.evidence(result)
+
+    def test_cli_exits(self):
+        for failed, code in ((None, 0), ("rehearsal-guards", 1), ("undetermined", 2)):
+            with patch.object(hc, "run", return_value=hc.HandinResult(failed is None, failed, [], 0, 0)):
+                self.assertEqual(hc.main(["L-spec-fixture", "--cwd", str(self.repo)]), code)
+
+
 if __name__ == "__main__":
     unittest.main()

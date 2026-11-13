@@ -149,8 +149,8 @@ Exit 1 is a finding: repair it by amending or rewriting the single spec commit, 
 then re-run handin-check on the new HEAD and report that new HEAD as `identity.ready_sha`, or return
 BLOCKED with the finding. Exit 2 is undetermined: you may return DONE with the uncertainty reported, but
 you must not describe it as a passed check, and the merge gate remains authoritative. The wrapper checks
-independently after you return, so your own run never replaces it. Only secret-scan runs early; the merge
-gate keeps all of its checks, unchanged.
+independently after you return, so your own run never replaces it. The early checks include secret-scan, coupled-test-safety, and rehearsal-guards
+(for albert-scott); the merge gate keeps all of its checks, unchanged.
 
 **Pre-existing failures** (operator ruling, 2026-09-23, L-operator-0001.jsonl). When a verify step or `review_path` fails on a
 test that you did not touch, do not work around it, edit it or escalate it.
