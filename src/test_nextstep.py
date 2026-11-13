@@ -1721,7 +1721,7 @@ class BundleStepTests(unittest.TestCase):
         from test_empty_grade import EmptyGradeTests
         result = unittest.TestResult()
         unittest.defaultTestLoader.loadTestsFromTestCase(EmptyGradeTests).run(result)
-        self.assertEqual(result.testsRun, 4)
+        self.assertEqual(result.testsRun, 7)
         self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
 
 

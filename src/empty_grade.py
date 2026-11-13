@@ -81,6 +81,9 @@ def _candidate(step, events):
         return False
     if step.state == 'action' and step.owner == 'tick' and step.action in ('grade', 'regrade'):
         return True
+    if step.state == 'hold' and step.reason.startswith(
+            ('not-ready:bundle-pending', 'grade-wait: bundle-pending')):
+        return proof(events, step.item) is not None
     if step.state != 'hold' or not step.reason.startswith(('exhausted:', 'retries-exhausted:', 'retry-wait:')):
         return False
     own = [e for e in events if e.get('subject') == step.item]

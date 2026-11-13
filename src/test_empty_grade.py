@@ -1,5 +1,6 @@
 """Zero-row grading completes mechanically; delegated checks stay outstanding."""
 import json
+from dataclasses import replace
 from datetime import timedelta
 import shutil
 import unittest
@@ -42,6 +43,62 @@ class EmptyGradeTests(unittest.TestCase):
     def snapshot(self):
         events = fold.read_events(use_cache=False)
         return events, fold.fold(events)[0]
+
+    def test_bundle_pending_zero_criterion_completes(self):
+        import empty_grade
+        events, specs = self.snapshot()
+        self.assertIsNotNone(empty_grade.proof(events, self.sid))
+        self.assertFalse(any(e['type'] == 'evidence-bundle' for e in events))
+        steps = nextstep.next_steps(events, specs, self.f.now, lane_rules.load(),
+                                    mains={'proj': self.f.base})
+        step, = [s for s in steps if s.item == self.sid]
+        self.assertEqual(step.state, 'hold')
+        self.assertTrue(step.reason.startswith('not-ready:bundle-pending'), step)
+        self.assertFalse(any(e['type'] == 'verdict' for e in events))
+
+        result = tick.run_steps(events, specs, self.f.now, dispatcher=self.f.runner, steps=steps)
+
+        self.assertTrue(any('zero grader criteria; automatic pass' in line for line in result), result)
+        events, _ = self.snapshot()
+        verdicts = [e for e in events if e['type'] == 'verdict']
+        self.assertEqual(len(verdicts), 1)
+        self.assertTrue(empty_grade.is_result(verdicts[0]))
+        self.assertEqual(verdicts[0]['delegated_criteria'], {'AC1': 'owed', 'AC2': 'reviewer'})
+        self.assertEqual(self.f.calls, [])
+        self.assertFalse(any(e['type'] in ('spawn-started', 'autodispatched', 'resource-created')
+                             for e in events))
+        self.assertFalse(routing.reviewer_gate_clear(events, self.sid, {'AC2'}))
+        self.assertTrue(any(c['criterion'] == 'AC1' and c['status'] != 'met'
+                            for c in owed.checks(events, self.f.now)))
+
+    def test_bundle_pending_with_gradable_criteria_stays_held(self):
+        import empty_grade
+        self.events[2] = dict(self.events[2], to='none')
+        self.persist()
+        events, _ = self.snapshot()
+        self.assertIsNone(empty_grade.proof(events, self.sid))
+        self.assertFalse(any(e['type'] == 'evidence-bundle' for e in events))
+        for reason in ('not-ready:bundle-pending', 'grade-wait: bundle-pending'):
+            with self.subTest(reason=reason):
+                step = self.f.step(action=None, state='hold', reason=reason, clears='evidence bundle')
+                self.assertFalse(empty_grade._candidate(step, events))
+                self.assertFalse(empty_grade.complete(step, events))
+                self.assertEqual((step.state, step.reason), ('hold', reason))
+                self.assertFalse(any(e['type'] == 'verdict' for e in self.snapshot()[0]))
+        self.assertEqual(self.f.calls, [])
+
+    def test_bundle_pending_alias_requires_spec_proof(self):
+        import empty_grade
+        events, _ = self.snapshot()
+        for reason in ('not-ready:bundle-pending; waiting', 'grade-wait: bundle-pending; waiting'):
+            with self.subTest(reason=reason):
+                step = self.f.step(action=None, state='hold', reason=reason, clears='evidence bundle')
+                self.assertTrue(empty_grade._candidate(step, events))
+                self.assertTrue(empty_grade.complete(step, events, dry_run=True))
+                self.assertFalse(empty_grade._candidate(
+                    replace(step, item_kind='window'), events))
+        self.assertFalse(any(e['type'] == 'verdict' for e in self.snapshot()[0]))
+        self.assertEqual(self.f.calls, [])
 
     def test_exhausted_empty_grade_advances_without_packet_seat_or_worktree(self):
         # The live 1933 history also has an earlier no-spend bundle wait.
