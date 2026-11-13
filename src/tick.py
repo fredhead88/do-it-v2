@@ -662,7 +662,8 @@ def launch(step, *, dispatcher):
         if fresh is None and heal and step.action in ('rebuild', 'grade', 'regrade', 'review'):
             recreated = heal.repair(step.item, step.action, evs, fold.ROOT, project, wt, dispatcher)
         spawn = lane_driver._dispatch(role, step.item, project, charter, dispatcher, options,
-                                      **({'base_sha': fresh} if fresh is not None else {}))
+                                      **({'base_sha': fresh} if fresh is not None else {}),
+                                      **({'cause': step.cause} if role == 'builder' and step.cause is not None else {}))
         # `doit dispatch --detach` reports the detached pid as an int; a missing one is undetermined.
         if isinstance(spawn, int) and not isinstance(spawn, bool) and spawn > 0:
             spawn = str(spawn)

@@ -80,7 +80,7 @@ def _review_options(evs, sid):
     return depth, round_n
 
 
-def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None):
+def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None, cause=None):
     import review_browser
     browser = review_browser.config(sid, options) if role == 'reviewer' else None
     wt = fold.ROOT / 'worktrees' / project / sid.lower()
@@ -105,6 +105,8 @@ def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=Non
         raise ValueError(packet.get('stderr') or packet.get('stdout') or 'packet failed')
     argv = ['doit', 'dispatch', '--detach', role, sid, '--packet', packet.get('stdout', '').strip(),
             '--cwd', str(wt), '--charter', charter or '', '--project', project]
+    if role == 'builder' and cause is not None:
+        argv += ['--cause', cause]
     if role == 'grader':
         argv += ['--timeout', '30']
     if browser:
