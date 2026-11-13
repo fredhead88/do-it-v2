@@ -262,14 +262,14 @@ class AC1(Scratch):
         slept = []
         with patch.object(up, 'install'), patch.object(up, 'launch_planner') as launch, \
              patch.object(up, '_SLEEP', side_effect=slept.append), patch.object(time, 'sleep', side_effect=slept.append), \
-             patch.object(up, '_supervisor_main') as supervisor:
+             patch.object(up, 'ensure_planner') as admission:
             out = io.StringIO()
             from contextlib import redirect_stdout
             with redirect_stdout(out):
                 self.assertEqual(up.main(), 0)
                 self.assertEqual(up.main(max_cycles=5), 0)
             launch.assert_not_called()
-            supervisor.assert_not_called()
+            admission.assert_not_called()
         self.assertEqual(slept, [])
         self.assertIn('do-it-relay', out.getvalue())
         self.assertIn('tick', out.getvalue())
@@ -278,12 +278,11 @@ class AC1(Scratch):
         with self.subTest(case='print_only keeps cron output'):
             out = io.StringIO()
             with redirect_stdout(out):
-                cmd, env = up.main(print_only=True)
-            self.assertIn('doit tick', out.getvalue())
-            self.assertIsInstance(cmd, list)
+                self.assertEqual(up.main(print_only=True), 0)
+            self.assertEqual(out.getvalue().strip(), up.cron_line())
         with self.subTest(case='doit up exits 0 without supervising'):
             result = subprocess.run([str(pathlib.Path(__file__).resolve().parent.parent / 'doit'), 'up'],
-                                    env=dict(os.environ, DOIT_NO_POKE='1'), capture_output=True, text=True, timeout=60)
+                                    env=dict(os.environ, DOIT_NO_POKE='1'), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr[-500:])
             self.assertIn('do-it-relay', result.stdout)
         with self.subTest(case='relay reexec seam remains'):

@@ -64,10 +64,10 @@ class SoleRelayTests(unittest.TestCase):
             with patch.object(pathlib.Path, "stat", side_effect=PermissionError):
                 self.assertFalse(relay.serving(self.now))
             heartbeat.unlink()
-            with patch.object(up, "_guarded", return_value=(True, (True, "mark"))):
-                up._hold({"said": None, "watermark": None}, ["planner dry"])
+            with patch.object(fold, "read_events", side_effect=AssertionError("inert up must not read")):
+                self.assertEqual(up.main(), 0)
             self.assertFalse(relay.serving(self.now))
-        print("1497 AC1: serving fresh/stale/missing/unreadable/future and Planner hold pass")
+        print("1497 AC1: serving fresh/stale/missing/unreadable/future and inert up pass")
 
     def test_all_roles_have_one_server(self):
         self.assertEqual(relay.SERVERS, {**dict.fromkeys(dispatch.ROLES, "relay"),

@@ -821,6 +821,13 @@ print(json.dumps(fold.read_events()))
         self.assertEqual(proc.stderr, 'nested\n')
         self.assertNotIn('Traceback', proc.stdout)
 
+    def test_retired_up_does_not_read_even_when_cache_is_unavailable(self):
+        import up
+        with patch.object(fold, 'read_events', side_effect=ledger_cache.LockTimeout('fixture timeout')) as read:
+            self.assertEqual(up.main(), 0)
+            self.assertEqual(up.main(print_only=True), 0)
+            read.assert_not_called()
+
     def test_ac7_every_read_site_logs_and_carries_on(self):
         import up
         import tick
@@ -829,7 +836,7 @@ print(json.dumps(fold.read_events()))
         import install_sync
         import push_origin
         import pr_closeout
-        sites = ('planner', 'relay', 'executor-top', 'executor-settled',
+        sites = ('relay', 'executor-top', 'executor-settled',
                  'executor-pane', 'launch', 'bundle-launch', 'bundle-exhaustion',
                  'record-first', 'record-second')
         call_count = 0
@@ -839,7 +846,6 @@ print(json.dumps(fold.read_events()))
                               and n.func.attr in ('read_events', 'tail_refresh') for n in ast.walk(tree))
         additional_sites = {
             'tick._record_pass.tail_refresh': 'post-dispatch held-step observation',
-            'tick._report_merge_pass_failure.read_events': 'deduplicate merge-pass failure reports',
         }
         self.assertEqual(call_count, len(sites) + len(additional_sites))
         contracts = self.root / 'agents'
@@ -861,7 +867,6 @@ print(json.dumps(fold.read_events()))
                 sleep = mock(up, '_SLEEP')
                 mock(up.time, 'sleep')
                 mock(up, '_interval', return_value=1)
-                degrade = mock(up, '_degrade', return_value='degraded')
                 mock(up, 'install')
                 mock(up, '_check_guard')
                 mock(up, 'code_sha', return_value=None)
@@ -869,11 +874,7 @@ print(json.dumps(fold.read_events()))
                 mock(up.models, 'load', return_value=None)
                 mock(up.dispatch, 'AGENTS', new=contracts)
                 emit = mock(up.dispatch, 'emit')
-                if site == 'planner':
-                    self.assertEqual(up._cycle({}, None), 'degraded')
-                    degrade.assert_called_once()
-                    self.assertEqual(read.call_count, 1)
-                elif site == 'relay':
+                if site == 'relay':
                     pending = mock(relay, 'pending_packets')
                     up.relay_main(max_cycles=2)
                     self.assertEqual(read.call_count, 2)
@@ -952,7 +953,7 @@ print(json.dumps(fold.read_events()))
                     with (self.root / 'tick.lock').open('rb') as fh:
                         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 uncached.assert_not_called()
-                repeats = 2 if site in sites[1:5] else 1
+                repeats = 2 if site in {'relay', 'executor-top', 'executor-settled', 'executor-pane'} else 1
                 self.assertEqual(stderr.getvalue(), (message + '\n') * repeats)
         event = dict(type='spawn-done', subject='L-executor-fixture', spawn='L-executor-fixture')
         self.assertIsNone(fold.required_reason(event))

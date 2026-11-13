@@ -395,74 +395,40 @@ class AC5(Scratch):
 
 
 class AC6(Scratch):
-    def test_cross_path_lock_and_supervisor_cwd(self):
-        fd=self.held()
-        self.assertEqual(up._start({},'L-charter-9001','charter',1,'L-charter-9001'),up.PLANNER_OCCUPIED)
-        self.finish(self.wrapper(),3)
+    def test_wrapper_lifetime_lock_and_cwd(self):
+        fd = self.held()
+        self.finish(self.wrapper(), 3)
         self.assertFalse(self.rows())
-        fcntl.flock(fd,fcntl.LOCK_UN)
-        self.assertEqual(ctypes.CDLL(None).prctl(36,1,0,0,0),0)
-        release=self.root/'release'
-        os.environ['TEST_RELEASE']=str(release)
-        os.environ['TEST_GRANDCHILD']='1'
-        # A separate supervisor parent owns the same non-inheritable lock.
-        code="import sys;sys.path.insert(0,sys.argv[1]);import up;up._start({},'L-charter-9001','charter',1,'L-charter-9001')"
-        owner=subprocess.Popen(['/usr/bin/python3','-c',code,str(REPO/'src')],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        probe=self.wait_probe()
-        self.addCleanup(AC2.kill_owned,self,probe['grandchild'])
-        self.addCleanup(lambda:owner.poll() is None and (owner.kill(),owner.wait()))
-        self.finish(self.wrapper(),3)
-        self.assertEqual(up.launch_planner('L-charter-9001','charter',1),'alive')
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        self.assertEqual(ctypes.CDLL(None).prctl(36, 1, 0, 0, 0), 0)
+        release = self.root / 'release'
+        os.environ['TEST_RELEASE'] = str(release)
+        os.environ['TEST_GRANDCHILD'] = '1'
+        owner = self.wrapper()
+        self.addCleanup(lambda: owner.poll() is None and (owner.kill(), owner.wait()))
+        probe = self.wait_probe()
+        self.addCleanup(AC2.kill_owned, self, probe['grandchild'])
+        self.assertFalse(self.lock_free())
+        self.finish(self.wrapper(), 3)
+        self.assertEqual(up.launch_planner('L-charter-9001', 'charter', 1), 'alive')
         release.touch()
         self.finish(owner)
-        os.kill(probe['grandchild'],0)
-        self.assertEqual(self.wait_probe()['cwd'],str(REPO))
+        os.kill(probe['grandchild'], 0)
+        self.assertEqual(probe['cwd'], str(REPO))
         self.assertTrue(self.lock_free())
+        rows = self.rows()  # reopen the real writer files after child completion
+        self.assertEqual(sum(r['type'] == 'planner-started' for r in rows), 1)
+        self.assertEqual(sum(r['type'] == 'planner-ended' for r in rows), 1)
 
-    def cycles(self, real=False):
-        fd=self.held()
-        clock=[0.0]; stamps=[]; counts=[]
-        read_events=fold.read_events
-        def read():
-            stamps.append(time.monotonic() if real else clock[0])
-            dispatch.emit(self.events/'L-up-local.jsonl',{},'supervisor-code',subject='planner',
-                          kind='planner',sha='undetermined',pid=os.getpid(),reason='test-watermark-change')
-            return read_events(use_cache=False)
-        def guarded(fn,*a,**kw):
-            counts.append(fn)
-            return (True, (['L-charter-9001'],[]) if fn=='plannable' else
-                    {'next':'start','attempts':0} if fn=='planner_attempts' else (True,len(counts)))
-        with ExitStack() as stack:
-            stack.enter_context(patch.object(up,'install'))
-            stack.enter_context(patch.object(up,'maybe_reexec'))
-            stack.enter_context(patch.object(up,'code_sha',return_value=None))
-            stack.enter_context(patch.object(fold,'read_events',side_effect=read))
-            stack.enter_context(patch.object(up,'_guarded',side_effect=guarded))
-            stack.enter_context(patch.object(up,'_interval',return_value=.05 if real else 3.0))
-            if not real:
-                stack.enter_context(patch.object(up,'_SLEEP',side_effect=lambda seconds:clock.__setitem__(0,clock[0]+seconds)))
-            self.assertEqual(up._supervisor_main(max_cycles=3),3)
-        self.assertEqual(counts.count('plannable'),3)
-        self.assertEqual(len(stamps),3)
-        self.assertGreaterEqual(stamps[2]-stamps[0],.09 if real else 6)
-        self.assertFalse(any(r['type']=='planner-started' for r in self.rows()))
-        fcntl.flock(fd,fcntl.LOCK_UN)
-        up._start({},'L-charter-9001','charter',1,'L-charter-9001')
-        self.assertEqual(len([r for r in self.rows() if r['type']=='planner-started']),1)
-
-    def test_deterministic_occupied_cycles(self):
-        self.cycles()
-
-    def test_real_clock_bounded_cycles(self):
-        before=time.monotonic()
-        previous=signal.signal(signal.SIGALRM,lambda *args:(_ for _ in ()).throw(AssertionError('5-second bound')))
-        signal.setitimer(signal.ITIMER_REAL,5)
-        try:
-            self.cycles(real=True)
-        finally:
-            signal.setitimer(signal.ITIMER_REAL,0)
-            signal.signal(signal.SIGALRM,previous)
-        self.assertLess(time.monotonic()-before,5)
+    def test_retired_entry_ignores_occupied_lock_without_reading(self):
+        self.held()
+        with patch.object(fold, 'read_events', side_effect=AssertionError('retired reader')) as read, \
+             patch.object(up, '_run_planner', side_effect=AssertionError('retired launch')):
+            self.assertEqual(up.main(), 0)
+            self.assertEqual(up.main(max_cycles=3), 0)
+            self.assertEqual(up.main(print_only=True), 0)
+            read.assert_not_called()
+        self.assertFalse(self.rows())
 
     def test_existing_footprint_suites(self):
         for name in ('test_up.py','test_pane_resume.py'):

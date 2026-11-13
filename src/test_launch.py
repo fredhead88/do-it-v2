@@ -13,7 +13,7 @@ os.environ["DOIT_ROOT"] = str(TMP)
 # A fresh temp dir under the same TMP filesystem, but NOT nested under
 # DOIT_ROOT above and not inside any git work tree — required (Constraints,
 # "Test hermeticity") so no pre-existing call to child_env() with no override
-# (including AC11's up._start/relay_main/executor_loop exercises) touches the
+# (including AC11's up._run_planner/relay_main/executor_loop exercises) touches the
 # REAL $HOME/doit-scratch once child_env() sets TMPDIR/CLAUDE_CODE_TMPDIR.
 os.environ["DOIT_SCRATCH"] = str(pathlib.Path(tempfile.mkdtemp()))
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -274,7 +274,7 @@ ok(rows10[1]["rc"] == 3, f"AC10: role-ended carries the child's own exit code: {
 print("AC10 ok")
 
 # ══════════════════════════════════════════════════════════════════════════
-# AC11 — up._start / up.relay_main / up.executor_loop, hermetic: the child
+# AC11 — up._run_planner / up.relay_main / up.executor_loop, hermetic: the child
 # never inherits the stripped credential; role-launched/-ended land right
 # around the real Popen call, alongside unchanged pane-bookkeeping; and
 # executor_loop's own `root` — distinct from fold.EVENTS — is where they land.
@@ -316,13 +316,18 @@ def ac_root(name):
 
 
 r11a = ac_root("ac11-start")
-up._start({"up": None}, subject="L-charter-9999", mode="charter", attempt=1, prompt="L-charter-9999")
+planner_lock = up._planner_lock()
+try:
+    up._run_planner(subject="L-charter-9999", mode="charter", attempt=1, prompt="L-charter-9999",
+                    spawn_ids=None, started_sha=up.code_sha(), wrapper_owned=True)
+finally:
+    os.close(planner_lock)
 ok((r11a / "env-check.log").read_text().strip() == "CLEAN",
-   "AC11: _start's own child never inherits ANTHROPIC_API_KEY")
+   "AC11: _run_planner's own child never inherits ANTHROPIC_API_KEY")
 rows11a = [json.loads(l) for l in (r11a / "events" / "L-launch-local.jsonl").read_text().splitlines()]
 ok([r["type"] for r in rows11a] == ["role-launched", "role-ended"] and rows11a[0]["role"] == "planner"
    and isinstance(rows11a[0]["pid"], int),
-   f"AC11: _start appends role-launched (real pid) then role-ended: {rows11a}")
+   f"AC11: _run_planner appends role-launched (real pid) then role-ended: {rows11a}")
 plannerfile = next((r11a / "events").glob("L-planner-*.jsonl"))
 ok([json.loads(l)["type"] for l in plannerfile.read_text().splitlines()]
    == ["planner-started", "message-sent", "planner-ended"],
