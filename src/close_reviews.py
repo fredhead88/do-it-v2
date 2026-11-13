@@ -107,6 +107,145 @@ def occupied(events, now):
     return len(open_) + len(pending)
 
 
+def valid_replan_row(e):
+    return (e.get('type') in ('charter-replan', 'charter-replan-held', 'charter-replan-released')
+            and fold.admits(e, e.get('actor')) is None
+            and fold.required_reason(e) is None)
+
+
+def replan_state(events, now=None, *, root=None):
+    """Replay active intervals, preserving incumbents when a held replan resumes.
+
+    Pending releases wait oldest-verdict first. Readiness and the producer use
+    this same replay, so releasing a hold cannot create a third active slot.
+    """
+    if not any(valid_replan_row(e) for e in events):
+        return {}
+    from itertools import groupby
+    from relay import registered_projects
+    projects = registered_projects(root)
+    relevant = {'charter-replan', 'charter-replan-held', 'charter-replan-released',
+                'cut-written', 'l1-complete', 'charter-closed', 'charter-reopened',
+                'charter-retracted', 'charter-filed', 'charter-review-not-complete',
+                'charter-review-complete'}
+    rows = [e for e in events if e.get('type') in relevant
+            and isinstance(e.get('ts'), str)
+            and (not e['type'].startswith('charter-replan') or valid_replan_row(e))
+            and (now is None or fold.ts(e['ts']) <= now)]
+    verdicts = {e.get('_src'): fold.ts(e['ts']) for e in events
+                if e.get('type') == 'charter-review-not-complete'}
+    ended = {}
+    for e in events:
+        if e.get('type') in spawns.TERMINAL and e.get('spawn'):
+            ended[e['spawn']] = min(fold.ts(e['ts']), ended.get(e['spawn'], fold.ts(e['ts'])))
+    states, active, serviced = {}, set(), set()
+    for at, batch in groupby(sorted(rows, key=lambda e: fold.ts(e['ts'])), lambda e: fold.ts(e['ts'])):
+        for e in batch:
+            cid, kind = e.get('subject'), e['type']
+            s = states.setdefault(cid, dict(replan=None, marker=None, hold=None, release=None,
+                                            closed=None, reopened=None, retracted=False,
+                                            filed={}, verdict={}))
+            if kind == 'charter-replan':
+                serviced.add(e['verdict_src'])
+                if s['replan'] is None or fold.ts(s['replan']['ts']) < at:
+                    s['replan'] = e
+            elif kind == 'charter-filed':
+                s['filed'] = e
+            elif kind in ('charter-review-not-complete', 'charter-review-complete'):
+                if (not s['verdict'] or (at, e.get('_src', '')) >=
+                        (fold.ts(s['verdict']['ts']), s['verdict'].get('_src', ''))):
+                    s['verdict'] = e
+            elif kind in ('cut-written', 'l1-complete'):
+                s['marker'] = at
+            elif kind == 'charter-replan-held':
+                s['hold'] = e
+            elif kind == 'charter-replan-released':
+                s['release'] = at
+            elif kind == 'charter-retracted':
+                s['retracted'] = True
+            elif kind == 'charter-closed':
+                s['closed'] = at
+            elif kind == 'charter-reopened':
+                s['reopened'] = at
+        for cid, s in states.items():
+            r, hold = s['replan'], s['hold']
+            s['held'] = bool(hold and (s['release'] is None or s['release'] <= fold.ts(hold['ts'])))
+            closed = s['closed'] is not None and (s['reopened'] is None or s['reopened'] <= s['closed'])
+            s['eligible'] = (not closed and not s['retracted']
+                             and s['filed'].get('project') in projects)
+            # Equality cannot end an active interval, but cannot re-enter a
+            # plan already completed at that same instant either.
+            s['pending'] = bool(r and (s['marker'] is None or fold.ts(r['ts']) > s['marker']
+                                      or (cid in active and fold.ts(r['ts']) == s['marker']))
+                                and not closed and not s['retracted'])
+        active &= {cid for cid, s in states.items() if s['pending'] and s['eligible'] and not s['held']}
+        waiting = [cid for cid, s in states.items() if s['pending'] and s['eligible']
+                   and not s['held'] and cid not in active]
+        pool = [(verdicts.get(states[cid]['replan']['verdict_src'], fold.ts(states[cid]['replan']['ts'])),
+                 cid, states[cid]['replan']['verdict_src'], True) for cid in waiting]
+        # Unserviced verdicts compete with waiting releases. Reserve their place
+        # without pretending their event has already been appended. Replaying
+        # the actual append later replaces that reservation with the same slot.
+        for cid, s in states.items():
+            v = s['verdict']
+            source, spawn = v.get('_src'), v.get('spawn')
+            if (isinstance(cid, str) and re.fullmatch(r'L-charter-[0-9]{4}', cid)
+                    and s['eligible'] and not s['held'] and not s['pending']
+                    and v.get('type') == 'charter-review-not-complete'
+                    and isinstance(source, str) and source.strip() and source not in serviced
+                    and (not spawn or (spawn in ended and ended[spawn] <= at))):
+                pool.append((fold.ts(v['ts']), cid, source, False))
+        active.update(cid for _, cid, _, recorded in sorted(pool)[:max(0, 2-len(active))] if recorded)
+    for cid, s in states.items():
+        s['active'] = cid in active
+    return states
+
+
+def replans_due(events, now):
+    """Pure selection from admitted standing verdicts, including historical runs."""
+    from relay import registered_projects
+    by_subject = fold.fold(events)[3]
+    admitted = [e for rows in by_subject.values() for e in rows if fold.ts(e['ts']) <= now]
+    states = replan_state(admitted, now)
+    available = max(0, 2-sum(s['active'] for s in states.values()))
+    serviced = {e['verdict_src'] for e in admitted if e['type'] == 'charter-replan' and valid_replan_row(e)}
+    ended = {e.get('spawn') for e in admitted if e['type'] in spawns.TERMINAL}
+    projects = registered_projects(fold.ROOT)
+    candidates = []
+    for cid, evs in by_subject.items():
+        if not isinstance(cid, str) or not re.fullmatch(r'L-charter-[0-9]{4}', cid):
+            continue
+        evs = [e for e in evs if fold.ts(e['ts']) <= now]
+        filed = next((e for e in reversed(evs) if e['type'] == 'charter-filed'), {})
+        if (filed.get('project') not in projects or standing_close(evs)
+                or any(e['type'] == 'charter-retracted' for e in evs)
+                or states.get(cid, {}).get('held') or states.get(cid, {}).get('pending')):
+            continue
+        verdict = max((e for e in evs if e['type'] in ('charter-review-complete', 'charter-review-not-complete')),
+                      key=lambda e: (fold.ts(e['ts']), e.get('_src', '')), default=None)
+        if not verdict or verdict['type'] != 'charter-review-not-complete':
+            continue
+        source = verdict.get('_src')
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError('replan missing verdict identity')
+        if source in serviced:
+            continue
+        spawn = verdict.get('spawn')
+        if spawn and spawn not in ended:
+            continue
+        uncovered = verdict.get('uncovered_requirement_ids')
+        if not isinstance(uncovered, list) or not all(isinstance(r, str) for r in uncovered):
+            raise ValueError('replan malformed uncovered requirement ids')
+        ledger = source.rpartition(':')[0]
+        findings = [dict(e) for e in evs if e['type'] == 'audit-finding'
+                    and e.get('actor') == 'charter-reviewer'
+                    and ((spawn and e.get('spawn') == spawn)
+                         or (not spawn and ledger and e.get('_src', '').rpartition(':')[0] == ledger))]
+        body = dict(subject=cid, verdict_src=source, findings=findings, uncovered=list(uncovered))
+        candidates.append((fold.ts(verdict['ts']), cid, source, body))
+    return [body for _, _, _, body in sorted(candidates)[:available]]
+
+
 def due(events, specs, now):
     """Eligible charter IDs from the pass snapshot, without load or paid work."""
     by_subject = defaultdict(list)
@@ -124,7 +263,7 @@ def due(events, specs, now):
         if cid in failures and now < failures[cid] + COOLDOWN:
             continue
         markers = [fold.ts(e['ts']) for e in evs if e['type'] in ('l1-complete', 'cut-written')]
-        replans = [fold.ts(e['ts']) for e in evs if e['type'] == 'charter-replan']
+        replans = [fold.ts(e['ts']) for e in evs if e['type'] == 'charter-replan' and valid_replan_row(e)]
         if not markers or (replans and max(markers) <= max(replans)):
             continue
         mine = [s for s in specs.values() if s.get('charter') == cid and s['state'] != 'void']

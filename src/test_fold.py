@@ -5141,3 +5141,60 @@ from test_fold_stalls import evidence as _blocked_evidence
 _blocked_evidence('AC4', dict(fold_lines=len(pathlib.Path(fold.__file__).read_text().splitlines()),
                              packet_lines=len(pathlib.Path(__file__).with_name('packet.py').read_text().splitlines()),
                              spec_states=fold.SPEC_STATES, regression='all fold assertions passed'))
+
+
+def test_replan_admission():
+    import dispatch
+    import hashlib
+    from unittest.mock import patch
+    cid = 'L-charter-9800'
+    payloads = {'charter-replan': dict(verdict_src='L-charter-reviewer-9800.jsonl:1', findings=[], uncovered=[]),
+                'charter-replan-held': dict(why='tooling blocked'),
+                'charter-replan-released': dict(why='tooling restored')}
+    with tempfile.TemporaryDirectory(prefix='replan-admission-') as temp:
+        root = pathlib.Path(temp)
+        directory = root / 'events'
+        directory.mkdir()
+        with patch.object(fold, 'EVENTS', directory), patch.object(fold, 'ROOT', root):
+            for kind, fields in payloads.items():
+                allowed = {'tick'} if kind == 'charter-replan' else {'planner', 'thinker', 'operator'}
+                assert fold.EMITS[kind] == allowed
+                assert fold.REQUIRED_ROWS[kind] == tuple(fields)
+                for actor in allowed | {'tick', 'planner', 'thinker', 'operator', 'builder', 'reviewer', 'executor'}:
+                    dest = directory / f'L-{actor}-9800.jsonl'
+                    e = dict(type=kind, subject=cid, **fields)
+                    assert (fold.admits(e, actor) is None) == (actor in allowed)
+                    result = dispatch.emit(dest, {'subject':cid}, kind, strict=True, **fields)
+                    assert (result is None) == (actor in allowed), (kind, actor, result)
+                    _blocked_evidence('AC4', dict(label=kind+'-'+actor, permitted=actor in allowed,
+                                                 append=result or 'appended'))
+                invalid = []
+                for key in fields:
+                    invalid.append({k:v for k,v in fields.items() if k != key})
+                    for value in (None, 7, '', {}):
+                        invalid.append(dict(fields, **{key:value}))
+                if kind == 'charter-replan':
+                    invalid += [dict(fields, findings=['wrong']), dict(fields, uncovered=[{}]),
+                                dict(fields, verdict_src=' ')]
+                else:
+                    invalid.append(dict(why=' '))
+                for fields_bad in invalid:
+                    dest = directory / ('L-'+sorted(allowed)[0]+'-9800.jsonl')
+                    before = dest.read_bytes()
+                    result = dispatch.emit(dest, {'subject':cid}, kind, strict=True, **fields_bad)
+                    assert result, (kind, fields_bad)
+                    assert dest.read_bytes() == before
+                assert dispatch.emit(dest, {'subject':'L-spec-9800'}, kind, strict=True, **fields)
+                _blocked_evidence('AC4', dict(label=kind+'-malformed-payloads', refused=len(invalid)+1))
+            forged = directory / 'L-builder-9800.jsonl'
+            forged.write_text(json.dumps(dict(type='charter-replan', subject=cid, actor='tick',
+                                             ts=fold.NOW.isoformat(), **payloads['charter-replan']))+'\n')
+            rows = fold.read_events(use_cache=False)
+            assert next(e for e in rows if e['_src'].startswith(forged.name))['actor'] == 'builder'
+            ignored = fold.fold(rows)[2]
+            assert any(e['_src'].startswith(forged.name) for e in ignored)
+            _blocked_evidence('AC4', dict(label='filename-beats-payload-actor', ignored=True,
+                                         ledger_sha256=hashlib.sha256(forged.read_bytes()).hexdigest()))
+
+
+test_replan_admission()

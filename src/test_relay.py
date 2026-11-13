@@ -905,3 +905,93 @@ for reason, attempts, next_action in [("held", 0, "start"), ("exit-143", 3, "esc
     print(f"1667 AC6 {reason}: {tally}")
 
 print(f"relay: {N} checks pass")
+
+
+def test_replan_queue():
+    import close_reviews
+    import hashlib
+    with tempfile.TemporaryDirectory(prefix='replan-queue-') as temp:
+        root = pathlib.Path(temp)
+        (root / 'repos' / PROJECT).mkdir(parents=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cid = 'L-charter-9800'
+        def row(kind, second, subject=cid, actor=None, **fields):
+            return dict(type=kind, subject=subject, project=fields.pop('project', PROJECT),
+                        actor=actor or sorted(fold.EMITS.get(kind, {'operator'}))[0],
+                        ts=(now + datetime.timedelta(seconds=second)).isoformat(), **fields)
+        def pending(subject=cid, second=-80):
+            return row('charter-replan', second, subject, verdict_src=subject+':verdict',
+                       findings=[], uncovered=[])
+        base = [row('charter-filed', -100), row('l1-complete', -90)]
+        def check(label, rows, members, ready, reason=None):
+            mapping = fold.fold(rows)[3]
+            a = relay.open_charters(rows, root=root)
+            b = relay.open_charters(rows, mapping, root=root)
+            actual, waiting = relay.plannable(rows, root)
+            assert sorted(a) == sorted(b) == sorted(members), (label, a, b, members)
+            assert sorted(actual) == sorted(ready), (label, actual, ready, waiting)
+            if reason:
+                assert any(c == cid and why.startswith(reason) for c, why in waiting), (label, waiting)
+            body = json.dumps(dict(label=label, expected=ready, actual=actual,
+                                   members=a, waiting=waiting), sort_keys=True)
+            print(json.dumps(dict(url='cli://relay/AC2', status=0,
+                                 body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
+        check('reentry', base+[pending()], [cid], [cid])
+        check('equal-time-reentry-refused', base+[pending(second=-90)], [], [])
+        check('legacy-decision-hold-key', base+[pending(), row('decision', -50, hold='yes')], [cid], [cid])
+        for kind in ('l1-complete', 'cut-written'):
+            check('later-'+kind, base+[pending(), row(kind, -70)], [], [])
+        for kind in ('charter-retracted', 'charter-closed'):
+            check(kind, base+[pending(), row(kind, -70)], [], [])
+        check('unregistered-newest-filing', base+[pending(), row('charter-filed', -70, project='absent')], [], [])
+        explanation = relay.waiting_lines(base+[pending(), row('charter-filed', -70, project='absent')], root)
+        assert any('excluded 1 open charter(s): newest filing has no registered project' in line
+                   for line in explanation), explanation
+        hold = row('charter-replan-held', -60, why='tooling')
+        release = row('charter-replan-released', -40, why='fixed')
+        held = base+[pending(), hold]
+        check('explicit-hold', held, [cid], [], 'replan held:')
+        for kind, fields in [('decision', {'hold':'no'}), ('unblocked', {}), ('shipped', {})]:
+            check('unrelated-'+kind, held+[row(kind, -50, **fields)], [cid], [], 'replan held:')
+        check('explicit-release', held+[release], [cid], [cid])
+        check('equal-time-release', held+[dict(release, ts=hold['ts'])], [cid], [], 'replan held:')
+        for marker in ('cut-written', 'l1-complete'):
+            check('release-after-'+marker, held+[row(marker, -50), release], [], [])
+        for value in (None, '', ' ', 7):
+            for kind in ('charter-replan-held', 'charter-replan-released'):
+                bad = row(kind, -50, **({} if value is None else {'why':value}))
+                rows = base+[pending(), bad] if kind.endswith('-held') else held+[bad]
+                check(f'malformed-{kind}-{value!r}', rows, [cid], [cid] if kind.endswith('-held') else [],
+                      None if kind.endswith('-held') else 'replan held:')
+        for kind in ('charter-replan-hold', 'charter-replan-release'):
+            check('misspelled-'+kind, held+[row(kind, -50, why='typo')], [cid], [], 'replan held:')
+        for actor in ('builder', 'reviewer', 'executor'):
+            check('unauthorized-release-'+actor, held+[dict(release, actor=actor)], [cid], [], 'replan held:')
+        others = []
+        for subject in ('L-charter-9801', 'L-charter-9802'):
+            others += [row('charter-filed', -100, subject), row('l1-complete', -90, subject),
+                       pending(subject, -55)]
+        check('two-active-plus-one-released', held+others+[release],
+              [cid, 'L-charter-9801', 'L-charter-9802'], ['L-charter-9801', 'L-charter-9802'], 'replan capacity:')
+        normal = row('charter-filed', -30, 'L-charter-9803')
+        check('normal-intake-outside-cap', held+others+[release, normal],
+              [cid, 'L-charter-9801', 'L-charter-9802', 'L-charter-9803'],
+              ['L-charter-9801', 'L-charter-9802', 'L-charter-9803'], 'replan capacity:')
+        escalation = row('escalation-blocking', -75, why='standing escalation', _src='L-operator-9800.jsonl:1')
+        question = row('question', -74, _src='L-planner-9800.jsonl:1', asks='still open')
+        rows = base+[pending(), escalation, question, hold, release]
+        check('standing-escalation-question-preserved', rows, [cid], [], 'escalation open:')
+        assert fold.open_escalations(rows) == [escalation]
+        assert question['_src'] not in fold.answered(rows)
+        planner_hold = row('planner-held', -70, actor='planner')
+        for extra in (pending(second=-50), hold, release, dict(hold, why=None)):
+            rows = base+[pending(), planner_hold, extra]
+            assert relay.held_since(rows, cid) == planner_hold['ts']
+            check('standing-planner-held-'+extra['type'], rows, [cid], [], 'held since ')
+        # The next free slot goes to a waiting release before a newer verdict.
+        ended = row('l1-complete', -20, 'L-charter-9801')
+        check('waiting-release-gets-next-slot', held+others+[release, ended],
+              [cid, 'L-charter-9802'], [cid, 'L-charter-9802'])
+
+
+test_replan_queue()

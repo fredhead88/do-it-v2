@@ -120,6 +120,9 @@ Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_r
 `src/loadgate.py` begin_pass: one scratch disk sample, before optional load admission.
 Builder/grader disk holds survive load off/errors; receiver thresholds default to 5/2 GiB.
 Holds use admission.json holding; dry runs never save. Receiver alone reclaims and rechecks.
+`src/close_reviews.py`: oldest-verdict replans, two active slots; holds retain queue entries.
+`charter-replan`: tick-only; held/released: planner/thinker/operator with nonblank why.
+`relay.plannable`: strict later release; hold/capacity waits preserve existing intake gates.
 ## Member verdicts
 Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).
 - After a red window with unnamed owners, each remaining member is verified alone on the window
@@ -137,6 +140,3 @@ Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; 
   gate with unchanged main/branch shas; merge --no-ff, emit shipped. A moved ref needs re-gating;
   failed merge is aborted. cli_gate uses doit gate; caller owns queue selection and tick wiring.
 - `src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.
-- `src/spawns.py`: would_conflict(subject, role) reads shared conflict policy and Linux /proc/locks
-  without taking a flock, creating a lock file or writing ledger events. Unreadable state holds with
-  dispatch-in-progress; acquire/gate remain the atomic receiver checks.

@@ -43,7 +43,7 @@ SESSIONS = pathlib.Path(os.environ.get("DOIT_SESSIONS_DIR",
                                        pathlib.Path.home() / ".claude" / "sessions"))
 PROJECT = os.environ.get("DOIT_PROJECT")          # §9.1/D93: a filter, not a second read
 
-from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency, escalation_required_reason, window_result_reason
+from fold_emits import EMITS, DECLARES, OWED_DECLARERS, REQUIRED_ROWS, nightly_unowned, valid_dependency, escalation_required_reason, window_result_reason, typed_required_reason
 EMITS["suite-run"] = {"suite-daily"}
 EMITS["check-declared"] = {"spec-writer", "executor", "operator", "check-backfill"}
 # L-spec-0682: the full-environment verifier may record verdicts and re-date timed checks.
@@ -826,7 +826,7 @@ def required_reason(e):
         return "dependency-hold waits_for= must be a string matching L-spec-[0-9]+"
     if t == "escalation-blocking":
         return escalation_required_reason(e, escalation_ok)
-    if t == 'window-verification-result' and (reason := window_result_reason(e)):
+    if (reason := typed_required_reason(e)) or t in ('charter-replan', 'charter-replan-held', 'charter-replan-released'):
         return reason
     fields = REQUIRED.get(t)
     if fields:

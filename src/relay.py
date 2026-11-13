@@ -251,13 +251,18 @@ def open_charters(events, by_subject=None, *, root=None):
         _, _, _, by_subject = fold.fold(events)
     out = []
     projects = registered_projects(root)
+    import close_reviews
+    replans = close_reviews.replan_state([e for rows in by_subject.values() for e in rows], root=root)
     for sid, evs in by_subject.items():
         if not re.fullmatch(r"L-charter-\d{4}", sid):
             continue
         types = {e["type"] for e in evs}
         filed = next((e for e in reversed(evs) if e['type'] == 'charter-filed'), {})
         project = filed.get('project')
-        if isinstance(project, str) and project in projects and not (types & {"cut-written", "l1-complete", "charter-retracted"}):
+        pending = replans.get(sid, {}).get('pending', False)
+        if (isinstance(project, str) and project in projects and 'charter-retracted' not in types
+                and not close_reviews.standing_close(evs)
+                and (pending or not (types & {'cut-written', 'l1-complete'}))):
             out.append(sid)
     return out
 
@@ -297,7 +302,8 @@ def held_since(events, charter, folded_specs=None):
     refs = {e["_src"] for e in rows if escalation(e) and isinstance(e.get("_src"), str)}
     for event in rows[hold + 1:]:
         kind = event.get("type")
-        if not isinstance(kind, str) or kind in ("planner-started", "planner-ended", "planner-held", "lesson", "question"):
+        if not isinstance(kind, str) or kind in ("planner-started", "planner-ended", "planner-held", "lesson", "question",
+                "charter-replan", "charter-replan-held", "charter-replan-released"):
             continue
         if (on_subject(event) or escalation(event)
                 or (kind in ("decision", "unblocked") and isinstance(event.get("ref"), str)
@@ -327,6 +333,8 @@ def plannable(events, root=None):
     root = pathlib.Path(root or fold.ROOT)
     specs, charters, _, by_subject = fold.fold(events)
     escalated = {e.get("subject"): e for e in fold.open_escalations(events)}
+    import close_reviews
+    replans = close_reviews.replan_state([e for rows in by_subject.values() for e in rows], root=root)
     goal_date_of, goal_ids = _goal_context(events)
     # Operator ruling 2026-09-27 ~07:30Z: only a charter with work still IN FLIGHT counts against the
     # throttle. A cut charter whose every spec has merged (shipped, owed evidence or checks, accepted)
@@ -353,6 +361,11 @@ def plannable(events, root=None):
                 why = f"held since {since}"
         if why is None and cid in escalated:
             why = f"escalation open: {escalated[cid].get('why', 'escalation')}"
+        replan = replans.get(cid, {})
+        if why is None and replan.get('held'):
+            why = 'replan held: ' + replan['hold']['why']
+        if why is None and replan.get('pending') and not replan.get('active'):
+            why = 'replan capacity: waiting for one of two slots'
         block = sequencing(next((e for e in reversed(evs) if e["type"] == "charter-filed"), {}), events)
         if why is None and block:
             for x in block["after"]:
@@ -397,10 +410,16 @@ def waiting_lines(events, root=None):
     notes = [f"note: footprint check unmeasured for {cid} (no content/cut-{cid}.md)"
              for cid in unmeasured_footprints(events, root)]
     admitted = set(open_charters(events, root=root))
+    import close_reviews
+    mapping = fold.fold(events)[3]
+    replans = close_reviews.replan_state([e for rows in mapping.values() for e in rows], root=root)
     excluded = sum(bool(any(e['type'] == 'charter-filed' for e in rows))
-                   and not any(e['type'] in ('cut-written', 'l1-complete', 'charter-retracted') for e in rows)
+                   and not any(e['type'] == 'charter-retracted' for e in rows)
+                   and not close_reviews.standing_close(rows)
+                   and (replans.get(cid, {}).get('pending') or not any(
+                       e['type'] in ('cut-written', 'l1-complete') for e in rows))
                    and cid not in admitted
-                   for cid, rows in fold.fold(events)[3].items()
+                   for cid, rows in mapping.items()
                    if re.fullmatch(r'L-charter-\d{4}', cid))
     exclusion = ([f'note: excluded {excluded} open charter(s): newest filing has no registered project']
                  if excluded else [])
