@@ -343,6 +343,7 @@ EMITS["pane-dialog-resolved"] = {"pane-watchdog"}
 EMITS["merge-gate-undetermined"] = {"executor", "tick"}
 
 REQUIRED_ROWS = {
+    "selected-canary": ("sha", "run_id"),
     "writes-granted": ("tests", "why", "spec_written_src"),
     "coupled-files-granted": ("files", "why", "spec_written_src"),
     "build-timeout": ("branch", "last_commit", "wip_commits", "spawn"),

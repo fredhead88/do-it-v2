@@ -4,6 +4,7 @@ import argparse
 import ast
 from datetime import datetime, timedelta, timezone
 import fcntl
+import fnmatch
 import io
 import json
 import os
@@ -287,6 +288,61 @@ def _canary_base(repo, sha):
     raise ValueError("no ancestral base with a nonempty Python test change")
 
 
+def _full_paths(repo, sha):
+    source = br.window_gate.git(repo, "show", f"{sha}:scripts/ci/full_mode_paths.txt").stdout
+    return [line.strip() for line in source.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
+def walk_canaries(project, repo, tip, state):
+    """Count first-parent merges, independent of selection policy or ledger state."""
+    notes = state.setdefault("canary_undetermined", [])
+    notes.clear()
+    try:
+        _full_paths(repo, tip)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        notes.append("full-mode-paths-absent at tip")
+        return []
+    if "canary" not in state:
+        state["canary"] = dict(cursor=tip, eligible=0, due=[], dropped=[])
+        return []
+    canary = state["canary"]
+    cursor = canary["cursor"]
+    try:
+        if not isinstance(cursor, str) or not SHA.fullmatch(cursor):
+            raise ValueError("invalid canary cursor")
+        history = br.window_gate.git(repo, "rev-list", "--first-parent", tip).stdout.splitlines()
+        if cursor not in history:
+            # Distinguish an unreadable cursor from a proven unrelated history.
+            br.window_gate.git(repo, "cat-file", "-e", f"{cursor}^{{commit}}")
+            canary["cursor"] = tip
+            notes.append("canary cursor is not a first-parent ancestor; reset to tip")
+            return []
+        merges = br.window_gate.git(repo, "rev-list", "--first-parent", "--merges", "--reverse",
+                                    cursor + ".." + tip).stdout.splitlines()
+        sampled, eligible = [], canary["eligible"]
+        for sha in merges:
+            parent = br.window_gate.git(repo, "rev-parse", sha + "^1").stdout.strip()
+            changed = br.window_gate.git(repo, "diff", "--name-only", "-z", parent, sha, "--").stdout.split("\0")
+            try:
+                globs = _full_paths(repo, sha)
+                full = any(fnmatch.fnmatchcase(p, g) or
+                           (g.startswith("**/") and fnmatch.fnmatchcase(p, g[3:]))
+                           for p in changed if p for g in globs)
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                full = True
+                notes.append("full-mode-paths-absent at " + sha)
+            if not full:
+                eligible += 1
+            if full or eligible % 5 == 0:
+                sampled.append(dict(sha=sha, parent=parent, reason="full-path" if full else "every-5th"))
+        canary.update(cursor=tip, eligible=eligible)
+        return sampled
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        notes.append("canary walk unreadable: " + _clean(error))
+        return []
+
+
 def _artifact(owner, rid):
     artifacts = br._api(f"repos/{owner}/actions/runs/{rid}/artifacts?per_page=100", "artifacts")
     found = [a for a in artifacts if a.get("name") == "ci-selection-request" and not a.get("expired")]
@@ -354,7 +410,7 @@ def _collect(project, repo, owner, pending, run):
         raise ValueError("run head is invalid")
     event = "master-full-run" if pending["kind"] == "full" else "selected-canary"
     rows = br._nightly_rows(project)
-    previous = next((r for r in rows if r.get("type") == event and
+    previous = next((r for r in rows if not pending.get("pair") and r.get("type") == event and
                      (rid in r.get("run_ids", []) or r.get("run_id") == rid)), None)
     if previous is not None:
         if event == "master-full-run": _question(project, previous)
@@ -362,7 +418,7 @@ def _collect(project, repo, owner, pending, run):
     fields = dict(run_ids=[rid], suite=pending["inputs"]["suite"], covered=[],
                   green=False, undetermined=[], url=f"https://github.com/{owner}/actions/runs/{rid}")
     ids, complete = [], False
-    if actual != pending["sha"] and not (pending["kind"] == "full"
+    if actual != pending["sha"] and not (pending["kind"] == "full" and not pending.get("pair")
                                          and _descendant(repo, pending["sha"], actual)):
         fields["undetermined"].append("master advanced before dispatch acceptance")
     elif run.get("conclusion") not in {"success", "failure"}:
@@ -386,7 +442,7 @@ def _collect(project, repo, owner, pending, run):
                 fields["undetermined"].append(f"{len(partial)} pytest shards did not execute completely: "
                                                + _shard_text(partial))
             ids = sorted(set(i for k in br.KINDS for i in snapshot["ids"][k]))
-            unexpected = [i for i in ids if br.id_kind(i) not in COVERED]
+            unexpected = [i for i in ids if br.id_kind(i) not in COVERED and not pending.get("pair")]
             if unexpected:
                 fields["undetermined"].append(f"{len(unexpected)} failures outside Python/PG coverage: "
                                                + "; ".join(_clean(i) for i in unexpected))
@@ -420,7 +476,8 @@ def _collect(project, repo, owner, pending, run):
             if unexpected:
                 fields["undetermined"].append(f"{len(unexpected)} failures outside Python/PG coverage: "
                                                + "; ".join(_clean(i) for i in unexpected))
-            classification = br.classify_selected(project, actual, ids)
+            classification = (dict(known_red=ids, rerun_on_base=[], undetermined=False)
+                              if pending.get("pair") else br.classify_selected(project, actual, ids))
             fields.update(run_id=rid, classification=classification,
                           select_base=pending["inputs"]["select_base"])
             complete = not fields["undetermined"] and (run["conclusion"] == "success" or bool(ids))
@@ -429,6 +486,9 @@ def _collect(project, repo, owner, pending, run):
                                and set(classification["known_red"]) == set(ids))
             if not fields["green"]: fields["undetermined"].append("selected failures not fully explained")
             fields["covered"] = ["pytest"] if complete else []
+    if pending.get("pair"):
+        # Pair members are persisted with their intents; only the joined verdict is emitted.
+        return dict(sha=actual, complete=complete, ids=ids, **fields)
     if pending["kind"] == "full":
         fields.update(_attribution(project, repo, actual))
     else:
@@ -451,13 +511,18 @@ def _note(pending, text, path, state):
 
 
 def _expire(project, pending, slug, now, path, state):
+    if pending.get("pair"):
+        pending["expired"] = {"at": now.isoformat(), "reason": slug}
+        _save(path, state)
+        return
     event = "master-full-run" if pending["kind"] == "full" else "selected-canary"
     if not any(r.get("type") == event and r.get("expired_intent") == pending["sent_at"]
                for r in br._nightly_rows(project)):
         br._append(event, project, pending["sha"], complete=False, ids=[], green=False, covered=[],
                    undetermined=[f"intent expired: {slug}"], run_ids=[],
                    suite=pending["inputs"]["suite"], expired_intent=pending["sent_at"],
-                   last_reason=_bound(pending.get("last_reason") or ""))
+                   last_reason=_bound(pending.get("last_reason") or ""),
+                   **({"run_id": pending.get("run_id") or "unaccepted"} if event == "selected-canary" else {}))
     pending["expired"] = {"at": now.astimezone(timezone.utc).isoformat(), "reason": slug}
     _save(path, state)
 
@@ -499,14 +564,22 @@ def _advance(project, repo, owner, pending, state, path, now, result):
             return
         try:
             row = _collect(project, repo, owner, pending, run)
-        except ValueError as error:
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError,
+                zipfile.BadZipFile, zlib.error, UnicodeError) as error:
             _note(pending, str(error), path, state)
-            if not _transient(error) and _old(pending, now):
+            if pending.get("pair"):
+                pending["collected"] = dict(complete=False, ids=[], undetermined=[_clean(error)])
+                _save(path, state)
+                return
+            if isinstance(error, ValueError) and not _transient(error) and _old(pending, now):
                 return _expire(project, pending, "collection-unprovable", now, path, state)
             raise
         if row is None:
             return
-        state["pending"].remove(pending)
+        if pending.get("pair"):
+            pending["collected"] = row
+        else:
+            state["pending"].remove(pending)
         result["collected"] = True
         result["undetermined"].extend(row["undetermined"])
         _save(path, state)
@@ -514,6 +587,70 @@ def _advance(project, repo, owner, pending, state, path, now, result):
             zlib.error, UnicodeError) as error:
         _note(pending, f"{type(error).__name__}: {error}", path, state)
         raise
+
+
+def _canary_question(project, row):
+    if not row["complete"] or not row["ids"]:
+        return
+    subject = f"selected-canary:{project}:{row['run_id']}"
+    if any(r.get("type") == "question" and r.get("subject") == subject for r in br._nightly_rows(project)):
+        return
+    br._append("question", project, row["sha"], complete=False, ids=row["ids"],
+               subject=subject, kind="selector-miss", addressed_to="thinker",
+               asks=_clean(f"Selector miss at {row['sha']}; missed ids: {'; '.join(row['ids'])}; "
+                           f"selected run {row['run_id']}; full run {row['full_run_id']}"),
+               blocks=["selection"], deadline=(_now() + timedelta(hours=24)).isoformat(),
+               default="hold selection (selection_switch stays off) until a later canary on a descendant sha is green")
+
+
+def _finish_pairs(project, state, path, result):
+    pairs = {p["pair"] for p in state["pending"] if p.get("pair")}
+    for pair in pairs:
+        members = [p for p in state["pending"] if p.get("pair") == pair]
+        selected = next(p for p in members if p["role"] == "selected")
+        full = next(p for p in members if p["role"] == "full")
+        previous = next((r for r in br._nightly_rows(project)
+                         if r.get("type") == "selected-canary" and r.get("pair") == pair), None)
+        if previous is None:
+            broken = any(p.get("expired") or (p.get("collected") is not None
+                         and not p["collected"]["complete"]) for p in members)
+            if not broken and not all("collected" in p for p in members):
+                continue
+            s, f = selected.get("collected", {}), full.get("collected", {})
+            notes = [why for p in members for why in p.get("collected", {}).get("undetermined", [])]
+            notes.extend("intent expired: " + p["expired"]["reason"] for p in members if p.get("expired"))
+            files = s.get("selection", {}).get("pytest_files", [])
+            full_failures = f.get("ids", [])
+            candidates = []
+            for node in full_failures:
+                if br.id_kind(node) != "pytest":
+                    notes.append("excluded:" + _clean(node) + ":not-a-test-file")
+                elif not br.window_gate.safe_path(node.split("::", 1)[0]):
+                    broken = True
+                    notes.append("unsafe failure path: " + _clean(node))
+                elif node.split("::", 1)[0] not in files:
+                    candidates.append(node)
+            complete = not broken and all(p.get("collected", {}).get("complete") is True for p in members)
+            try:
+                classification = br.classify_selected(project, selected["inputs"]["select_base"], candidates)
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                classification = dict(known_red=[], undetermined=True)
+                notes.append("canary classification failed: " + _clean(error))
+            if classification.get("undetermined") is not False:
+                complete = False
+                notes.append("canary failure classification undetermined")
+            ids = [i for i in candidates if i not in classification["known_red"]]
+            fields = dict(schema=2, pair=pair, run_id=selected.get("run_id") or "unaccepted",
+                          full_run_id=full.get("run_id") or "unaccepted", selected=files,
+                          full_failures=full_failures, green=complete and not ids,
+                          undetermined=[_clean(n) for n in notes])
+            br._append("selected-canary", project, selected["sha"], complete=complete, ids=ids, **fields)
+            previous = dict(sha=selected["sha"], complete=complete, ids=ids, **fields)
+        _canary_question(project, previous)
+        state["pending"] = [p for p in state["pending"] if p.get("pair") != pair]
+        result["collected"] = True
+        result["undetermined"].extend(previous["undetermined"])
+        _save(path, state)
 
 
 def tick(project):
@@ -542,52 +679,99 @@ def tick(project):
             # Collection is independent of current workflow eligibility and SHA.
             runs = br._api(f"repos/{owner}/actions/runs?per_page=100", "workflow_runs")
             for pending in list(state["pending"]):
-                if pending.get("expired"):
+                if pending.get("expired") or "collected" in pending:
                     continue
                 try:
                     _advance(project, repo, owner, pending, state, path, now, result)
                 except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError,
                         zipfile.BadZipFile, zlib.error, UnicodeError) as error:
                     result["undetermined"].append(_clean(error))
+            _finish_pairs(project, state, path, result)
+            sampled = walk_canaries(project, repo, sha, state)
+            result["undetermined"].extend(state["canary_undetermined"])
+            state["slots"].pop("canary", None)
+            canary = state.get("canary", {})
+            if canary:
+                canary["due"].extend(sampled)
+                overflow = max(0, len(canary["due"]) - 20)
+                dropped = [m["sha"] for m in canary["due"][:overflow]]
+                canary["dropped"].extend(dropped)
+                del canary["due"][:overflow]
+                if dropped:
+                    result["undetermined"].append(f"canary due overflow: dropped {len(dropped)} merges: " + "; ".join(dropped))
+            _save(path, state)
             group = _workflow(repo, sha)
-            for kind, hours in (("full", 3), ("canary", 12)):
+            # Keep the existing protection against cancelling an untracked master run.
+            for run in runs:
+                if (run.get("status") != "completed" and run.get("name") == "Python Tests"
+                        and run.get("head_branch") == "master"
+                        and not any(p.get("run_id") == str(run.get("id")) for p in state["pending"])):
+                    raise ValueError("unrelated active master run has unproven concurrency group")
+            if (canary.get("due") and not any(p.get("pair") for p in state["pending"])
+                    and not any(p["sha"] == sha and p["kind"] == "full" and not p.get("expired")
+                                for p in state["pending"])):
+                try:
+                    source = br.window_gate.git(repo, "show", f"{sha}:.github/workflows/python-tests.yml").stdout
+                    doc = yaml.safe_load(source)
+                    trigger = doc.get("on", doc.get(True, {}))
+                    declared = trigger["workflow_dispatch"]["inputs"]
+                    missing = {"canary", "tree"} - declared.keys()
+                    if missing:
+                        raise ValueError("canary workflow missing inputs: " + ", ".join(sorted(missing)))
+                    pair = sha + ":" + now.isoformat()
+                    intents = []
+                    for role in ("selected", "full"):
+                        inputs = dict(suite="window" if role == "selected" else "full", full_run=True,
+                                      select_base=canary["due"][0]["parent"] if role == "selected" else "",
+                                      canary=role == "selected", tree="canary-" + pair + "-" + role,
+                                      rerun_ids="", checks="")
+                        intents.append(dict(kind="canary" if role == "selected" else "full", role=role,
+                                            pair=pair, sha=sha, inputs=inputs, group=_group(group, inputs),
+                                            sent_at=now.isoformat(), before_ids=[str(r["id"]) for r in runs]))
+                    if intents[0]["group"] == intents[1]["group"]:
+                        raise ValueError("canary pair concurrency groups collide")
+                    state["pending"].extend(intents)
+                    canary["due"] = []
+                    _save(path, state)
+                    for intent in intents:
+                        _dispatch(owner, intent["inputs"], result)
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+                    result["undetermined"].append(_clean(error))
+            for kind, hours in (("full", 3),):
                 slot = int(now.timestamp()) // (hours * 3600)
                 if state["slots"].get(kind) == slot:
                     continue
                 if kind == "full" and state["last_full"] == sha:
                     continue
+                if any(p.get("pair") and p["sha"] == sha for p in state["pending"]):
+                    continue
                 try:
-                    inputs = dict(suite="full" if kind == "full" else "window", full_run=True,
-                                  select_base="" if kind == "full" else _canary_base(repo, sha),
-                                  rerun_ids="", checks="")
+                    inputs = dict(suite="full", full_run=True, select_base="", rerun_ids="", checks="")
                     target_group = _group(group, inputs)
-                    for run in runs:
-                        if run.get("status") == "completed": continue
-                        if run.get("name") != "Python Tests": continue
-                        if run.get("head_branch") != "master": continue
-                        tracked = any(p.get("run_id") == str(run.get("id")) for p in state["pending"])
-                        # Do not risk cancelling an unrelated active master run.
-                        if not tracked:
-                            raise ValueError("unrelated active master run has unproven concurrency group")
                     intent = dict(kind=kind, sha=sha, slot=slot, inputs=inputs, group=target_group,
                                   sent_at=now.isoformat(), before_ids=[str(r["id"]) for r in runs])
                     state["pending"].append(intent)
                     state["slots"][kind] = slot
                     if kind == "full": state["last_full"] = sha
                     _save(path, state)
-                    argv = ["gh", "workflow", "run", "python-tests.yml", "--repo", owner, "--ref", "master"]
-                    for key, value in inputs.items(): argv.extend(["-f", key + "=" + _text(value)])
-                    rc, _, _ = br.ghlimit.run(argv, wait=False)
-                    if rc:
-                        result["undetermined"].append("dispatch acceptance unknown; durable intent retained")
-                    else:
-                        result["dispatched"] = True
+                    _dispatch(owner, inputs, result)
                 except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
                     result["undetermined"].append(_clean(error))
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError, SyntaxError,
             yaml.YAMLError, subprocess.SubprocessError) as error:
         result["undetermined"].append(_clean(error))
     return result
+
+
+def _dispatch(owner, inputs, result):
+    argv = ["gh", "workflow", "run", "python-tests.yml", "--repo", owner, "--ref", "master"]
+    for key, value in inputs.items():
+        argv.extend(["-f", key + "=" + _text(value)])
+    rc, _, _ = br.ghlimit.run(argv, wait=False)
+    if rc:
+        result["undetermined"].append("dispatch acceptance unknown; durable intent retained")
+    else:
+        result["dispatched"] = True
 
 
 def main(argv=None):

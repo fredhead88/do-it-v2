@@ -210,29 +210,400 @@ class MasterFixture(fixtures.SelectiveFixture):
                               body_sha256=hashlib.sha256(encoded.encode()).hexdigest(), body_excerpt=body)))
 
 
+GLOBS = """.github/**
+scripts/ci/**
+**/conftest.py
+tests/fixtures/**
+api/tests/fixtures/**
+requirements*.txt
+api/pyproject.toml
+pyproject.toml
+pytest.ini
+**/pytest.ini
+"""
+SD8_PATHS = [".github/workflows/x.yml", "scripts/ci/a.py", "conftest.py",
+             "api/tests/conftest.py", "tests/fixtures/f.sql", "api/tests/fixtures/f.sql",
+             "requirements-dev.txt", "api/pyproject.toml", "pyproject.toml",
+             "pytest.ini", "api/pytest.ini"]
+
+
+class TestCanaries(MasterFixture):
+    def setUp(self):
+        super().setUp()
+        self.glob_path = self.repo / "scripts/ci/full_mode_paths.txt"
+        self.glob_path.parent.mkdir(parents=True, exist_ok=True)
+        self.glob_path.write_text(GLOBS)
+        source = WORKFLOW.replace("      checks:", "      canary: {type: boolean}\n      tree: {type: string}\n      checks:")
+        source = source.replace("inputs.suite || 'window'", "inputs.tree || inputs.suite || 'window'")
+        self.workflow_path.write_text(source)
+        self.commit("canary prerequisites")
+        self.walk_state = {}
+        self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, self.walk_state), [])
+
+    def merge_path(self, path):
+        parent = self.sha
+        self.git("checkout", "-qb", "change-" + parent[:12])
+        target = self.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(target.read_text() + "\nchange" if target.exists() else "change")
+        self.commit("change")
+        self.git("checkout", "-q", "master")
+        self.git("-c", "user.name=t", "-c", "user.email=t@localhost", "merge", "--no-ff", "-qm", "merge", self.sha)
+        self.sha = self.git("rev-parse", "HEAD")
+        return dict(sha=self.sha, parent=parent)
+
+    def test_canary_eligibility_sd8_and_producer_rule(self):
+        import fnmatch
+        decisions = []
+        for path in SD8_PATHS + ["a/b/conftest.py", "api/tests/test_x.py"]:
+            merge = self.merge_path(path)
+            sampled = self.mf.walk_canaries("albert-scott", self.repo, self.sha, self.walk_state)
+            expected = any(fnmatch.fnmatchcase(path, g) or
+                           (g.startswith("**/") and fnmatch.fnmatchcase(path, g[3:]))
+                           for g in GLOBS.splitlines())
+            self.assertEqual(bool(sampled), expected, path)
+            if expected:
+                self.assertEqual(sampled, [dict(merge, reason="full-path")])
+            decisions.append(dict(path=path, full_path=expected))
+        self.assertEqual(self.walk_state["canary"]["eligible"], 1)
+        self.receipt("AC1", decisions)
+
+    def test_canary_every_fifth_independent_and_persistent(self):
+        import types
+        start = json.loads(json.dumps(self.walk_state))
+        eligible, paths = [], []
+        for i in range(20):
+            eligible.append(self.merge_path("api/tests/test_x.py")["sha"])
+            if i % 4 == 0:
+                paths.append(self.merge_path("conftest.py")["sha"])
+        results = []
+        for allowed in (lambda *a, **kw: dict(allowed=False),
+                        unittest.mock.Mock(side_effect=AssertionError("switch called"))):
+            state = json.loads(json.dumps(start))
+            with patch.dict(sys.modules, selection_switch=types.SimpleNamespace(allowed=allowed)):
+                rows = self.mf.walk_canaries("albert-scott", self.repo, self.sha, state)
+            self.assertEqual([r["sha"] for r in rows if r["reason"] == "every-5th"], eligible[4::5])
+            self.assertEqual([r["sha"] for r in rows if r["reason"] == "full-path"], paths)
+            state = json.loads(json.dumps(state))
+            self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, state), [])
+            self.assertEqual(state["canary"]["eligible"], 20)
+            self.assertEqual(self.rows("selected-canary"), [])
+            results.append(rows)
+        self.assertEqual(results[0], results[1])
+        self.receipt("AC2", dict(pairs_per_20=4, path_canaries=len(paths), switch_independent=True))
+
+    def save_state(self, state):
+        path = self.root / "master-full/albert-scott/state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.mf._save(path, state)
+
+    def bootstrap(self):
+        self.save_state(dict(self.walk_state, pending=[], slots={}, last_full=self.sha))
+        self.quiet()
+
+    def fresh_rows(self, event):
+        import guards_live
+        return [r for r in guards_live._events() if r.get("type") == event]
+
+    def pair_ready(self, *, ids=(), incomplete=False):
+        self.bootstrap()
+        merge = self.merge_path("conftest.py")
+        self.quiet()
+        self.assertTrue(self.tick()["dispatched"])
+        self.stage("canary", rid=101)
+        self.stage("full", rid=102, ids=list(ids), conclusion="failure" if ids else "success")
+        state = self.state()
+        for p in state["pending"]:
+            p["run_id"] = "101" if p["role"] == "selected" else "102"
+        self.save_state(state)
+        if incomplete:
+            self.jobs[1][1]["conclusion"] = "cancelled"
+        return merge
+
+    def classify_at_parent(self, known=(), undetermined=False):
+        parent = next(p for p in self.state()["pending"] if p["role"] == "selected")["inputs"]["select_base"]
+        def classify(project, base, ids):
+            self.assertEqual((project, base), ("albert-scott", parent))
+            return dict(known_red=[i for i in ids if i in known],
+                        rerun_on_base=[i for i in ids if i not in known], undetermined=undetermined)
+        return patch.object(br, "classify_selected", side_effect=classify)
+
+    def test_canary_eligibility_missing_file_and_cursor(self):
+        cursor = self.walk_state["canary"]["cursor"]
+        self.glob_path.unlink()
+        missing = self.merge_path("conftest.py")
+        self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, self.walk_state), [])
+        self.assertEqual(self.walk_state["canary"]["cursor"], cursor)
+        self.assertIn("full-mode-paths-absent", str(self.walk_state["canary_undetermined"]))
+        self.glob_path.parent.mkdir(parents=True, exist_ok=True)
+        self.glob_path.write_text(GLOBS)
+        self.commit("restore paths")
+        self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, self.walk_state),
+                         [dict(missing, reason="full-path")])
+        self.assertIn("full-mode-paths-absent", str(self.walk_state["canary_undetermined"]))
+        state = json.loads(json.dumps(self.walk_state))
+        state["canary"]["cursor"] = "a" * 40
+        self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, state), [])
+        self.assertEqual(state["canary"]["cursor"], "a" * 40)
+        self.assertIn("unreadable", str(state["canary_undetermined"]))
+        tree = self.git("rev-parse", "HEAD^{tree}")
+        unrelated = self.git("-c", "user.name=t", "-c", "user.email=t@localhost", "commit-tree", tree, "-m", "unrelated")
+        state["canary"]["cursor"] = unrelated
+        self.assertEqual(self.mf.walk_canaries("albert-scott", self.repo, self.sha, state), [])
+        self.assertEqual(state["canary"]["cursor"], self.sha)
+        self.assertIn("reset", str(state["canary_undetermined"]))
+        self.receipt("AC1-missing", dict(tip_blocks=True, historical_missing_sampled=True, cursor_checked=True))
+
+    def test_canary_pair_dispatch_durable_and_isolated(self):
+        self.bootstrap()
+        merge = self.merge_path("conftest.py")
+        def send(argv, **kw):
+            state = self.state()
+            self.assertEqual(len(state["pending"]), 2)
+            self.assertEqual({p["role"] for p in state["pending"]}, {"selected", "full"})
+            return self.transport(argv, **kw)
+        with patch.object(br.ghlimit, "run", side_effect=send):
+            self.assertTrue(self.tick()["dispatched"])
+        self.assertEqual(len(self.dispatches), 2)
+        selected, full = self.dispatches
+        for field in ("suite=window", "select_base=" + merge["parent"], "canary=true", "full_run=true"):
+            self.assertIn(field, selected)
+        self.assertIn("suite=full", full)
+        self.assertIn("select_base=", full)
+        pending = self.state()["pending"]
+        trees = [p["inputs"]["tree"] for p in pending]
+        self.assertTrue(all(trees))
+        self.assertEqual(len(set(trees)), 2)
+        group = self.mf._workflow(self.repo, self.sha)
+        self.assertNotEqual(*(self.mf._group(group, p["inputs"]) for p in pending))
+        self.assertNotIn("canary", self.state()["slots"])
+        self.assertEqual({p["sha"] for p in pending}, {self.sha})
+        self.clock += timedelta(hours=13)
+        self.assertFalse(self.tick()["dispatched"])
+        self.receipt("AC3", dict(two_intents_before_send=True, distinct_groups=True, pair_blocks_slot=True))
+
+    def test_canary_pair_dispatch_no_clock_canary_and_missing_input(self):
+        self.bootstrap()
+        self.clock += timedelta(hours=13)
+        self.assertFalse(self.tick()["dispatched"])
+        self.workflow_path.write_text(self.workflow_path.read_text().replace("      canary: {type: boolean}\n", ""))
+        self.commit("missing canary input")
+        self.merge_path("conftest.py")
+        result = self.tick()
+        self.assertTrue(result["dispatched"], result)
+        self.assertIn("canary workflow missing inputs: canary", result["undetermined"])
+        self.assertEqual(len(self.dispatches), 1)
+        self.assertIn("suite=full", self.dispatches[0])
+        self.assertTrue(self.state()["canary"]["due"])
+        self.stage("full", rid=44)
+        self.assertTrue(self.tick()["collected"])
+        self.assertEqual(len(self.rows("master-full-run")), 1)
+        self.receipt("AC3-missing", dict(full_slot_dispatches=True, full_collects=True, due_retained=True))
+
+    def test_canary_pair_dispatch_full_slot_pending(self):
+        self.bootstrap()
+        self.merge_path("conftest.py")
+        self.put_intent(self.intent("full"))
+        self.assertFalse(self.tick()["dispatched"])
+        self.assertEqual(len(self.state()["pending"]), 1)
+        self.assertTrue(self.state()["canary"]["due"])
+
+    def test_canary_row_round_trip_green_red_and_idempotent(self):
+        import guards_live
+        self.pair_ready()
+        result = self.tick()
+        self.assertTrue(result["collected"], result)
+        rows = self.fresh_rows("selected-canary")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["schema"], row["actor"]), (2, "base-red"))
+        self.assertTrue({"project", "sha", "run_id", "full_run_id", "ids", "selected",
+                         "full_failures", "green", "complete"} <= row.keys())
+        self.assertEqual((row["run_id"], row["full_run_id"]), ("101", "102"))
+        self.assertEqual(guards_live._observation(row, "r1"), (["101"], None))
+        self.assertFalse(self.rows("master-full-run"))
+        self.tick()
+        self.assertEqual(len(self.fresh_rows("selected-canary")), 1)
+        self.assertEqual(self.state()["pending"], [])
+        self.receipt("AC4", dict(schema=2, actor=row["actor"], runs=["101", "102"],
+                                 fresh_reader=True, exactly_once=True, green=row["green"]))
+
+    def test_canary_seeded_miss_question_and_board(self):
+        import guards_live
+        self.clock = datetime.now(timezone.utc).replace(microsecond=0)
+        self.pair_ready(ids=[PY])
+        with self.classify_at_parent():
+            self.tick()
+        row, = self.fresh_rows("selected-canary")
+        self.assertEqual(row["ids"], [PY])
+        self.assertFalse(row["green"])
+        self.assertIsNotNone(guards_live._observation(row, "r1")[1])
+        question, = self.fresh_rows("question")
+        self.assertEqual(question["subject"], "selected-canary:albert-scott:101")
+        self.assertEqual(question["addressed_to"], "thinker")
+        for term in (self.sha, PY, "101", "102"):
+            self.assertIn(term, question["asks"])
+        deadline = br._time(question["deadline"])
+        self.assertEqual(deadline, self.clock + timedelta(hours=24))
+        self.assertLess(abs((deadline - br._time(question["ts"]) - timedelta(hours=24)).total_seconds()), 5)
+        with patch.object(br.fold, "NOW", self.clock):
+            self.assertFalse(br.fold.open_questions(guards_live._events()))
+        with patch.object(br.fold, "NOW", deadline + timedelta(seconds=1)):
+            self.assertEqual(br.fold.open_questions(guards_live._events())[0]["subject"], question["subject"])
+        self.tick()
+        self.assertEqual(len(self.fresh_rows("question")), 1)
+        self.receipt("AC5", dict(missed=PY, complete=row["complete"], green=False,
+                                 exactly_one_question=True, board_after_deadline=True, base_is_parent=True))
+
+    def test_canary_seeded_miss_known_red_and_excluded_ids(self):
+        self.pair_ready(ids=[PY])
+        # Proper gate envelopes keep non-pytest failures out of the pytest count.
+        self.zips[102] = fixtures.archive(**{"pytest.txt": (
+            "CI-SELECTION mode=full reason=suite-full files=1\n"
+            "NEW failed: " + PY + "\nSUMMARY pytest_baseline_gate.py check: FAIL new=1 changed=0\n"
+            "NEW failed: " + PG + "\nNEW suite-error: suite-error\n")})
+        with self.classify_at_parent(known=[PY]):
+            self.tick()
+        row, = self.fresh_rows("selected-canary")
+        self.assertEqual(row["ids"], [])
+        self.assertTrue(row["green"], row)
+        for node in (PG, "suite-error"):
+            self.assertIn("excluded:" + node + ":not-a-test-file", row["undetermined"])
+        self.assertFalse(self.fresh_rows("question"))
+        self.receipt("AC5-exclusions", dict(known_at_parent_excluded=True, non_pytest_excluded=True, green=True))
+
+    def test_canary_seeded_miss_degenerate_and_incomplete_free_slot(self):
+        results = []
+        for case in ("zero", "full-mode", "logs-full", "expired", "classification", "collect-error", "io-error", "partial"):
+            with self.subTest(case=case):
+                self.reset()
+                self.pair_ready(ids=[PY] if case == "classification" else [], incomplete=case == "partial")
+                if case == "zero": self.artifacts[101]["pytest_files"] = []
+                if case == "full-mode": self.artifacts[101]["mode"] = "full"
+                if case == "logs-full":
+                    self.zips[101] = fixtures.archive(**{"pytest.txt": "CI-SELECTION mode=full reason=suite-full files=1\n"})
+                if case == "expired":
+                    state = self.state()
+                    state["pending"][0]["expired"] = dict(at=self.clock.isoformat(), reason="no-run-found")
+                    self.save_state(state)
+                with self.classify_at_parent(undetermined=case == "classification"):
+                    if case in ("collect-error", "io-error"):
+                        error = OSError("fixture io") if case == "io-error" else ValueError("fixture broken")
+                        with patch.object(self.mf, "_collect", side_effect=error):
+                            self.tick()
+                    else:
+                        self.tick()
+                row, = self.fresh_rows("selected-canary")
+                self.assertFalse(row["complete"], row)
+                self.assertFalse(row["green"])
+                self.assertTrue(row["undetermined"])
+                self.assertFalse(self.fresh_rows("question"))
+                self.assertEqual(self.state()["pending"], [])
+                self.merge_path("conftest.py")
+                self.quiet()
+                self.assertTrue(self.tick()["dispatched"])
+                self.assertEqual(len(self.state()["pending"]), 2)
+                results.append(dict(case=case, complete=False, green=False, freed=True))
+        self.receipt("AC5-incomplete", results)
+
+    def test_canary_one_pair_in_flight_waits_coalesces_and_frees(self):
+        self.bootstrap()
+        self.merge_path("conftest.py")
+        self.quiet()
+        self.tick()
+        first = self.merge_path("conftest.py")
+        self.quiet()
+        self.assertFalse(self.tick()["dispatched"])
+        self.merge_path("conftest.py")
+        self.quiet()
+        self.assertFalse(self.tick()["dispatched"])
+        self.assertEqual(len(self.dispatches), 2)
+        state = self.state()
+        self.assertEqual(len(state["canary"]["due"]), 2)
+        for p in state["pending"]:
+            p["expired"] = dict(at=self.clock.isoformat(), reason="no-run-found")
+        self.save_state(state)
+        result = self.tick()
+        self.assertTrue(result["collected"])
+        self.assertTrue(result["dispatched"], result)
+        self.assertEqual(len(self.dispatches), 4)
+        self.assertEqual(len(self.state()["pending"]), 2)
+        self.assertIn("select_base=" + first["parent"], self.dispatches[2])
+        self.assertEqual(self.state()["canary"]["due"], [])
+        self.assertFalse(self.fresh_rows("selected-canary")[0]["complete"])
+        self.receipt("AC6", dict(one_pair=True, persisted_due=True, coalesced=2, incomplete_frees=True))
+
+    def test_canary_one_pair_in_flight_collected_then_due(self):
+        self.pair_ready()
+        self.runs[0]["status"] = "in_progress"
+        self.runs[1]["status"] = "in_progress"
+        self.merge_path("conftest.py")
+        self.quiet()
+        self.assertFalse(self.tick()["dispatched"])
+        self.assertEqual(len(self.state()["canary"]["due"]), 1)
+        # The completed pair ran at its original sha, before the waiting merge.
+        for run in self.runs: run["status"] = "completed"
+        self.assertTrue(self.tick()["collected"])
+        self.assertEqual(len(self.dispatches), 4)
+
+    def test_canary_one_pair_in_flight_crash_and_cap(self):
+        self.bootstrap()
+        self.merge_path("conftest.py")
+        self.quiet()
+        with patch.object(br.ghlimit, "run", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt): self.tick()
+        self.assertEqual(len(self.state()["pending"]), 2)
+        self.assertFalse(self.dispatches)
+        self.assertFalse(self.tick()["dispatched"])
+        self.assertFalse(self.dispatches)
+        merges = [self.merge_path("conftest.py") for _ in range(23)]
+        self.quiet()
+        result = self.tick()
+        state = self.state()
+        self.assertEqual(len(state["canary"]["due"]), 20)
+        self.assertEqual(state["canary"]["dropped"], [m["sha"] for m in merges[:3]])
+        for merge in merges[:3]: self.assertIn(merge["sha"], str(result["undetermined"]))
+        self.assertEqual(self.tick()["dispatched"], False)
+        self.assertEqual(len(self.state()["canary"]["due"]), 20)
+        self.receipt("AC6-crash", dict(durable_intents=2, resent=0, due=20, dropped=3, visible=True))
+
+    def test_canary_row_round_trip_append_required_and_legacy(self):
+        for missing in ("sha", "run_id"):
+            fields = dict(sha=self.sha, run_id="5", schema=1, ids=[], green=True, complete=True)
+            del fields[missing]
+            argv = [str(br.DOIT), "append", "selected-canary", "legacy"]
+            argv.extend(k + ":=" + json.dumps(v) for k, v in fields.items())
+            proc = self.real_run(argv, env=dict(os.environ, DOIT_LEDGER_FILE="L-base-red-local.jsonl"),
+                                 capture_output=True, text=True)
+            self.assertNotEqual(proc.returncode, 0)
+        br._append("selected-canary", "albert-scott", self.sha,
+                   complete=True, ids=[], schema=1, run_id="5", green=True)
+        row, = self.fresh_rows("selected-canary")
+        self.assertEqual(row["schema"], 1)
+        self.receipt("AC7", dict(missing_sha_refused=True, missing_run_refused=True, schema1_accepted=True))
+
+
 class TestCadence(MasterFixture):
     def test_first_due_boundary_and_unchanged(self):
         self.clock = NOW + timedelta(minutes=179)
         self.assertTrue(self.tick()["dispatched"])
-        self.assertEqual(len(self.dispatches), 2)
-        full, canary = self.dispatches
+        self.assertEqual(len(self.dispatches), 1)
+        full, = self.dispatches
         for argv in self.dispatches:
             self.assertIn("master", argv)
             for field in ("full_run=true", "rerun_ids=", "checks="):
                 self.assertIn(field, argv)
         self.assertIn("suite=full", full)
         self.assertIn("select_base=", full)
-        self.assertIn("suite=window", canary)
-        self.assertIn("select_base=" + self.base, canary)
         self.clock = NOW + timedelta(hours=3)
         self.assertFalse(self.tick()["dispatched"])
         (self.repo / "api/tests/test_later.py").write_text("def test_later(): pass\n")
         self.commit("new head")
         self.assertTrue(self.tick()["dispatched"])
-        self.assertEqual(len(self.dispatches), 3)
+        self.assertEqual(len(self.dispatches), 2)
         self.clock = NOW + timedelta(hours=12)
-        self.assertTrue(self.tick()["dispatched"])
-        self.assertEqual(len(self.dispatches), 4)
+        self.assertFalse(self.tick()["dispatched"])
+        self.assertEqual(len(self.dispatches), 2)
         self.receipt("AC1", dict(dispatches=len(self.dispatches), exact_inputs=True))
 
     def test_concurrent_ticks_and_durable_ambiguous_intent(self):
@@ -241,11 +612,11 @@ class TestCadence(MasterFixture):
             threads = [threading.Thread(target=self.tick) for _ in range(3)]
             for t in threads: t.start()
             for t in threads: t.join()
-            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_count, 1)
             self.assertTrue(self.tick()["undetermined"])
-            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_count, 1)
         state = json.loads((self.root / "master-full/albert-scott/state.json").read_text())
-        self.assertEqual(len(state["pending"]), 2)
+        self.assertEqual(len(state["pending"]), 1)
         self.assertTrue(all(p["before_ids"] == [] for p in state["pending"]))
 
     def test_unsafe_prerequisites_never_dispatch(self):
@@ -298,7 +669,7 @@ class TestCadence(MasterFixture):
         state["pending"].pop()
         self.mf._save(path, state)
         self.assertTrue(self.tick()["collected"])
-        self.assertEqual(len(self.dispatches), 2)
+        self.assertEqual(len(self.dispatches), 1)
         self.assertTrue(all("cancel" not in argv for argv in self.calls + self.dispatches))
 
     def test_active_unrelated_run_and_crash_before_acceptance(self):
