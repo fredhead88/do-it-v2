@@ -91,6 +91,8 @@ def pending_conflict_rework(events, subject):
 
 def branch_preflight(runtime, a, cwd, events, fail):
     """Obtain ancestry with git's abortable rebase; never recreate a branch."""
+    if __import__('branch_refresh').rework_pending(events, a.subject):
+        return
     if __import__('branch_refresh').dispatch_preflight(runtime, a, cwd, events, fail):
         return
     if runtime.pending_conflict_rework(events, a.subject):

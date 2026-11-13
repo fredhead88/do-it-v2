@@ -1703,7 +1703,7 @@ SURFACE_GROUPS = (
      r'throughput|speed_report|problems|owed_digest|owed_metrics|usage|seat_usage|howto|plain|plain_backfill|notes|'
      r'notification_policy|merge_news|merge_lane_board|ubicloud_bill|gh_bill|transcript_scan|harvest|'
      r'rounds|spec_history|pace|models|shape|stall_sample|validate|verifier|window_attribution|retired|'
-     r'amends|audit|door_deps|think|thinker_.*|planner_bar|planner_run)',
+     r'amends|audit|door_deps|think|thinker_.*|planner_bar|planner_run|fable_dossier|rehearsal_replay)',
      'report and digest surface: read-only display or metrics invoked from the doit CLI or a report cron, '
      'never from tick._steps or an answer root'),
     (r'(tg_.*|up|relay|intake|launch|machine|install_sync|cli_path|ctx_guard|cron_run|crons|'
@@ -1716,7 +1716,7 @@ SURFACE_GROUPS = (
      r'node_modules|provision|scratch|push_origin|deploy|direct_merge|master_full|migration_order|'
      r'guard|guards_live|freeze|cancel|carry|handin_check|close_reviews|conflict|sweep_.*|check_backfill|'
      r'owed_.*|window_.*|merge_.*|rechain.*|quarantine.*|lane_driver|pass_memo|prequeue|reap_.*|'
-     r'disk_reaper|tree_cleanup|backup|restore|ledger_.*|stall.*|overlap_view|fixtures\..*)',
+     r'disk_reaper|tree_cleanup|backup|restore|ledger_.*|stall.*|overlap_view|fixtures\..*|migration_cut|selection_switch)',
      'executor, gate and maintenance surface: runs after a step is chosen (build, grade, review, merge, '
      'sweep, repair) or on its own cron, and is not called by an answer root'),
 )

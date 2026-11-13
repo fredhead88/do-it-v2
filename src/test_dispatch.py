@@ -1112,10 +1112,12 @@ class R7DispatchTests(unittest.TestCase):
                         result = fixture.dispatch(fixture.new)
                     unsafe = mode in {'dirty', 'conflict', 'error', 'timeout'}
                     self.assertEqual(result, 'branch-not-descendant' if unsafe else 'backend')
-                    if unsafe:
+                    if unsafe or mode == 'grader-rework':
                         self.assertEqual(before, fixture.snapshot())
                         for name in ('rebase-merge', 'rebase-apply'):
                             self.assertFalse(Path(fixture.git('rev-parse', '--git-path', name)).exists())
+                        if mode == 'grader-rework':
+                            self.assertFalse(fixture.observed[-1]['ancestor_at_backend'])
                     else:
                         fixture.git('merge-base', '--is-ancestor', fixture.new, 'HEAD')
                         self.assertTrue(fixture.observed[-1]['ancestor_at_backend'])
@@ -1190,7 +1192,7 @@ class R7DispatchTests(unittest.TestCase):
         if mode == 'owner-drop':
             self.record('window-dropped', reason='owner', owner='fixture', window='L-window-fixture')
         elif mode == 'grader-rework':
-            self.record('decision', actor='operator', rework='yes')
+            self.record('decision', actor='operator', regrade='yes')
         real = subprocess.run
         def broken(argv, *args, **kw):
             if 'merge-base' in argv and '--is-ancestor' in argv:
@@ -1220,9 +1222,15 @@ class R7DispatchTests(unittest.TestCase):
         self.assertEqual(steps(), steps())
         self.assertEqual(self.rows(), rows)
         self.assertEqual(self.backend.call_count, 0)
+        if mode == 'grader-rework':
+            self.record('decision', actor='operator', rework='yes')
         self.assertEqual(self.dispatch(self.new), 'backend')
-        self.git('merge-base', '--is-ancestor', self.new, 'HEAD')
-        self.assertTrue(self.observed[-1]['ancestor_at_backend'])
+        if mode == 'grader-rework':
+            self.assertEqual(before, self.snapshot())
+            self.assertFalse(self.observed[-1]['ancestor_at_backend'])
+        else:
+            self.git('merge-base', '--is-ancestor', self.new, 'HEAD')
+            self.assertTrue(self.observed[-1]['ancestor_at_backend'])
         self.assertEqual((self.tree / 'builder').read_text(), 'C\n')
         self.assertTrue(any(e['type'] == 'build-started' and e['base_sha'] == self.new for e in self.rows()))
         self.assertFalse(any('base-refresh' in s.reason for s in steps()))

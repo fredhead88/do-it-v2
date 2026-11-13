@@ -9,6 +9,79 @@ import datetime, json, os, pathlib, re, socket, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import dispatch, fold, panes, shape, tick  # noqa: E402
 
+BASE_FAILURE_BUDGET = 3
+
+
+def _branch_failure_streak(evs):
+    """Count ancestry refusals since DONE, conservatively retaining unknown times."""
+    def when(e):
+        try:
+            value = datetime.datetime.fromisoformat(str(e.get('ts', '')).replace('Z', '+00:00'))
+            return value if value.tzinfo is not None else None
+        except ValueError:
+            return None
+
+    done = max((when(e) for e in evs if e.get('type') == 'build-done'
+                and e.get('status') == 'DONE' and when(e) is not None), default=None)
+    failures = [e for e in evs if e.get('type') == 'spawn-failed'
+                and e.get('reason') == 'branch-not-descendant'
+                and (done is None or when(e) is None or when(e) >= done)]
+    if not failures:
+        return []
+    unknown = any(when(e) is None for e in failures)
+    newest = max((when(e) for e in failures if when(e) is not None), default=None)
+    if not unknown and any(e.get('type') == 'decision' and e.get('rework') == 'yes'
+                           and when(e) is not None and when(e) > newest for e in evs):
+        return []
+    # The final row supplies a stable dedup key even when its timestamp is unreadable.
+    return sorted(failures, key=lambda e: (when(e) is None,
+                  when(e) or datetime.datetime.max.replace(tzinfo=datetime.timezone.utc),
+                  str(e.get('ts', ''))))
+
+
+def _record_branch_failure_holds(events, now):
+    """Existing write passes append one exhaustion receipt per newest failure."""
+    by_subject = {}
+    for event in events:
+        by_subject.setdefault(event.get('subject'), []).append(event)
+    exhausted = []
+    for subject, evs in by_subject.items():
+        if subject and str(subject).startswith('L-spec-'):
+            failures = _branch_failure_streak(evs)
+            if len(failures) >= BASE_FAILURE_BUDGET:
+                exhausted.append((subject, failures))
+    if not exhausted:
+        return
+    path = tick.tick_path()
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    persisted = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            persisted.append(row)
+    for subject, failures in exhausted:
+        failure_ts = failures[-1].get('ts')
+        if any(e.get('type') == 'escalation-blocking'
+               and e.get('kind') == 'branch-not-descendant-exhausted'
+               and e.get('subject') == subject and e.get('failure_ts') == failure_ts
+               for e in list(events) + persisted):
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        refused = tick._committed(dispatch.emit(path, {'subject': subject}, 'escalation-blocking', strict=True,
+            kind='branch-not-descendant-exhausted', owner='thinker', role='builder',
+            failure_ts=failure_ts, count=len(failures),
+            default='leave builder stopped pending decision rework=yes or a completed DONE build',
+            deadline=(now + datetime.timedelta(hours=24)).isoformat(),
+            revert='no branch was changed; nothing to revert'))
+        if refused:
+            raise ValueError('branch failure exhaustion record refused: ' + str(refused))
+
 
 def capacity(root=None):
     """Builder seats: `[seats] builder` in `$R/models.toml`; `4` when the
@@ -123,6 +196,10 @@ def _automatic_hold(spec_evs, all_evs, *, shipped=None):
     ruling = _standing_ruling(evs)
     if ruling is not None:
         return f"held: ruling {ruling['action']} ({ruling.get('_src') or 'source missing'})"
+    failures = _branch_failure_streak(evs)
+    if len(failures) >= BASE_FAILURE_BUDGET:
+        return (f"held: branch-not-descendant x{len(failures)}; "
+                "awaiting newer decision rework=yes or build-done DONE")
     return None
 
 
@@ -607,6 +684,7 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
     runner = runner or _real_runner
     out, handled = [], set(handled)
     if not dry_run:
+        _record_branch_failure_holds(events, now)
         tick._record_held_skips(events, specs)
     # R13b: replay or escalate every dead spawn this tick has not already
     # handled (replayed or escalated) of its own.
@@ -716,5 +794,8 @@ def redispatch_dead(events, specs, now, *, runner=None, dry_run=False, handled=f
 
 def run(events, specs, now, *, runner=None, dry_run=False):
     """Compatibility entry point; tick owns routine Step launches."""
+    events = events if isinstance(events, list) else list(events)
+    if not dry_run:
+        _record_branch_failure_holds(events, now)
     return tick.run_steps(events, specs, now, dispatcher=runner or _real_runner,
                           dry_run=dry_run)
