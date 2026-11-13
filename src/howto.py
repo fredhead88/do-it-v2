@@ -128,12 +128,13 @@ def render(repo: str) -> str:
                   'Source: literal `dispatch.emit`/`look.emit_once` calls in `src/tick.py`, `lane_rules.toml` actions.'])
     lines.extend(_wrap('; '.join(sorted(events))))
     lines.extend(['`src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.',
-                  '`bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.'])
+                  '`bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.',
+                  '`DONE+notes`; `BLOCKED+base_only/cited`: current proof with `n_new=0` → grade; existing gates apply.'])
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:
         raise ValueError('merge_queue: expected positive member verdict settings')
-    lines.extend(['', '## Member verdicts',
+    lines.extend(['## Member verdicts',
                   'Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).'])
     lines.extend(_wrap('After a red window with unnamed owners, each remaining member is verified alone on the '
                        f'window base, at most {parallel} CI runs at once (member_verify_parallel).'))

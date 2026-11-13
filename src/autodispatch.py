@@ -371,7 +371,49 @@ REPLAYABLE_ROLES = ("builder", "grader", "spec-writer", "spec-auditor")
 TERMINAL_STATES = ("accepted", "killed", "void", "dropped", "closed-shipped", "closed-unbuilt")
 
 
-def _grader_trigger(evs):
+def base_only_attempt(evs, *, main_sha=None):
+    """Current structured block plus same-attempt admission proof, never a Git/ledger read."""
+    import grader_packet
+    from fold_stalls import newest_builder_outcome
+    build = newest_builder_outcome(evs)
+    if not build or build.get('status') != 'BLOCKED' or not build.get('spawn'):
+        return None
+    start = next(i for i, e in enumerate(evs) if e is build)
+    later = evs[start + 1:]
+    block = next((e for e in reversed(later) if e.get('type') == 'build-blocked'), None)
+    if not (block and block.get('actor') == 'builder' and block.get('spawn') == build['spawn']
+            and block.get('subject') == build.get('subject') and block.get('base_only') is True
+            and block.get('reason') != 'handin-check:secret-scan'):
+        return None
+    ready, cited = block.get('ready_sha'), block.get('cited')
+    if not (isinstance(ready, str) and re.fullmatch(r'[0-9a-f]{7,40}', ready)
+            and grader_packet._same_sha(ready, build.get('ready_sha'))
+            and isinstance(cited, list) and 0 < len(cited) <= 40
+            and all(isinstance(c, str) and 0 < len(c) <= 200 for c in cited)):
+        return None
+    if any(e.get('type') in {'build-started', 'blocked', 'unblocked'} for e in later):
+        return None
+    shape = next((e for e in reversed(later) if e.get('criterion') == 'COMMIT-SHAPE'
+                  and e.get('type') in {'criterion-cleared', 'rejected-criterion'}), None)
+    if (not shape or shape.get('type') != 'criterion-cleared' or shape.get('actor') != 'builder'
+            or shape.get('spawn') != build['spawn'] or 'COMMIT-SHAPE' in fold.standing_rejects(evs)):
+        return None
+    # A later receipt, including an unstructured block, supersedes this claim.
+    if any(e.get('type') == 'build-blocked' and e is not block for e in
+           evs[next(i for i, e in enumerate(evs) if e is block) + 1:]):
+        return None
+    return block, grader_packet.evidence_state(evs, build['subject'], main_sha=main_sha)
+
+
+def base_only_proven(attempt):
+    if not attempt:
+        return False
+    state = attempt[1]
+    count = (state.bundle_event or {}).get('n_new')
+    return state.state == 'ready' and type(count) is int and count == 0
+
+
+def _grader_trigger(evs, *, main_sha=None):
     """R13a: the newest of (a) a current `build-done` (actor builder) `status=DONE`, or
     (b) a `decision regrade=yes` from `thinker`/`operator` with no `rework=yes`.
     Returns `(trigger_event, trigger_name)`, or `(None, None)` when neither
@@ -382,15 +424,21 @@ def _grader_trigger(evs):
     T = lambda e: fold.ts(e.get("ts"))
     from fold_stalls import newest_builder_outcome
     newest_bd = newest_builder_outcome(evs)
-    if newest_bd is not None and newest_bd.get("status") != "DONE":
+    proven = base_only_proven(base_only_attempt(evs, main_sha=main_sha))
+    if newest_bd is not None and newest_bd.get("status") != "DONE" and not proven:
         newest_bd = None
     regrades = [e for e in evs if e.get("type") == "decision" and e.get("regrade") == "yes"
                 and e.get("actor") in ("thinker", "operator") and e.get("rework") != "yes"]
-    newest_rg = max(regrades, key=T) if regrades else None
+    newest_rg = max(regrades, key=lambda e: (T(e), next(i for i, row in enumerate(evs) if row is e))) if regrades else None
     if newest_bd is None and newest_rg is None:
         return None, None
-    if newest_rg is not None and (newest_bd is None or T(newest_rg) > T(newest_bd)):
+    if newest_rg is not None and (newest_bd is None or T(newest_rg) > T(newest_bd)
+            or proven and T(newest_rg) == T(newest_bd)
+            and next(i for i, e in enumerate(evs) if e is newest_rg)
+                > next(i for i, e in enumerate(evs) if e is newest_bd)):
         return newest_rg, "regrade"
+    if proven:
+        return newest_bd, "base-only-proven"
     rejects = [e for e in evs if e.get("type") == "rejected-criterion"]
     older_reject = any(T(e) < T(newest_bd) for e in rejects)
     return newest_bd, ("rework" if older_reject else "build-done")

@@ -10,6 +10,10 @@ import grader_packet
 import project_scope
 
 
+# Like pass_memo, retain one caller list so identities cannot be recycled.
+_main_snapshot = None
+
+
 def project_main(project, *, root=None):
     """Resolve the local main used by the runner, without fetching."""
     import build_runner
@@ -35,8 +39,19 @@ def project_main(project, *, root=None):
 
 
 def project_mains(events, specs, *, root=None):
+    global _main_snapshot
     projects = {project_scope.subject_project(events, sid) for sid in specs}
-    return {p: project_main(p, root=root) for p in projects if p}
+    mains = {p: project_main(p, root=root) for p in projects if p}
+    _main_snapshot = (events, len(events), mains)
+    return mains
+
+
+def cached_mains(events):
+    """Reuse only this caller snapshot's main identity; never resolve another ref."""
+    snapshot = _main_snapshot
+    if snapshot is None or snapshot[0] is not events or snapshot[1] != len(events):
+        return {}
+    return snapshot[2]
 
 
 def request_for(events, subject, sha):
@@ -95,4 +110,5 @@ def run(step, events, now, *, root, dst):
     # hold, and all launch admission/retry bookkeeping belongs to tick.
     from dataclasses import replace
     current = replace(step, state='action', action='bundle')
-    return tick.launch(current, dispatcher=SimpleNamespace(now=now))
+    return tick.launch(current, dispatcher=SimpleNamespace(
+        now=now, mains=cached_mains(events)))

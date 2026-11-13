@@ -127,6 +127,22 @@ to break anything", "I will verify after committing".
 
 **Never write a literal commit sha into the card** (2026-09-23, 4 grader refusals in one night). In any `check`, `evidence` or prose field, refer to the base as `$(git merge-base HEAD origin/master)`, never as its hex id. The grader's Blindness rule strips `base_sha`, and a card that repeats it makes `doit packet grader` refuse the whole packet. The card's own `base_sha` and `ready_sha` fields are the only place a sha belongs.
 
+**Base-failure handoff.** Use DONE+notes when the base comparison is complete,
+HEAD-only failures are zero, and you have one clean commit. Record the command
+and comparison in optional `notes` (at most 20 strings, 400 characters each);
+the wrapper emits `build-done.notes`, with no `build-blocked`. All hand-in
+check obligations below still apply, including a secret-scan finding.
+Use BLOCKED+base_only only when you cannot establish base status yourself:
+base-red not known, including an inconclusive scratch fallback, but you claim
+the failures are base-only. Set `base_only: true`, `identity.ready_sha` to the
+retained single commit and `cited` to the failing commands/check/test ids (at
+most 40 nonempty strings, 200 characters each). Known HEAD-only failures cannot
+use this claim. Unknown failures are not proven base failures. Missing fields
+mean false/empty. The wrapper preserves the block reason and records
+`ready_sha`, `base_only` and `cited`; tick comparison evidence alone can prove
+it for grading. Neither notes nor a builder claim override handin-check or any
+grader/merge gate.
+
 **Hand-in check** (L-spec-2209). After your final commit and before you return a DONE card, run
 `doit handin-check <subject> --cwd <worktree>` on the finished single commit. Exit 0 permits hand-in.
 Exit 1 is a finding: repair it by amending or rewriting the single spec commit, with no fix-up commit,

@@ -19,6 +19,11 @@
   "if": {"properties": {"status": {"const": "NEEDS_CONTEXT"}}},
   "then": {"required": ["reason"]},
   "properties": {
+    "base_only": {"type": "boolean", "description": "Unproven claim only; never proof."},
+    "cited": {"type": "array", "maxItems": 40,
+              "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+    "notes": {"type": "array", "maxItems": 20,
+              "items": {"type": "string", "maxLength": 400}},
     "reason": {"type": "string", "minLength": 1, "maxLength": 1000,
                "description": "Required for NEEDS_CONTEXT: the missing context and what would unblock this build."},
     "coupled": {
