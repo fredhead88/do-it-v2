@@ -1830,6 +1830,19 @@ class SourceGuardTests(unittest.TestCase):
                           'pkg/b.py': '', 'pkg/tests/c.py': '', 'test/d.py': '', 'pkg/sub/e.py': ''})
         self.assertEqual(source_domain(tree), ['a.py', 'pkg/b.py', 'pkg/sub/e.py'])
 
+    def test_stall_clocks_and_daily_health_reads_have_dispositions(self):
+        # Keep the unit-one additions checked even when unrelated baseline
+        # inventory drift makes the complete guard red.
+        def unit_rows(inventory):
+            return [row for row in inventory['outside']
+                    if row['path'] == 'stall_alarm.py'
+                    or row['symbol'] == 'flow_health.daily']
+
+        current = unit_rows(self.current)
+        self.assertEqual(len(current), 11)
+        self.assertEqual(unit_rows(self.committed), current)
+        self.assertTrue(all(row['surface'] for row in current))
+
     def test_every_answer_function_and_input_root_is_in_the_graph(self):
         for action, row in deps.TABLE.items():
             self.assertIn(row.answer, self.graph, action)
