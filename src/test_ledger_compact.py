@@ -10,7 +10,7 @@ import ledger_cache
 
 
 def projection_pin_matches():
-    return (ledger_cache.VERSION == 4 and
+    return (ledger_cache.VERSION == 5 and
             hashlib.sha256(json.dumps(ledger_compact.PROJECTION, sort_keys=True).encode()).hexdigest()
             == '2cd15f797c0162d72c1a02ea37137e62db66e81206f5e68c878552ae884746bc')
 
@@ -40,7 +40,7 @@ class CompactTests(unittest.TestCase):
                 self.assertEqual(event, before)
 
     def test_projection_pinned_to_cache_version(self):
-        self.assertEqual(ledger_cache.VERSION, 4)
+        self.assertEqual(ledger_cache.VERSION, 5)
         self.assertEqual(ledger_compact.PROJECTION, {
             'tree-reaped': ('retained', 'retained_reason'), 'tick': ('recorded_reap', 'worktrees_retained')})
         self.assertTrue(projection_pin_matches())

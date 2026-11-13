@@ -785,7 +785,8 @@ FIXTURES = deps.FIXTURES
 SEED_PARAMS = frozenset(('events', 'evs', 'all_ev', 'all_evs', 'all_events',
                          'spec_events', 'spec_evs'))
 TARGET_FORMALS = frozenset(('item', 'item_id', 'sid', 'subject', 'spec'))
-READERS = frozenset(('fold.read_events', 'fold.finish_events'))
+READERS = frozenset(('fold.read_events', 'fold.finish_events',
+                     'ledger_cache.read_default', 'ledger_cache.read_uncached'))
 JOIN_FIELDS = frozenset(('ref', 'spawn'))
 _RECORD_METHODS = frozenset((
     'get', 'items', 'values', 'keys', 'append', 'extend', 'add', 'update', 'setdefault',
@@ -1817,6 +1818,34 @@ class SourceGuardTests(unittest.TestCase):
             for row in rows:
                 print('    ', row['symbol'], sum(n for _, _, n in row['reads']))
         self.assertEqual(self.problems, [], '\n'.join(self.problems))
+
+    def test_tree_reaped_reader_dispositions(self):
+        """Pin the skip reader's new and changed reads without exempting any."""
+        symbols = {
+            'fold._merge_same_ts', 'fold.finish_events',
+            'fold._read_events_uncached', 'fold._survivor_order',
+            'fold.read_events', 'fold.render', 'fold.skipped_counts', 'fold.spend_rows',
+            'ledger_cache.Skipped.targets', 'ledger_cache._correction_targets',
+            'ledger_cache._file', 'ledger_cache._pack_skips', 'ledger_cache._parse',
+            'ledger_cache._reap_fields', 'ledger_cache._record_digest',
+            'ledger_cache._targeted', 'ledger_cache._unpack_skips', 'ledger_cache._update',
+            'ledger_cache.read_conditional', 'ledger_cache.reap_candidate',
+            'ledger_cache.read_uncached', 'ledger_cache.reap_order_key',
+            'ledger_cache.survivor_order', 'scorecard.day_rows',
+        }
+        found = set()
+        for part in ('graph', 'outside'):
+            committed = {r['symbol']: r for r in self.committed[part]}
+            for row in self.current[part]:
+                if row['symbol'] not in symbols:
+                    continue
+                found.add(row['symbol'])
+                self.assertEqual(committed.get(row['symbol']), row, row['symbol'])
+                if part == 'outside':
+                    self.assertTrue(row['surface'], row['symbol'])
+                else:
+                    self.assertTrue(all(r['route'] != 'unresolved' for r in row['reads']), row['symbol'])
+        self.assertEqual(found, symbols)
 
     def test_domain_is_recursive_and_excludes_tests(self):
         domain = set(self.analysis.domain)

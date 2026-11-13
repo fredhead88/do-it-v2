@@ -320,7 +320,7 @@ def read_via_fold(d, type_=None):
     code = ("import json,sys;"
             f"sys.path.insert(0, {str(HERE)!r});"
             "import fold;"
-            "print(json.dumps(fold.read_events()))")
+            "print(json.dumps(fold.read_events(with_reaped=True)))")
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                        env=dict(os.environ, DOIT_ROOT=str(d)))
     assert p.returncode == 0, p.stderr
@@ -1603,7 +1603,7 @@ for labelled1654 in (False, True):
         evs = read_via_fold(d)
         real_project = fold.subject_project
         expected = {sid: real_project(sid) or pathlib.Path.cwd().name for sid in ('L-spec-1040', 'path-project')}
-        with patch.object(fold, 'subject_project', wraps=real_project) as labels:
+        with patch.object(__import__('project_scope'), 'subject_project', wraps=__import__('project_scope').subject_project) as labels:
             tree_cleanup.reap_merged_specs(evs)
         check(labels.call_count == int(not labelled1654), 'L1654 explicit project avoids per-append ledger reads')
         for row in read_via_fold(d):

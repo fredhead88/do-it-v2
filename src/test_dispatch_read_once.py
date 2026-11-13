@@ -955,7 +955,7 @@ class ScratchLedger(unittest.TestCase):
     def read_back(self):
         # Observation has a separate process and no candidate view reference.
         script = ("import json,sys; sys.path.insert(0,sys.argv[1]); import fold; "
-                  "print(json.dumps(fold.read_events(use_cache=False),sort_keys=True))")
+                  "print(json.dumps(fold.read_events(use_cache=False,with_reaped=True),sort_keys=True))")
         result = subprocess.run([sys.executable, "-B", "-c", script,
                                  str(Path(__file__).resolve().parent)],
                                 env=self.env, text=True, capture_output=True, check=True)

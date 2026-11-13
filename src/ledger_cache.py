@@ -17,6 +17,7 @@ import math
 import os
 import pathlib
 import pickle
+import re
 import sqlite3
 import sys
 import threading
@@ -24,15 +25,154 @@ import time
 
 import ledger_compact
 
-VERSION = 4
+VERSION = 5
 CHUNK_EVENTS = 256
 PREFIX_CHUNK = 8 * 1024 * 1024
 # Callers may patch the shared time module for their own timeout tests.
 _monotonic = time.monotonic
 
 
+_REFRESH_INPUT = ContextVar('refresh_input', default=None)
+
+
 class Invalid(ValueError):
     pass
+
+
+# Dead project cleanup records: skipped before JSON decoding (L-charter-0079 R6).
+# Eligibility is proven from the line text alone and only when the answer is
+# unambiguous: the exact type marker once, a single flat object, no charter
+# subject, and a filename-derived actor that may emit the type. Anything the
+# test cannot establish is parsed like every other line.
+_MARK = '"type": "tree-reaped"'
+# A deliberately narrow lexical grammar: flat objects with scalar values or
+# scalar arrays. Escaped strings and nested objects remain ordinary parsed rows.
+# This proves both the event type and its canonical ordering key without decoding
+# a cleanup event. The ordering key lives only during refresh, never in SQLite.
+_PLAIN_STRING = r'"[^"\\\x00-\x1f]*"'
+_STRING = r'"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"'
+_NUMBER = r'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+_SCALAR = rf'(?:{_STRING}|{_NUMBER}|true|false|null)'
+_SPACE = r'[ \t\r\n]*'
+_VALUE = rf'(?:{_SCALAR}|\[{_SPACE}(?:{_SCALAR}(?:{_SPACE},{_SPACE}{_SCALAR})*)?{_SPACE}\])'
+_FIELD = re.compile(rf'{_SPACE}({_STRING}){_SPACE}:{_SPACE}({_VALUE}){_SPACE}')
+_TOKEN = re.compile(_SCALAR)
+
+
+def _reap_fields(line, actor):
+    from fold_emits import EMITS
+    if (_MARK not in line or actor not in EMITS.get('tree-reaped', ())
+            or '"subject": "L-charter-' in line):
+        return None
+    text = line.strip(" \t\r\n")
+    if not text.startswith('{') or not text.endswith('}'):
+        return None
+    fields, pos = {}, 1
+    while pos < len(text) - 1:
+        match = _FIELD.match(text, pos)
+        if match is None:
+            return None
+        key, value = match.groups()
+        if not re.fullmatch(_PLAIN_STRING, key):
+            return None
+        key = key[1:-1]
+        if '\\' in value and key not in ledger_compact.PROJECTION['tree-reaped']:
+            return None
+        if key in fields:
+            return None
+        fields[key] = value
+        pos = match.end()
+        if pos == len(text) - 1:
+            break
+        if text[pos:pos + 1] != ',':
+            return None
+        pos += 1
+        if pos >= len(text) - 1:  # no trailing comma
+            return None
+    if fields.get('type') != '"tree-reaped"':
+        return None
+    for key in ('subject', 'project', 'ts'):
+        if key in fields and not re.fullmatch(_PLAIN_STRING, fields[key]):
+            return None
+    if fields.get('subject', '""')[1:-1].startswith('L-charter-'):
+        return None
+    return fields
+
+
+def reap_candidate(line, actor):
+    """(project, ts) for a proven skippable cleanup line, else None."""
+    fields = _reap_fields(line, actor)
+    if fields is None:
+        return None
+    return tuple(fields[k][1:-1] if k in fields else None for k in ('project', 'ts'))
+
+
+def reap_order_key(line, actor):
+    """Transient canonical content key of a proven cleanup line; no JSON decode."""
+    fields = _reap_fields(line, actor)
+    if fields is None:
+        raise Invalid('cleanup ordering changed during refresh')
+
+    def scalar(token):
+        if token.startswith('"'):
+            # json.dumps escapes non-ASCII even for an unescaped input string.
+            return json.dumps(token[1:-1])
+        if token in ('true', 'false', 'null'):
+            return token
+        return json.dumps(float(token) if any(c in token for c in '.eE') else int(token))
+
+    def canonical(value):
+        if value.startswith('['):
+            return '[' + ', '.join(scalar(m.group()) for m in _TOKEN.finditer(value)) + ']'
+        return scalar(value)
+
+    subject = fields.get('subject', '"?"')[1:-1]
+    retained = fields.pop('retained', None)
+    fields.pop('retained_reason', None)
+    if retained is not None and retained.startswith('[') and 'retained_count' not in fields:
+        fields['retained_count'] = str(sum(1 for _ in _TOKEN.finditer(retained)))
+    # Provenance is supplied by the filename, and never participates in the key.
+    fields.pop('actor', None)
+    fields.pop('_src', None)
+    content = '{' + ', '.join(json.dumps(k) + ': ' + canonical(v) for k, v in sorted(fields.items())) + '}'
+    return subject, 'tree-reaped', content
+
+
+class Skipped:
+    """What a read skipped: counts and line numbers only, never event payloads."""
+    __slots__ = ('files',)
+
+    def __init__(self, files=()):
+        self.files = list(files)  # (name, sorted line numbers, {(project, ts): n})
+
+    def targets(self, ref):
+        name, _, line = str(ref).rpartition(':')
+        if not line.isdigit():
+            return False
+        import bisect
+        n = int(line)
+        for fname, lines, _ in self.files:
+            if fname == name:
+                i = bisect.bisect_left(lines, n)
+                return i < len(lines) and lines[i] == n
+        return False
+
+    def counts(self, project=None):
+        """{(project, ts): n}, restricted to one project when a scope is set."""
+        out = {}
+        for _, _, acct in self.files:
+            for key, n in acct.items():
+                if not project or key[0] == project:
+                    out[key] = out.get(key, 0) + n
+        return out
+
+    def __bool__(self):
+        return any(lines for _, lines, _ in self.files)
+
+
+class Events(list):
+    """A read result carrying its skip accounting (`.skipped`, a Skipped or None)."""
+    skipped = None
 
 
 class LockTimeout(RuntimeError):
@@ -150,7 +290,7 @@ def _shared_text(value):
 def _record_digest(row):
     # A changed read projection invalidates old payloads without changing the
     # SQLite schema or the directory-derived cache/lock identity.
-    return hashlib.sha256(pickle.dumps((row[:10] + (row[11],),
+    return hashlib.sha256(pickle.dumps((row[:10] + (row[11], row[13]),
                                         ledger_compact.PROJECTION), protocol=5)).digest()
 
 
@@ -162,7 +302,7 @@ def _keys(obj):
     return {sys.intern(k): v for k, v in obj.items()}
 
 
-def _parse(data, name, actor, first_line, *, with_count=False):
+def _parse(data, name, actor, first_line, *, with_count=False, skipped=None, targets=()):
     result, next_line = [], first_line
     # Match read_text().splitlines(), including CRLF and Unicode separators,
     # without retaining a second ledger-sized list of line strings.
@@ -172,6 +312,11 @@ def _parse(data, name, actor, first_line, *, with_count=False):
         next_line = n + 1
         if not line.strip():
             continue
+        if skipped is not None:
+            dead = reap_candidate(line, actor)
+            if dead is not None and n not in targets:
+                skipped.append((n, *dead))
+                continue
         try:
             event = ledger_compact.compact(json.loads(line, object_hook=_keys))
         except json.JSONDecodeError:
@@ -181,7 +326,7 @@ def _parse(data, name, actor, first_line, *, with_count=False):
     return (result, next_line) if with_count else result
 
 
-def _file(path, actor, old):
+def _file(path, actor, old, targets=()):
     meta = ledger_files.stat_key(path.parent, path.name)
     member = bool(ledger_files._members(path.parent, path.name))
     append = False
@@ -212,9 +357,12 @@ def _file(path, actor, old):
     # if that line happened to parse as valid JSON on the previous read.
     end = data.rfind(b'\n') + 1
     complete = data[:end]
-    events, line = _parse(complete, path.name, actor, first_line, with_count=True)
+    skipped = []
+    events, line = _parse(complete, path.name, actor, first_line, with_count=True,
+                          skipped=skipped, targets=targets)
     return dict(meta=meta, digest=digest.digest(), offset=start + end, line=line,
-                events=events, tail=_parse(data[end:], path.name, actor, line), append=append)
+                events=events, tail=_parse(data[end:], path.name, actor, line), append=append,
+                skipped=skipped)
 
 
 def _connect(path, *, writable=False):
@@ -232,7 +380,9 @@ def _connect(path, *, writable=False):
             return db
         db.execute('CREATE TABLE IF NOT EXISTS files (name TEXT PRIMARY KEY, '
                    'dev INTEGER, ino INTEGER, size INTEGER, mtime INTEGER, ctime INTEGER, '
-                   'offset INTEGER, line INTEGER, digest BLOB, chunks INTEGER, tail BLOB, tail_sha BLOB, record_sha BLOB)')
+                   'offset INTEGER, line INTEGER, digest BLOB, chunks INTEGER, tail BLOB, tail_sha BLOB, '
+                   'skip BLOB, skip_sha BLOB, record_sha BLOB)')
+        db.execute('CREATE TABLE IF NOT EXISTS ordering (id INTEGER PRIMARY KEY, data BLOB, sha BLOB)')
         db.execute('CREATE TABLE IF NOT EXISTS chunks (name TEXT, seq INTEGER, data BLOB, sha BLOB, '
                    'PRIMARY KEY (name, seq))')
         if version == 0:
@@ -246,10 +396,11 @@ def _connect(path, *, writable=False):
 
 def _metadata(db):
     rows = db.execute('SELECT * FROM files').fetchall()
-    if any(len(row) != 13 or _record_digest(row) != row[12] for row in rows):
+    if any(len(row) != 15 or _record_digest(row) != row[14] for row in rows):
         raise Invalid('cache metadata checksum')
     old = {r[0]: dict(meta=tuple(r[1:6]), offset=r[6], line=r[7], digest=r[8],
-                       chunks=r[9], tail=r[10], tail_sha=r[11]) for r in rows}
+                       chunks=r[9], tail=r[10], tail_sha=r[11], skip=r[12], skip_sha=r[13])
+           for r in rows}
     return old
 
 
@@ -265,16 +416,91 @@ def _current(db, directory):
     return _generation(db, directory) is not None
 
 
+def _pack_skips(lines, acct, targets=()):
+    return _pack([dict(lines=list(lines), acct=dict(acct), targets=sorted(targets))])
+
+
+def _unpack_skips(data, digest, *, with_targets=False):
+    # Counts and line numbers only; small enough to read inside the writer's
+    # critical section (unlike event chunks, which are never decoded there).
+    if not isinstance(data, bytes) or hashlib.sha256(data).digest() != digest:
+        raise Invalid('cache checksum')
+    try:
+        row = _DataOnly(io.BytesIO(data)).load()
+    except (EOFError, ValueError, TypeError, pickle.UnpicklingError) as exc:
+        raise Invalid('cache payload') from exc
+    if (not isinstance(row, list) or len(row) != 1 or not isinstance(row[0], dict)
+            or set(row[0]) != {'lines', 'acct', 'targets'}):
+        raise Invalid('cache skip schema')
+    lines, acct = row[0]['lines'], row[0]['acct']
+    if (not isinstance(lines, list) or not isinstance(acct, dict)
+            or any(type(n) is not int for n in lines)):
+        raise Invalid('cache skip schema')
+    targets = row[0]['targets']
+    if not isinstance(targets, list) or any(type(n) is not int for n in targets):
+        raise Invalid('cache target schema')
+    return (lines, acct, targets) if with_targets else (lines, acct)
+
+
+def _correction_targets(directory, names, actor_of):
+    """Resolve operator references before skipping any target, including old files.
+
+    Only operator sources can supply corrections. The cheap lexical check also
+    admits escaped spellings; the normal decoder establishes authority and type.
+    No skipped payload or correction body is stored in the metadata.
+    """
+    targets = {}
+    for name in names:
+        if actor_of(name) != 'operator':
+            continue
+        for line in ledger_files.read_text(directory, name).splitlines():
+            if reap_candidate(line, 'operator') is not None:
+                continue
+            if 'correction' not in line and '\\' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get('type') != 'correction' or not isinstance(event.get('ref'), str):
+                continue
+            file, _, number = event['ref'].rpartition(':')
+            if number.isdigit() and str(int(number)) == number:
+                targets.setdefault(file, set()).add(int(number))
+    return targets
+
+
 def _update(db, directory, actor_of):
     old = _metadata(db)
+    seed = _REFRESH_INPUT.get()
+    if old and (seed is None or seed[0] != old):
+        # The shared read raced a rebuild: rebuild safely, never decode event
+        # chunks while the exclusive writer lock is held.
+        raise Invalid('stale refresh input')
+    retained = {}
+    if old and seed[1] is not None:
+        for event in seed[1]:
+            retained.setdefault(event['_src'].rsplit(':', 1)[0], []).append(event)
     seen = set()
+    keys = ledger_files.stat_keys(directory)
+    targets = _correction_targets(directory, keys, actor_of)
     with db:  # All metadata, prefix chunks and torn tails publish together.
-        for name, meta in ledger_files.stat_keys(directory).items():
+        for name, meta in keys.items():
             file = directory / name
             seen.add(name)
             previous = old.get(name)
-            if previous is None or previous['meta'] != meta:
-                current = _file(file, actor_of(name), previous)
+            requested = targets.get(name, set())
+            prior_targets = set(_unpack_skips(previous['skip'], previous['skip_sha'],
+                                            with_targets=True)[2]) if previous else set()
+            changed_targets = prior_targets != requested
+            if previous is None or previous['meta'] != meta or changed_targets:
+                reusable = None if changed_targets else previous
+                current = (_file(file, actor_of(name), reusable, requested) if requested
+                           else _file(file, actor_of(name), reusable))
+                prefix = ([e for e in retained.get(name, [])
+                           if int(e['_src'].rsplit(':', 1)[1]) < previous['line']]
+                          if current['append'] else [])
+                retained[name] = prefix + current['events'] + current['tail']
                 if not current['append']:
                     db.execute('DELETE FROM chunks WHERE name=?', (name,))
                 seq = previous['chunks'] if current['append'] else 0
@@ -283,20 +509,54 @@ def _update(db, directory, actor_of):
                     db.execute('INSERT INTO chunks VALUES (?,?,?,?)', (name, seq, data, digest))
                     seq += 1
                 tail, digest = _pack(current['tail'])
+                lines, acct = ([], {}) if not current['append'] else _unpack_skips(
+                    previous['skip'], previous['skip_sha'])
+                for n, project, stamp in current['skipped']:
+                    lines.append(n)
+                    acct[(project, stamp)] = acct.get((project, stamp), 0) + 1
+                skip, skip_digest = _pack_skips(lines, acct, requested)
                 record = (name, *current['meta'], current['offset'], current['line'],
-                          current['digest'], seq, tail, digest)
-                db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                          current['digest'], seq, tail, digest, skip, skip_digest)
+                db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                            (*record, _record_digest(record)))
                 del current
         for name in old.keys() - seen:
             db.execute('DELETE FROM chunks WHERE name=?', (name,))
             db.execute('DELETE FROM files WHERE name=?', (name,))
 
+        # Persist only survivor ordinals, not hidden cleanup payloads or keys.
+        # Warm reads need no ledger scan. Recompute after a source generation
+        # changes, since a removed head can affect a cross-file timestamp merge.
+        from fold import _survivor_order
+        raw = [e for name in sorted(seen) for e in retained.get(name, [])]
+        dead = []
+        for name, row in sorted(_metadata(db).items()):
+            lines, _ = _unpack_skips(row['skip'], row['skip_sha'])
+            if lines:
+                wanted = set(lines)
+                for n, line in enumerate(ledger_files.read_text(directory, name).splitlines(), 1):
+                    if n in wanted:
+                        dead.append((name, n, line))
+        ranks = _survivor_order(raw, dead)
+        data, digest = _pack([ranks])
+        db.execute('INSERT OR REPLACE INTO ordering VALUES (1,?,?)', (data, digest))
 
-def _read(db):
+
+def _read(db, *, with_order=True):
     verified = _CHUNKS_VERIFIED.get()
-    out = []
+    out = Events()
+    if with_order:
+        row = db.execute('SELECT data,sha FROM ordering WHERE id=1').fetchone()
+        if row is None:
+            if _metadata(db):
+                raise Invalid('cache missing survivor order')
+        else:
+            (out.ordering,) = _unpack(*row)
+            if any(not isinstance(k, str) or type(v) is not int for k, v in out.ordering.items()):
+                raise Invalid('cache survivor order schema')
     metadata = _metadata(db)
+    out.skipped = Skipped(
+        (name, *_unpack_skips(row['skip'], row['skip_sha'])) for name, row in sorted(metadata.items()))
     # Keep the names for corruption checks, release each full record as consumed.
     known = frozenset(metadata)
     names = ((name, metadata.pop(name)) for name in sorted(known))
@@ -390,6 +650,7 @@ def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):
     for attempt in range(3):
         corrupt = False
         broken_meta = None
+        seed = None
         with _locked(lock, fcntl.LOCK_SH):
             db = None
             try:
@@ -416,6 +677,22 @@ def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):
                         _VERIFIED.clear()
                     _VERIFIED[str(path)] = token
                     return ConditionalRead(generation, events)
+                # Decode the old committed rows under SH, before the writer
+                # phase. _update combines this prefix with newly parsed tails.
+                metadata = _metadata(db)
+                needs_order = any(any(_unpack_skips(row['skip'], row['skip_sha'], with_targets=True)[i]
+                                      for i in (0, 2)) for row in metadata.values())
+                if not needs_order:
+                    for name, meta in ledger_files.stat_keys(directory).items():
+                        if name in metadata and metadata[name]['meta'] == meta:
+                            continue
+                        with ledger_files._open_binary(directory, name) as stream:
+                            # A historical edit plus append can introduce a
+                            # barrier before the old offset; inspect the bytes.
+                            if _MARK.encode() in stream.read():
+                                needs_order = True
+                                break
+                seed = (metadata, _read(db) if needs_order else None)
             except (sqlite3.DatabaseError, Invalid):
                 corrupt = True
                 if path.exists():
@@ -448,4 +725,152 @@ def read_conditional(events_dir, cache_dir, actor_of, *, previous=None):
                 if db is not None:
                     db.close()
             if needs_refresh:
-                _refresh(path, directory, actor_of)
+                token = _REFRESH_INPUT.set(seed)
+                try:
+                    _refresh(path, directory, actor_of)
+                finally:
+                    _REFRESH_INPUT.reset(token)
+
+
+def survivor_order(raw, dead, actor_of, merge_same_ts):
+    """Ordinal metadata preserving the reference merge after removed queue heads.
+
+    Cleanup content keys are transient; only retained source IDs and integer
+    positions survive. Unaffected timestamp runs use the ordinary merger.
+    """
+    if not dead:
+        return {}
+    barriers, keys = [], {}
+    for name, n, line in dead:
+        key = reap_order_key(line, actor_of(name))
+        hit = reap_candidate(line, actor_of(name))
+        barrier = {'_src': f'{name}:{n}', 'ts': hit[1] if hit[1] is not None else ''}
+        barriers.append(barrier)
+        keys[id(barrier)] = key
+    stamps = {str(e['ts']) for e in barriers}
+    groups = {}
+    for e in sorted([e for e in raw if str(e.get('ts', '')) in stamps] + barriers,
+                    key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1]))):
+        groups.setdefault(str(e.get('ts', '')), []).append(e)
+    ranks = {}
+    for group in groups.values():
+        merged = merge_same_ts(group, content_keys=keys)
+        ranks.update((e['_src'], n) for n, e in enumerate(merged) if id(e) not in keys)
+    return ranks
+
+
+def read_uncached(directory, actor_of, with_reaped=True):
+    """Reference parser and safe fallback; kept independent of the cache.
+
+    `with_reaped=True` (the reference) decodes every line. False skips dead
+    project `tree-reaped` lines before decoding (reap_candidate) and
+    returns an Events list carrying what was skipped. A skipped line that an
+    operator correction names is decoded after all, so the correction can reach it.
+    """
+    from fold import _merge_same_ts
+    out = Events()
+    dead, order = [], {}
+    for name, lines in ledger_files.iter_sources(directory) if directory.exists() else []:
+        actor = actor_of(name)
+        order[name] = len(order)
+        for n, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            if not with_reaped:
+                hit = reap_candidate(line, actor)
+                # An unterminated final record is not a committed line: the cache
+                # parses it as a torn tail, so the reference does too.
+                if hit is not None and n == len(lines) and not ledger_files._read_bytes(directory, name).endswith(b"\n"):
+                    hit = None
+                if hit is not None:
+                    dead.append((name, n, hit, line))
+                    continue
+            try:
+                e = ledger_compact.compact(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+            e["actor"], e["_src"] = actor, f"{name}:{n}"
+            out.append(e)
+    if not with_reaped:
+        refs = {e.get("ref") for e in out
+                if e.get("type") == "correction" and e["actor"] == "operator" and e.get("ref")}
+        per_file, revived = {name: ([], {}) for name in order}, False
+        for name, n, hit, line in dead:
+            if f"{name}:{n}" in refs:
+                try:
+                    e = ledger_compact.compact(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+                e["actor"], e["_src"] = actor_of(name), f"{name}:{n}"
+                out.append(e)
+                revived = True
+            else:
+                lines_, acct = per_file[name]
+                lines_.append(n)
+                acct[hit] = acct.get(hit, 0) + 1
+        if revived:
+            out.sort(key=lambda e: (order[e["_src"].rsplit(":", 1)[0]], int(e["_src"].rsplit(":", 1)[1])))
+        out.skipped = Skipped((name, *per_file[name]) for name in order)
+        skipped_ids = {f'{name}:{n}' for name, lines, _ in out.skipped.files for n in lines}
+        out.ordering = survivor_order(out, [(name, n, line) for name, n, _, line in dead
+                                           if f'{name}:{n}' in skipped_ids], actor_of, _merge_same_ts)
+    return out
+
+
+def _targeted(events):
+    """True when an operator correction names a skipped source line."""
+    skipped = getattr(events, 'skipped', None)
+    if not skipped:
+        return False
+    return any(e.get('type') == 'correction' and e['actor'] == 'operator' and e.get('ref')
+               and skipped.targets(e['ref']) for e in events)
+
+
+def _finished(raw, fold):
+    """finish_events for a default read, keeping what the read skipped."""
+    skipped = getattr(raw, 'skipped', None)
+    out = fold.finish_events(raw, owned=True)
+    if skipped:
+        out = fold._FoldInput(out)
+        out._skipped = skipped.counts(fold.PROJECT)
+    return out
+
+
+def read_default(use_cache, snapshot, fold):
+    """Cached/default reader orchestration; normalization remains owned by fold."""
+    if use_cache and os.environ.get("DOIT_READ_CACHE", "1") != "0":
+        try:
+            if snapshot is None:
+                out = read(fold.EVENTS, fold.ROOT / "cache", fold.actor_of)
+                if _targeted(out):
+                    out = fold._read_events_uncached(False)
+            else:
+                scope = (str(fold.EVENTS.resolve()), str((fold.ROOT / "cache").resolve()), fold.PROJECT)
+                previous = snapshot._generation if snapshot._scope == scope else None
+                result = read_conditional(fold.EVENTS, fold.ROOT / "cache", fold.actor_of,
+                                                       previous=previous)
+                if result.events is not None:
+                    if _targeted(result.events):
+                        # Not publishable: the cache cannot hold the targeted record.
+                        snapshot._clear()
+                        return _finished(fold._read_events_uncached(False), fold)
+                    skipped = getattr(result.events, 'skipped', None)
+                    out = fold.finish_events(result.events, owned=True)
+                    snapshot._publish(scope, result.generation, out,
+                                      skipped.counts(fold.PROJECT) if skipped else None)
+                return snapshot._copy()
+        except LockTimeout:
+            if snapshot is not None:
+                snapshot._clear()
+            raise
+        except (OSError, ValueError, EOFError, KeyError, TypeError):
+            # A read-only root, a corrupt cache or a racing writer is harmless.
+            # The ledger remains the only authority.
+            if snapshot is not None:
+                snapshot._clear()
+            out = fold._read_events_uncached(False)
+    else:
+        if snapshot is not None:
+            snapshot._clear()
+        out = fold._read_events_uncached(False)
+    return _finished(out, fold)
