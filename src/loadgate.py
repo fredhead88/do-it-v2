@@ -1,10 +1,11 @@
-"""One bounded, fail-open pressure observation per scheduler pass.
+"""One bounded pressure observation and hard disk snapshot per scheduler pass.
 
 Only opted-in tick passes may defer new builds and grades.
 Global off is [admission] mode in look.toml;
 DOIT_ADMISSION affects only callers inheriting that environment (cron and
 Executor panes differ). Revert enforcement before reverting this module;
 the retained state file then becomes inert.
+begin_pass keeps builder/grader disk protection independent of that rollout.
 """
 from collections import Counter
 from copy import deepcopy
@@ -16,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import time
 import tomllib
 import fcntl
@@ -452,6 +454,39 @@ class Decision:
     override: str | None = None
 
 
+@dataclass
+class DiskSnapshot:
+    """Transient, read-only disk observation; receiver owns any reclamation."""
+    free_gb: float | None
+    needs: dict
+
+    @classmethod
+    def sample(cls, *, scratch_path=None, toml_path=None):
+        import dispatch
+        import scratch
+        try:
+            path = scratch.root() if scratch_path is None else scratch_path
+            free = shutil.disk_usage(path).free / 2**30
+            if not _number(free):
+                free = None
+        except Exception:
+            free = None
+        needs = {}
+        for role in ('builder', 'grader'):
+            try:
+                need = dispatch._room_need_gb(role, toml_path=toml_path)
+                needs[role] = need if _number(need) else None
+            except Exception:
+                needs[role] = None
+        return cls(free, needs)
+
+    def check(self, role):
+        need = self.needs.get(role)
+        if self.free_gb is None or need is None:
+            return 'disk-unreadable'
+        return 'disk-space' if self.free_gb < need else None
+
+
 class Gate:
     def __init__(self, config, problems, clock, running):
         self.settings, self.problems, self.clock, self.running = config, problems, clock, running
@@ -466,10 +501,24 @@ class Gate:
         self.escape, self.pending_override = None, None
         self.state_problems, self.trip_start, self.loaded_trip = [], None, None
         self.launched = False
+        self.disk, self.dry_run = None, False
 
     def check(self, item, role, *, action=None, since=None):
         start = time.monotonic()
         try:
+            # Disk is physical admission, before load fail-open and both escapes.
+            if self.disk is not None and role in ('builder', 'grader'):
+                try:
+                    disk_reason = self.disk.check(role)
+                except Exception:
+                    disk_reason = 'disk-unreadable'
+                if disk_reason:
+                    self.checked += 1
+                    self.roles[item] = role
+                    self.would_hold.add(hold_key(item))
+                    self.reasons[disk_reason] += 1
+                    self.held += 1
+                    return Decision(True, disk_reason, True)
             if self.readings is not None:
                 now = self.clock()
                 age = max(0, now - self.readings['t'])
@@ -563,7 +612,7 @@ class Gate:
                 fields['admission_trip_s'] = max(0, int(t - _timestamp(self.state['trip_since'])))
             if self.state['holding']:
                 fields['admission_oldest_hold_s'] = max(0, int(now - min(map(_timestamp, self.state['holding'].values()))))
-            if self.path is not None:
+            if self.path is not None and not self.dry_run:
                 try:
                     save_state(self.path, self.state)
                 except Exception:
@@ -658,3 +707,55 @@ def begin(*, root=None, env=None, toml_path=None, proc_root=None, cgroup_root=No
         gate.errors.append('begin: ' + str(exc))
     gate.cost = time.monotonic() - start
     return gate
+
+
+class PassGate:
+    """One pass's disk and optional load gate, sharing existing state accounting."""
+    def __init__(self, disk, gate, accounting, *, dry_run=False):
+        self.disk, self.gate, self._accounting = disk, gate, accounting
+        self.dry_run = dry_run
+        accounting.disk, accounting.dry_run = disk, dry_run
+
+    @property
+    def grades_first(self):
+        return self._accounting.grades_first
+
+    def check(self, item, role, *, action=None, since=None):
+        return self._accounting.check(item, role, action=action, since=since)
+
+    def note_launch(self, item, spawned, *, raised=False):
+        if not self.dry_run:
+            self._accounting.note_launch(item, spawned, raised=raised)
+
+    def finish(self):
+        return self._accounting.finish()
+
+
+def begin_pass(*, running=None, allow_enforce=False, dry_run=False, root=None,
+               env=None, toml_path=None, proc_root=None, cgroup_root=None,
+               clock=None, ncpu=None, scratch_path=None):
+    """Sample disk before begin; off or failed load policy cannot discard it.
+
+    The disk-only fallback uses Gate.finish/save_state and the unchanged v1
+    holding map. Dry runs still sample and render decisions but never save.
+    """
+    disk = DiskSnapshot.sample(scratch_path=scratch_path, toml_path=toml_path)
+    failed = False
+    try:
+        gate = begin(root=root, env=env, toml_path=toml_path, proc_root=proc_root,
+                     cgroup_root=cgroup_root, clock=clock, ncpu=ncpu,
+                     running=running, allow_enforce=allow_enforce)
+    except Exception:
+        gate, failed = None, True
+    accounting = gate
+    if accounting is None:
+        accounting = Gate(deepcopy(DEFAULTS), [], time.time if clock is None else clock, running)
+        accounting.mode = 'observe' if failed else 'off'
+        if failed:
+            accounting.errors.append('begin: load unavailable')
+        if root is None:
+            import fold
+            root = fold.ROOT
+        accounting.path = Path(root) / 'state/admission.json'
+        accounting.state, _ = load_state(accounting.path)
+    return PassGate(disk, gate, accounting, dry_run=dry_run)

@@ -159,6 +159,14 @@ class HowtoTests(unittest.TestCase):
         self.assertIn('migration-not-cut', page)
         self.assertIn('migration-only predecessor first', page)
 
+    def test_shared_readiness_disk_entry(self):
+        page = howto.render(str(REPO))
+        for fact in ('begin_pass: one scratch disk sample', 'before optional load admission',
+                     'disk holds survive load off/errors', '5/2 GiB',
+                     'admission.json holding', 'dry runs never save',
+                     'Receiver alone reclaims and rechecks'):
+            self.assertIn(fact, page)
+
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))

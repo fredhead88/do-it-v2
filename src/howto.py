@@ -93,7 +93,7 @@ def render(repo: str) -> str:
                   'unmeasured_specs excluded). Authors: Codex; judges: Claude. Executor: claude-sonnet-5-5;',
                   'judgment: claude-opus-5-5 seat. Sonnet trial: log health at start and 14 days later; axis=K.',
                   'SD10 migration cuts: audit reports migration-not-cut; merge the migration-only predecessor first.'])
-    lines.extend(['', '## Lane rules', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
+    lines.extend(['## Lane rules', 'Source: `lane_rules.toml`. Name | action | actor | limit_min.'])
     # Keep each lane tuple intact while leaving room for new cron rows within
     # the page's existing line budget.
     current = ''
@@ -130,6 +130,9 @@ def render(repo: str) -> str:
     lines.extend(['`src/bundle_wait.py`: tick grade/regrade, marked base-only checks; once/subject/ready SHA/amendment.',
                   '`bundle-requested`: tick-only; `bundle-wait`: one executor alarm/subject/SHA after >2h.',
                   '`DONE+notes`; `BLOCKED+base_only/cited`: current proof with `n_new=0` → grade; existing gates apply.'])
+    lines.extend(['`src/loadgate.py` begin_pass: one scratch disk sample, before optional load admission.',
+                  'Builder/grader disk holds survive load off/errors; receiver thresholds default to 5/2 GiB.',
+                  'Holds use admission.json holding; dry runs never save. Receiver alone reclaims and rechecks.'])
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:
@@ -146,13 +149,13 @@ def render(repo: str) -> str:
     lines.extend(_wrap('`src/window_known_red.py`: `window-dispatch-verdict` completion receipts; '
                        'master-known-red retries stay pending (`window-skipped-known`, never green).'))
     lines.extend(_wrap('`src/window_cancel.py`: confirm owned cancels before replacement; tombstones veto verdicts.'))
-    lines.extend(['', '## Branch refresh',
+    lines.extend(['## Branch refresh',
                   'Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; '
                   f'max {queue.get("branch_refresh_per_day", 3)}/spec/day.'])
     lines.extend(_wrap('`src/direct_merge.py`: merge_one handles one do-it-v2 queue row: refuse overlapping '
-                       'dirty paths, gate, require unchanged main/branch shas, merge --no-ff, then emit shipped. '
-                       'A moved ref requires re-gating; a failed merge is aborted. cli_gate uses doit gate. '
-                       'Queue selection and tick wiring belong to the caller.'))
+                       'dirty paths; gate with unchanged main/branch shas; merge --no-ff, emit shipped. '
+                       'A moved ref needs re-gating; failed merge is aborted. cli_gate uses doit gate; '
+                       'caller owns queue selection and tick wiring.'))
     lines.extend(_wrap('`src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.'))
     return '\n'.join(lines) + '\n'
 
