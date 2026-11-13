@@ -253,3 +253,178 @@ for index, (name, age, meta, mode, expected_busy, expected_end) in enumerate(mat
         print(json.dumps(dict(url='cli://vanished-matrix/'+name, status=0,
                               body_sha256=hashlib.sha256(body.encode()).hexdigest(), body_excerpt=body)))
 print('L-spec-1861 AC2 complete matrix: 25 rows, pure-reader writes=0, repeated event deltas=0')
+
+
+import unittest
+
+
+class SharedReadinessSpawnTests(unittest.TestCase):
+    """Scratch-only advisory observations; the receiver alone takes the flock."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix='shared-readiness-')
+        self.addCleanup(directory.cleanup)
+        self.root = pathlib.Path(directory.name)
+        self.subject = 'L-spec-9990'
+        self.lock_path = self.root / 'state' / spawns.lock_name(self.subject)
+
+    def query(self, role='builder', **kwargs):
+        context = dict(root=self.root, events=[], now=NOW, worktree=self.root / 'work')
+        context.update(kwargs)
+        return spawns.would_conflict(self.subject, role, **context)
+
+    def snapshot(self):
+        return {str(p.relative_to(self.root)): p.read_bytes()
+                for p in self.root.rglob('*') if p.is_file()}
+
+    def test_nine_ordered_pairs_and_unrelated_subjects(self):
+        before = self.snapshot()
+        expected = {('builder', 'builder'), ('builder', 'grader'), ('builder', 'reviewer'),
+                    ('grader', 'builder'), ('grader', 'grader'),
+                    ('reviewer', 'builder'), ('reviewer', 'reviewer')}
+        with patch.object(fcntl, 'flock', side_effect=AssertionError('probe took flock')):
+            for role in ('builder', 'grader', 'reviewer'):
+                for other in ('builder', 'grader', 'reviewer'):
+                    with self.subTest(role=role, other=other):
+                        events = [start(f'L-{other}-9991', self.subject)]
+                        want = 'duplicate-dispatch' if (role, other) in expected else None
+                        self.assertEqual(self.query(role, events=events), want)
+                        events[0]['subject'] = 'L-spec-9991'
+                        self.assertIsNone(self.query(role, events=events))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_canonical_shared_builder_worktree_and_default_resolution(self):
+        (self.root / 'repos' / 'p').mkdir(parents=True)
+        worktree = spawns.default_cwd('builder', self.subject, 'p', self.root)
+        events = [dict(type='spec-written', subject=self.subject, project='p'),
+                  start('L-builder-9991', 'L-spec-9991', worktree=worktree + '/./')]
+        self.assertEqual(self.query(events=events, worktree=None), 'duplicate-dispatch')
+        self.assertEqual(self.query(events=events, worktree=worktree + '/a/..'), 'duplicate-dispatch')
+        self.assertIsNone(self.query('grader', events=events, worktree=worktree))
+        with patch.object(spawns, 'lock_held', side_effect=AssertionError('unchecked role')):
+            self.assertIsNone(self.query('probe', events=events))
+        with patch.object(fold, 'read_events', return_value=events) as reader, \
+                patch.object(fold, 'ROOT', self.root):
+            self.assertEqual(spawns.would_conflict(self.subject, 'builder'), 'duplicate-dispatch')
+            reader.assert_called_once_with(use_cache=False)
+
+    def test_completed_failed_stale_and_vanished_starts(self):
+        for terminal in spawns.TERMINAL:
+            with self.subTest(terminal=terminal):
+                self.assertIsNone(self.query(events=[start('L-builder-9991', self.subject),
+                    end('L-builder-9991', self.subject, terminal)]))
+        for metadata in (dict(ago_min=181, **live),
+                         dict(waiter_pid=dead.pid, waiter_host=HOST, waiter_proc_start='dead'),
+                         dict(ago_min=181)):
+            with self.subTest(metadata=metadata):
+                self.assertIsNone(self.query(events=[start('L-builder-9991', self.subject, **metadata)]))
+
+    def test_missing_lock_query_never_creates_state_or_takes_flock(self):
+        with patch.object(fcntl, 'flock', side_effect=AssertionError('probe took flock')):
+            self.assertIsNone(self.query())
+        self.assertFalse((self.root / 'state').exists())
+        lock, refused = spawns.acquire(self.root, 'builder', self.subject, None, [])
+        self.assertIsNone(refused)
+        lock.close()
+
+    def test_metadata_and_lock_table_errors_close_read_only_descriptors(self):
+        import builtins
+        self.lock_path.parent.mkdir()
+        self.lock_path.touch()
+        original_open = builtins.open
+        for error in (PermissionError('fixture'), OSError('fixture')):
+            with self.subTest(error=type(error).__name__):
+                with patch('builtins.open', side_effect=error):
+                    self.assertEqual(self.query(), 'dispatch-in-progress')
+                for target in ('pathlib.Path.stat', 'pathlib.Path.read_text'):
+                    opened = []
+                    def track(*args, **kwargs):
+                        self.assertEqual(args[1], 'rb')
+                        fd = original_open(*args, **kwargs)
+                        opened.append(fd)
+                        return fd
+                    with patch('builtins.open', side_effect=track), patch(target, side_effect=error):
+                        self.assertEqual(self.query(), 'dispatch-in-progress')
+                    self.assertTrue(opened)
+                    self.assertTrue(all(fd.closed for fd in opened))
+        opened = []
+        def track_success(*args, **kwargs):
+            fd = original_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        with patch('builtins.open', side_effect=track_success):
+            self.assertIsNone(self.query())
+        self.assertTrue(all(fd.closed for fd in opened))
+
+    def test_paused_probe_concurrent_acquire_and_real_held_lock(self):
+        """Two child processes synchronize before the probe reads /proc/locks."""
+        self.lock_path.parent.mkdir()
+        self.lock_path.touch()
+        before = self.snapshot()
+        probe_code = '''
+import fcntl, json, pathlib, sys
+from unittest.mock import patch
+import spawns
+root, subject = pathlib.Path(sys.argv[1]), sys.argv[2]
+read = pathlib.Path.read_text
+def paused(path, *args, **kwargs):
+    if str(path) == '/proc/locks':
+        print('paused', flush=True)
+        assert sys.stdin.readline().strip() == 'resume'
+    return read(path, *args, **kwargs)
+with patch.object(pathlib.Path, 'read_text', paused), patch.object(fcntl, 'flock', side_effect=AssertionError('probe flock')):
+    print(json.dumps(spawns.would_conflict(subject, 'builder', root=root, events=[], worktree=root)), flush=True)
+'''
+        acquire_code = '''
+import pathlib, sys
+import spawns
+lock, refused = spawns.acquire(pathlib.Path(sys.argv[1]), 'builder', sys.argv[2], None, [])
+print('admitted' if refused is None else refused[1], flush=True)
+if lock:
+    assert sys.stdin.readline().strip() == 'release'
+    lock.close()
+'''
+        for resume_while_held in (False, True):
+            with self.subTest(resume_while_held=resume_while_held):
+                children = []
+                try:
+                    def launch(code):
+                        child = subprocess.Popen([sys.executable, '-c', code, str(self.root), self.subject],
+                            env=dict(os.environ, PYTHONPATH=str(HERE)), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                        children.append(child)
+                        return child
+                    def line(child):
+                        import selectors
+                        with selectors.DefaultSelector() as selector:
+                            selector.register(child.stdout, selectors.EVENT_READ)
+                            self.assertTrue(selector.select(10), 'child synchronization timed out')
+                        return child.stdout.readline().strip()
+                    probe = launch(probe_code)
+                    self.assertEqual(line(probe), 'paused')
+                    receiver = launch(acquire_code)
+                    self.assertEqual(line(receiver), 'admitted')
+                    self.assertEqual(self.query(), 'dispatch-in-progress')
+                    if not resume_while_held:
+                        output, error = receiver.communicate('release\n', timeout=10)
+                        self.assertEqual(receiver.returncode, 0, error)
+                    output, error = probe.communicate('resume\n', timeout=10)
+                    self.assertEqual(probe.returncode, 0, error)
+                    self.assertEqual(json.loads(output), 'dispatch-in-progress' if resume_while_held else None)
+                    if resume_while_held:
+                        output, error = receiver.communicate('release\n', timeout=10)
+                        self.assertEqual(receiver.returncode, 0, error)
+                    self.assertIsNone(self.query())
+                    lock, refused = spawns.acquire(self.root, 'builder', self.subject, None, [])
+                    self.assertIsNone(refused)
+                    lock.close()
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                        child.communicate(timeout=10)
+        self.assertEqual(self.snapshot(), before, 'probe/acquire emitted events or changed files')
+
+
+if __name__ == '__main__':
+    unittest.main()

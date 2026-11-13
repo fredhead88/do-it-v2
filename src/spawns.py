@@ -25,6 +25,12 @@ CONFLICTS = {"builder": {"builder", "grader", "reviewer"},
 
 _active_view = ContextVar("dispatch_ledger_view", default=None)
 
+def _read_events(**kwargs):
+    """One ledger read site for invocation views and uncached advisory queries."""
+    import fold
+    return fold.read_events(**kwargs)
+
+
 class LedgerView(list):
     """One invocation's events, with a single lazy post-backend replacement."""
 
@@ -35,9 +41,8 @@ class LedgerView(list):
         self.refreshed = False
 
     def current(self):
-        import fold
         if not self.loaded or self.after_backend and not self.refreshed:
-            events = fold.read_events()
+            events = _read_events()
             self[:] = events
             self.loaded = True
             if self.after_backend:
@@ -71,8 +76,7 @@ def current_events(events=None):
     view = _active_view.get()
     if view is not None:
         return view.current()
-    import fold
-    return fold.read_events()
+    return _read_events()
 
 def with_dispatch_view(fn):
     @wraps(fn)
@@ -248,6 +252,41 @@ def lock_held(subject, root=None):
         return False
     except OSError:
         return True
+
+
+def would_conflict(subject, role, *, events=None, now=None, root=None, worktree=None):
+    """Read-only readiness snapshot, never authorization for a later dispatch.
+
+    Explicit events/time avoid a fresh ledger read; root selects the lock and
+    registered worktrees. Without events, use the normal uncached event reader
+    so even its disposable cache lock cannot interfere with dispatch.
+    """
+    import datetime
+    from pathlib import Path
+    import fold
+    import project_scope
+
+    if role not in CONFLICTS:
+        return None
+    root = Path(root) if root is not None else fold.ROOT
+    try:
+        events = list(_read_events(use_cache=False) if events is None else events)
+        now = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+        if worktree is None:
+            worktree = default_cwd(role, subject, project_scope.subject_project(events, subject), root)
+        worktree = resolve_cwd(worktree, root)
+        open_ = open_spawns(events, now)
+        for spawn in open_:
+            if spawn.get('worktree'):
+                spawn['worktree'] = resolve_cwd(spawn['worktree'], root)
+        # Match acquire's precedence: a held subject lock wins over ledger state.
+        if lock_held(subject, root):
+            return 'dispatch-in-progress'
+        if conflict(role, subject, worktree, open_):
+            return 'duplicate-dispatch'
+        return None
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return 'dispatch-in-progress'
 
 
 class ClearedNotMet(Exception):

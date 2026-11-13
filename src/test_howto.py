@@ -167,10 +167,17 @@ class HowtoTests(unittest.TestCase):
                      'Receiver alone reclaims and rechecks'):
             self.assertIn(fact, page)
 
+    def test_read_only_spawn_readiness_entry(self):
+        page = ' '.join(howto.render(str(REPO)).split())
+        for fact in ('would_conflict(subject, role)', '/proc/locks', 'without taking a flock',
+                     'creating a lock file or writing ledger events', 'dispatch-in-progress',
+                     'acquire/gate remain the atomic receiver checks'):
+            self.assertIn(fact, page)
+
     def test_ac3_page_budget(self):
         for repo in (self.repo, REPO):
             page = howto.render(str(repo))
-            self.assertLessEqual(len(page.splitlines()), 140)
+            self.assertLessEqual(len(page.splitlines()), 142)
             self.assertTrue(all(len(line) <= 100 for line in page.splitlines()))
             self.assertIn('doit howto', page.split('\n\n')[1])
             self.assertEqual(page.count('\n## '), 6)
