@@ -104,7 +104,7 @@ def render(repo: str) -> str:
             current = ''
         current += ('; ' if current else '') + item
     lines.extend(_wrap(current, initial='', subsequent='  '))
-    lines.extend(['', '## Cron manifest',
+    lines.extend(['## Cron manifest',
                   'Source: `crons.toml`. Name | schedule | where | path, then command.'])
     # Pack rows together, keeping each metadata tuple intact where it fits.
     # Commands retain two spaces after metadata and ordinary word wrapping.
@@ -157,6 +157,9 @@ def render(repo: str) -> str:
                        'A moved ref needs re-gating; failed merge is aborted. cli_gate uses doit gate; '
                        'caller owns queue selection and tick wiring.'))
     lines.extend(_wrap('`src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.'))
+    lines.extend(_wrap('`src/spawns.py`: would_conflict(subject, role) reads shared conflict policy and Linux '
+                       '/proc/locks without taking a flock, creating a lock file or writing ledger events. '
+                       'Unreadable state holds with dispatch-in-progress; acquire/gate remain the atomic receiver checks.'))
     return '\n'.join(lines) + '\n'
 
 

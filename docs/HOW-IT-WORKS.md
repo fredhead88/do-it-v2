@@ -35,7 +35,6 @@ Source: `lane_rules.toml`. Name | action | actor | limit_min.
 - rebuild | dispatch-builder | tick | 15; - regrade | dispatch-grader | tick | 15
 - close | spec-killed | tick | 60; - wave-held | none | none | 10
 - dependency-held | none | none | 10; - sweep-check | sweep-check | tick | 120
-
 ## Cron manifest
 Source: `crons.toml`. Name | schedule | where | path, then command.
 - tick | */{tick_min} * * * * | user | {doit}  DOIT_ROOT={root} {doit} cron-run tick -- {doit} tick
@@ -138,3 +137,6 @@ Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; 
   gate with unchanged main/branch shas; merge --no-ff, emit shipped. A moved ref needs re-gating;
   failed merge is aborted. cli_gate uses doit gate; caller owns queue selection and tick wiring.
 - `src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.
+- `src/spawns.py`: would_conflict(subject, role) reads shared conflict policy and Linux /proc/locks
+  without taking a flock, creating a lock file or writing ledger events. Unreadable state holds with
+  dispatch-in-progress; acquire/gate remain the atomic receiver checks.
