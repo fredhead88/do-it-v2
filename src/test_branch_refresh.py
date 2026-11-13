@@ -528,16 +528,122 @@ class TestAC8(unittest.TestCase):
                              body_sha256=hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest())))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class TestReworkPendingPreflight(unittest.TestCase):
     """A rework newer than the last DONE hand-in is never swallowed by a recut (Thinker 2026-11-10)."""
     SID = 'L-spec-9790'
 
     def rows(self, *items):
         return [dict(subject=self.SID, ts=ts, type=t, **extra) for ts, t, extra in items]
+
+    def signed(self, ac, body):
+        data = json.dumps(body, sort_keys=True).encode()
+        print(json.dumps(dict(url='fixture://conflict-rework/' + ac, status=0,
+                             body_sha256=hashlib.sha256(data).hexdigest(), body_excerpt=body)))
+
+    def test_branch_preflight_skips_rebase_when_rework_pending(self):
+        import dispatch_builder
+        fixture = Fixture('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        (fixture.tree / 'base').write_text('conflicting builder change\n')
+        fixture.commit('builder conflict', fixture.tree)
+        before = fixture.git('rev-parse', 'HEAD', cwd=fixture.tree)
+        conflict = subprocess.run(['git', '-C', str(fixture.tree), 'rebase', fixture.main],
+                                  capture_output=True, text=True)
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertIn('CONFLICT', conflict.stdout)
+        fixture.git('rebase', '--abort', cwd=fixture.tree)
+        events = fixture.events + [dict(type='decision', subject=fixture.sid, rework='yes',
+                                        ts=(fixture.now + timedelta(seconds=1)).isoformat())]
+        runtime = SimpleNamespace(pending_conflict_rework=dispatch_builder.pending_conflict_rework)
+        args = SimpleNamespace(subject=fixture.sid, effective_base_sha=fixture.main)
+        failures = []
+        # Record commands while executing real Git: no status or write may occur.
+        with patch('dispatch_builder.subprocess.run', wraps=subprocess.run) as commands:
+            result = dispatch_builder.branch_preflight(runtime, args, fixture.tree, events,
+                                                       lambda *a, **k: failures.append((a, k)))
+        self.assertIsNone(result)
+        self.assertEqual(failures, [])
+        self.assertEqual(commands.call_args_list, [])
+        self.assertEqual(fixture.git('rev-parse', 'HEAD', cwd=fixture.tree), before)
+        self.assertEqual(fixture.git('rev-parse', fixture.branch), before)
+        self.assertEqual(fixture.git('branch', '--list', 'backup/*'), '')
+        for name in ('rebase-merge', 'rebase-apply'):
+            self.assertFalse(Path(fixture.git('rev-parse', '--path-format=absolute', '--git-path',
+                                             name, cwd=fixture.tree)).exists())
+        self.signed('AC1', dict(real_conflict=True, git_commands=0, failures=failures,
+                               unchanged_head=True, unchanged_branch=True, backup_branches=0))
+
+    def failure_history(self):
+        return self.rows(('2026-11-10T10:00:00Z', 'build-done', dict(status='DONE')),
+                         *[(f'2026-11-10T11:0{i}:00Z', 'spawn-failed',
+                            dict(role='builder', reason='branch-not-descendant')) for i in range(3)])
+
+    def test_three_branch_failures_hold_and_escalate_once(self):
+        import autodispatch
+        import dispatch
+        import tick
+        events = self.failure_history()
+        self.assertIsNone(autodispatch._automatic_hold(events[:-1], events[:-1]))
+        self.assertIn('branch-not-descendant x3', autodispatch._automatic_hold(events, events))
+        released = events + self.rows(('2026-11-10T12:00:00Z', 'decision', dict(rework='yes')))
+        self.assertIsNone(autodispatch._automatic_hold(released, released))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'events').mkdir()
+            with patch.multiple(fold, ROOT=root, EVENTS=root / 'events'), \
+                 patch.dict(os.environ, DOIT_ROOT=str(root), DOIT_NO_POKE='1'):
+                now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+                # The compatibility pass and tick's recovery pass share the writer.
+                autodispatch.run(events, {}, now, dry_run=True)
+                self.assertFalse(tick.tick_path().exists())
+                with patch('tick.run_steps', return_value=[]) as steps:
+                    autodispatch.run(events, {}, now)
+                    autodispatch.run(iter(events), {}, now)
+                    self.assertEqual(list(steps.call_args.args[0]), events)
+                autodispatch.redispatch_dead(events, {}, now)
+                rows = [json.loads(line) for line in tick.tick_path().read_text().splitlines()]
+                self.assertEqual(len(rows), 1)
+                self.assertEqual({k: rows[0][k] for k in ('type', 'kind', 'owner', 'role', 'failure_ts')},
+                                 dict(type='escalation-blocking', kind='branch-not-descendant-exhausted',
+                                      owner='thinker', role='builder', failure_ts=events[-1]['ts']))
+                self.assertIsNone(fold.required_reason(rows[0]))
+                self.assertIsNone(fold.admits(rows[0], 'tick'))
+                autodispatch.redispatch_dead(released, {}, now)
+                self.assertEqual(len(tick.tick_path().read_text().splitlines()), 1)
+                # Hold both direct launches and stale precomputed tick Steps.
+                import nextstep
+                step = nextstep.Step(item=self.SID, item_kind='spec', stage='building', state='action',
+                                     owner='tick', action='build', reason='fixture', trigger='fixture:1',
+                                     clears=None, since=events[0]['ts'])
+                calls = []
+                runner = lambda *a, **k: calls.append(a)
+                runner.events = events
+                self.assertIsNone(tick.launch(step, dispatcher=runner))
+                result = tick.run_steps(events, {self.SID: dict(state='written')}, now,
+                                        dispatcher=runner, steps=[step], dry_run=True)
+                self.assertTrue(any('branch-not-descendant' in line for line in result), result)
+                self.assertEqual(calls, [])
+        self.signed('AC2', dict(two='eligible', three='held: branch-not-descendant x3',
+                               rework='eligible', escalations=1, repeat_escalations=0,
+                               direct_launches=0, step_launches=0))
+
+    def test_branch_failure_epoch_and_unreadable_timestamp(self):
+        import autodispatch
+        events = self.failure_history()
+        done = self.rows(('2026-11-10T12:00:00Z', 'build-done', dict(status='DONE')))
+        self.assertIsNone(autodispatch._automatic_hold(events + done, events + done))
+        self.assertIn('x3', autodispatch._automatic_hold(events[1:], events[1:]))
+        blocked = events + self.rows(('2026-11-10T12:00:00Z', 'build-done', dict(status='BLOCKED')))
+        self.assertIn('x3', autodispatch._automatic_hold(blocked, blocked))
+        same = events + self.rows((events[-1]['ts'], 'decision', dict(rework='yes')))
+        self.assertIn('x3', autodispatch._automatic_hold(same, same))
+        wrong = [dict(e, reason='other') for e in events]
+        self.assertIsNone(autodispatch._automatic_hold(wrong, wrong))
+        invalid = [dict(e, ts='unreadable') if i == 3 else e for i, e in enumerate(events)]
+        self.assertIn('x3', autodispatch._automatic_hold(invalid, invalid))
+        naive = [dict(e, ts='2026-11-10T11:02:00') if i == 3 else e for i, e in enumerate(events)]
+        self.assertIn('x3', autodispatch._automatic_hold(naive, naive))
 
     def test_rework_pending_ordering(self):
         done = ('2026-11-10T10:00:00+00:00', 'build-done', dict(status='DONE'))
@@ -564,3 +670,7 @@ class TestReworkPendingPreflight(unittest.TestCase):
         recut.assert_not_called()
         git.assert_not_called()
         self.assertEqual(failures, [])
+
+
+if __name__ == '__main__':
+    unittest.main()

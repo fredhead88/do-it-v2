@@ -80,9 +80,16 @@ class TestBaseRefreshActions(unittest.TestCase):
                             if prior == 'rework':
                                 rows.insert(3, event('conflict-rework', -80))
                             step = selected(rows)
+                            exhausted = (kind == 'spawn-failed' and diagnostic == 'branch-not-descendant'
+                                         and count == 3)
                             self.assertEqual((step.owner, step.state, step.action, step.stage),
+                                             ('tick', 'hold', None, 'building') if exhausted else
                                              ('tick', 'action', 'build', 'building'))
-                            self.assertIsNone(step.clears)
+                            if exhausted:
+                                self.assertIn('branch-not-descendant x3', step.reason)
+                                self.assertTrue(step.clears)
+                            else:
+                                self.assertIsNone(step.clears)
                             self.assertIsNone(step.retry_at)
                             self.assertEqual((step.trigger, step.since), (rows[-1]['_src'], rows[-1]['ts']))
                             self.assertEqual(ns.next_steps(rows, specs(rows), NOW, lane_rules.load()), [step])
@@ -235,13 +242,19 @@ class TestBaseRefreshLaunch(ScratchLaunch):
                         if prior == 'rework':
                             rows.insert(3, event('conflict-rework', -80))
                         outcome = tick.run_steps(rows, specs(rows), NOW, dispatcher=self.runner)
-                        self.assertTrue(any(line.startswith('acted '+SID+' build') for line in outcome), outcome)
-                        commands = [a[1] for a in self.calls if a[0] == 'doit']
-                        self.assertEqual(commands, ['readiness', 'packet', 'dispatch'])
-                        argv = self.calls[-1]
-                        self.assertEqual(argv[:5], ['doit', 'dispatch', '--detach', 'builder', SID])
-                        self.assertEqual(argv[argv.index('--cwd')+1], str(self.wt))
-                        self.assertEqual(self.calls[-2][-2:], ['--base-sha', self.main])
+                        exhausted = (kind == 'spawn-failed' and diagnostic == 'branch-not-descendant'
+                                     and count == 3)
+                        if exhausted:
+                            self.assertTrue(any('branch-not-descendant x3' in line for line in outcome), outcome)
+                            self.assertEqual(self.calls, [])
+                        else:
+                            self.assertTrue(any(line.startswith('acted '+SID+' build') for line in outcome), outcome)
+                            commands = [a[1] for a in self.calls if a[0] == 'doit']
+                            self.assertEqual(commands, ['readiness', 'packet', 'dispatch'])
+                            argv = self.calls[-1]
+                            self.assertEqual(argv[:5], ['doit', 'dispatch', '--detach', 'builder', SID])
+                            self.assertEqual(argv[argv.index('--cwd')+1], str(self.wt))
+                            self.assertEqual(self.calls[-2][-2:], ['--base-sha', self.main])
                         self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.wt), self.tip)
                         self.assertFalse(any(a[0] == 'git' for a in self.calls))
                         results.append([kind, role, diagnostic, count, prior, self.calls[:]])
