@@ -373,6 +373,16 @@ bgr(){  # background rehearsal (one at a time): the loop keeps launching/process
 fill(){  # keep one rehearsed batch ready on top of $1
   base=$1; ls $Q/*.batch >/dev/null 2>&1 && return; [ -f $Q/rehearsing ] && return
   p=$(pick $base); [ -z "$p" ] && { log "ready list empty"; sleep 60; return; }; bgr $base $p; }
+ci_green(){  # full-CI rehearsal must finish green on this base and exact candidate tree
+  local batch=$1 candidate tree verdict pattern
+  [ -f "$batch.ci" ] || return 1
+  [ "$(grep '^exit=' "$batch.ci" | tail -1)" = 'exit=0' ] || return 1
+  candidate=$(find_cand "$batch"); valid_sha "$candidate" || return 1
+  tree=$(git -C "$IR" rev-parse "$candidate^{tree}" 2>/dev/null) || return 1
+  verdict=$(grep '^REHEARSED ' "$batch.ci" | tail -1)
+  pattern="^REHEARSED [^[:space:]]+ green( \(flakes: [0-9]+\))? base=$base candidate=$candidate tree=$tree$"
+  [[ "$verdict" =~ $pattern ]]
+}
 ci_red(){  # ci_red <batchfile>: a finished-red full-CI rehearsal of the head batch
   local h=$1 base specs ids master cover n att s hold bid
   read -r base specs < "$h"; bid=$(basename "$h")
@@ -427,6 +437,7 @@ loop_once(){  # one pass of the driver loop
       [ -n "$c" ] && [ ! -f $Q/nostack-${c:0:12} ] && { log "stacking next batch on ${c:0:12} (candidate of $(cut -d' ' -f2- $h))"; p=$(pick $c); [ -n "$p" ] && bgr $c $p; }; fi
     sleep 15; return 0; fi
   if [ -f $h.ci ] && ! grep -q '^exit=0' $h.ci; then ci_red "$h"; return 0; fi
+  if ! ci_green "$h"; then log "ci-admission-hold $(basename "$h"): missing scoped green evidence for candidate tree"; return 0; fi
   id=win-$(date -u +%Y%m%d)-r$(date -u +%H%M); sp=$(printf 'L-spec-%s,' $specs); sp=${sp%,}
   log "LAUNCH $id: $specs"; cp $h $Q/current.bat; rm -f $h $h.ci $h.cand; echo $id > $Q/current; tg "window $id started: $specs. CI takes about 40 minutes."
   (cd $D && DOIT_ACTOR=thinker DOIT_WINDOW_MAX_MERGES=$(echo "$sp" | tr "," "\n" | grep -c .) PYTHONUNBUFFERED=1 nice ./doit gate-window $id --project "$PROJECT" --specs $sp > $Q/$id.log 2>&1; echo "exit=$?" >> $Q/$id.log) &

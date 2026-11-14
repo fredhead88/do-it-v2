@@ -137,9 +137,19 @@ class WiringTests(unittest.TestCase):
         base = subprocess.check_output(["git", "merge-base", "HEAD", "main"],
                                        cwd=ROOT, text=True).strip()
         original = subprocess.check_output(["git", "show", f"{base}:lane/rloop.sh"], cwd=ROOT)
-        self.assertEqual((ROOT / "lane/rloop.sh").read_bytes(), original)
+        current = (ROOT / "lane/rloop.sh").read_bytes()
+        # L-spec-2267 grants precisely the scoped-CI admission function and its
+        # call before LAUNCH. Keep the original whole-file invariant elsewhere.
+        start, end = current.index(b"ci_green(){"), current.index(b"ci_red(){")
+        admission = current[start:end]
+        self.assertEqual(hashlib.sha256(admission).hexdigest(),
+                         "1269b95d2f86c8f22d69a7ed85c1f7c12ba07dcf05c3eef4b2c6011937b255d0")
+        call = (b'  if ! ci_green "$h"; then log "ci-admission-hold $(basename "$h"): '
+                b'missing scoped green evidence for candidate tree"; return 0; fi\n')
+        self.assertEqual(current.count(call), 1)
+        self.assertEqual((current[:start] + current[end:]).replace(call, b""), original)
         evidence("AC3-wiring", "bash -n passed; source < wait < resolve < DONE; "
-                 "attrseq mode 100755; rloop.sh byte-identical to base")
+                 "attrseq mode 100755; rloop.sh differs only by L-spec-2267 CI admission")
 
 
 if __name__ == "__main__":

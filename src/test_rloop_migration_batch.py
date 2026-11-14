@@ -667,7 +667,10 @@ class TestMigrationChain(Harness):
         self.stub("preflight", "echo 'PREFLIGHT-UNDETERMINED timeout'; exit 2")
         self.run_sh("loop_once")
         self.assertEqual([l for l in self.rehearsals() if "--rehearse" not in l], [])   # clean gate alone launches nothing
-        self.queue_batch("1.batch", tip, [2981], ci="REHEARSED rh-1 green base=x\nexit=0\n")
+        candidate = git(self.ir, "rev-parse", "l-spec-2981")
+        tree = git(self.ir, "rev-parse", candidate + "^{tree}")
+        self.queue_batch("1.batch", tip, [2981], cand=candidate,
+                         ci=f"REHEARSED rh-1 green base={tip} candidate={candidate} tree={tree}\nexit=0\n")
         self.run_sh("loop_once")
         lines = [l for l in self.rehearsals() if "--rehearse" not in l]
         for _ in range(50):
