@@ -136,6 +136,10 @@ def render(repo: str) -> str:
     lines.extend(['`src/close_reviews.py`: oldest-verdict replans, two active slots; holds retain queue entries.',
                   '`charter-replan`: tick-only; held/released: planner/thinker/operator with nonblank why.',
                   '`relay.plannable`: strict later release; hold/capacity waits preserve existing intake gates.'])
+    lines.extend(['`agents/planner.md`: `charter-replan` carries `verdict_src`, `findings`, `uncovered` ids.',
+                  'Same-charter corrective specs use normal audit/handoff; otherwise `charter-replan-held` with why.',
+                  'Tooling-only gaps: hold plus `brief`, never product correctives or bare `l1-complete`.',
+                  'Tick replans enter the Planner queue; Executor findings still have no return path.'])
     lines.extend(['`src/stall_alarm.py`: pure plan/dispatch/close/autodispatch/merge clocks; `stall-thresholds.toml`.',
                   'build/grade/review/deploy/owed_checks: shared readers; failed readings are undetermined.',
                   '`flow_health.daily`: M1 daily summary remains; no per-spec `stuck-over-1h` lessons.'])

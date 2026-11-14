@@ -116,6 +116,16 @@ class HowtoTests(unittest.TestCase):
                        'strict later release', 'hold/capacity waits preserve existing intake gates'):
             self.assertIn(marker, page)
 
+    def test_planner_replan_outcomes(self):
+        page = ' '.join(howto.render(str(REPO)).split())
+        for marker in ('`agents/planner.md`', '`verdict_src`, `findings`, `uncovered` ids',
+                       'Same-charter corrective specs use normal audit/handoff',
+                       '`charter-replan-held` with why', 'Tooling-only gaps: hold plus `brief`',
+                       'never product correctives or bare `l1-complete`',
+                       'Tick replans enter the Planner queue',
+                       'Executor findings still have no return path'):
+            self.assertIn(marker, page)
+
     def test_base_failure_handoff_entry(self):
         page = howto.render(str(REPO))
         for marker in ('DONE+notes', 'BLOCKED+base_only/cited',
