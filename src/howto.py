@@ -136,6 +136,8 @@ def render(repo: str) -> str:
     lines.extend(['`src/close_reviews.py`: oldest-verdict replans, two active slots; holds retain queue entries.',
                   '`charter-replan`: tick-only; held/released: planner/thinker/operator with nonblank why.',
                   '`relay.plannable`: strict later release; hold/capacity waits preserve existing intake gates.'])
+    lines.extend(['`src/stall_alarm.py`: pure plan/dispatch/close/autodispatch/merge clocks; `stall-thresholds.toml`.',
+                  '`flow_health.daily`: M1 daily summary remains; no per-spec `stuck-over-1h` lessons.'])
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:

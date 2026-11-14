@@ -122,6 +122,13 @@ class HowtoTests(unittest.TestCase):
                        'current proof with `n_new=0`', 'existing gates apply'):
             self.assertIn(marker, page)
 
+    def test_unit_one_stall_clocks_and_m1_summary(self):
+        page = ' '.join(howto.render(str(REPO)).split())
+        for marker in ('src/stall_alarm.py', 'stall-thresholds.toml',
+                       'plan/dispatch/close/autodispatch/merge clocks',
+                       'M1 daily summary remains; no per-spec `stuck-over-1h` lessons'):
+            self.assertIn(marker, page)
+
     def test_direct_merge_entry(self):
         page = ' '.join(howto.render(str(REPO)).split())
         for marker in ('src/direct_merge.py', 'merge_one', 'one do-it-v2 queue row',

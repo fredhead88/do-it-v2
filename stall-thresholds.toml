@@ -1,0 +1,14 @@
+# Seconds; each duration is independently configurable. Strictly greater fires.
+plan_idle = 10800
+plan_in_planning = 21600
+dispatch = 2700
+close = 86400
+autodispatch = 900
+autodispatch_idle = 1800
+merge = 7200
+build = 21600
+grade = 21600
+review = 21600
+deploy = 86400
+owed_checks = 86400
+realert = 10800

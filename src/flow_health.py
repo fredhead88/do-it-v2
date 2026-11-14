@@ -204,17 +204,6 @@ def daily(events: list[dict], now: datetime) -> list[dict]:
             bodies.append(dict(type='health-alarm', subject=f'flow-health-{measure}-{day}', alarm='flow-health',
                                severity='summary', line=' '.join(line.split())[:200], measure=measure, day=day,
                                state=state, cases=cases, undetermined=reasons, flow_key=f'{measure}:{day}'))
-        if measure == 'M1':
-            for case in cases:
-                spec, first, last, count = (case[k] for k in ('spec', 'first_sample', 'last_sample', 'samples'))
-                body = dict(type='lesson', subject=spec, problem='stuck-over-1h',
-                            why=f'M1 {day}: STUCK from {first} to {last}, {count} consecutive hourly samples',
-                            measure='M1', day=day, flow_key=f'M1:{day}:{spec}:{first}')
-                history = sorted((e for e in events if e.get('subject') == spec and _time(e.get('ts')) is not None),
-                                 key=lambda e: _time(e['ts']))
-                if history and history[-1].get('project') is not None:
-                    body['project'] = history[-1]['project']
-                bodies.append(body)
         result.extend(b for b in bodies if b['flow_key'] not in existing)
     return result
 

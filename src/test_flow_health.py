@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Hermetic daily flow judgements and production ledger round trips."""
+import atexit
 import contextlib
 import hashlib
 import io
@@ -13,6 +14,13 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+# Isolate module-level readers as well as each test and child process.
+_BOOT = tempfile.TemporaryDirectory(prefix='flow-health-import-')
+atexit.register(_BOOT.cleanup)
+os.environ['DOIT_ROOT'] = _BOOT.name
+os.environ.pop('DOIT_PROJECT', None)
+os.environ.pop('DOIT_LEDGER_FILE', None)
 
 import cron_run
 import crons
@@ -122,9 +130,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(alarm['state'], 'breach')
         self.assertEqual([(c['spec'], c['samples']) for c in alarm['cases']], [('A', 3), ('D', 2)])
         lessons = [b for b in bodies if b['type'] == 'lesson']
-        self.assertEqual([b['subject'] for b in lessons], ['A', 'D'])
-        self.assertEqual(lessons[0]['project'], 'fixture')
-        self.assertTrue(all(b['problem'] == 'stuck-over-1h' for b in lessons))
+        self.assertEqual(lessons, [])
         self.assertTrue(all('actor' not in b for b in bodies))
         self.assertEqual(len({b['flow_key'] for b in bodies}), len(bodies))
         self.assertEqual(flow.MEASURES, ('M1', 'M2', 'M3', 'M5'))
@@ -289,15 +295,16 @@ class FlowTests(unittest.TestCase):
         self.install([event('spec-written', 'P', START - timedelta(days=1), spawn='L-spec-writer-1'), event('build-started', actor='builder')])
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), 'flow-health: day=2026-10-26 M1=breach M2=breach M3=ok M5=ok appended=4')
+        self.assertEqual(result.stdout.strip(), 'flow-health: day=2026-10-26 M1=breach M2=breach M3=ok M5=ok appended=2')
         raw = (fold.EVENTS / 'L-health-local.jsonl').read_bytes()
         self.assertTrue(all('actor' not in json.loads(line) for line in raw.splitlines()))
         code = 'import sys,json;sys.path.insert(0,sys.argv[1]);import fold;print(json.dumps([e for e in fold.read_events() if e.get("flow_key")]))'
         fresh = subprocess.run(['/usr/bin/python3', '-I', '-c', code, str(Path(__file__).resolve().parent)], env=dict(os.environ), text=True, capture_output=True)
         self.assertEqual(fresh.returncode, 0, fresh.stderr)
         events = json.loads(fresh.stdout)
-        self.assertEqual(len(events), 4)
+        self.assertEqual(len(events), 2)
         self.assertTrue(all(e['actor'] == 'health' for e in events))
+        self.assertTrue(all(e['type'] == 'health-alarm' for e in events))
         self.assertIn('appended=0', self.cli().stdout)
         dry = self.cli('--dry-run')
         self.assertEqual(dry.returncode, 0, dry.stderr)
