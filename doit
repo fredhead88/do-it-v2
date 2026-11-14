@@ -13,6 +13,7 @@ case "${1:-board}" in
   precheck) shift; exec python3 "$SRC/precheck.py" "$@" ;;
   gate-window) shift; exec python3 "$SRC/window_gate.py" "$@" ;;
   prequeue) shift; exec python3 "$SRC/prequeue.py" "$@" ;;
+  window-bisect) shift; exec python3 "$SRC/window_bisect.py" "$@" ;;
   base-red) shift; exec python3 "$SRC/base_red.py" "$@" ;;
   guards-live) shift; exec python3 "$SRC/guards_live.py" "$@" ;;
   merge-news) shift; exec python3 "$SRC/merge_news.py" "$@" ;;
@@ -279,6 +280,8 @@ doit — a ledger that derives state, and the guards that read it
                                            order ready specs by prerequisites and chain weight (read-only)
   doit gate-window <id> --project albert-scott [--specs A,B,C]
                                            verify a merge window's candidate tip before master moves (exit 0/1/2/3/4)
+  doit window-bisect <rh-id> --project <p> --specs A,B --batch <exact.batch.red> --failed-ids <json-file>
+                                           diagnose a red rehearsal and persist attributed parks or safe retries
   doit throughput [--hours N] [--json]    read-only merge queue, wait, rate and verification metrics
   doit rehearsal-replay --csv FILE         offline old-vs-new flow replay of a rehearsal CSV (exit 0/1/2)
   doit speed-report --project <p> --since <date> --until <date> [--rloop-log PATH]

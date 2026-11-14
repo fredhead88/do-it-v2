@@ -307,6 +307,8 @@ EMITS["ci-runner-set"] = {"ci-runner", "operator"}
 EMITS["bill-check"] = {"gh-bill"}
 EMITS["window-tree-verified"] = {"executor", "operator"}
 EMITS["window-rehearsed"] = {"executor", "operator"}
+EMITS["batch-member-parked"] = {"executor", "operator"}
+EMITS["batch-member-released"] = {"executor", "operator"}
 EMITS["window-bisected"] = {"executor", "operator"}
 EMITS["window-targeted-attribution"] = {"executor", "operator"}
 EMITS["member-verdict"] = {"executor", "operator"}  # L-spec-2012: gate actor convention
@@ -366,6 +368,8 @@ REQUIRED_ROWS = {
     "window-tree-verified": ("window", "sha", "tree"),
     "member-verdict": ("spec", "window", "tree", "state"),
     "window-rehearsed": ("base_sha", "specs", "state"),
+    "batch-member-parked": ("spec", "batch", "attributed", "ids", "project"),
+    "batch-member-released": ("spec", "batch", "why", "project"),
     "window-bisected": ("window", "halves"),
     "window-targeted-attribution": ("window", "candidate", "base_sha", "ids"),
     "window-run-minutes": ("window", "candidate", "minutes_source"),
