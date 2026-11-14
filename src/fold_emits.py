@@ -473,3 +473,32 @@ REQUIRED_ROWS["pane-dialog-unknown"] = ("pane", "role", "prompt", "first_seen_at
 
 EMITS["preflight-swept"] = {"executor", "operator", "builder", "thinker"}
 REQUIRED_ROWS["preflight-swept"] = ("batch", "base", "stage")
+
+# Queue replans are tick-owned; a hold is an explicit planning decision.
+EMITS['charter-replan'] = {'tick'}
+REQUIRED_ROWS['charter-replan'] = ('verdict_src', 'findings', 'uncovered')
+for _kind in ('charter-replan-held', 'charter-replan-released'):
+    EMITS[_kind] = {'planner', 'thinker', 'operator'}
+    REQUIRED_ROWS[_kind] = ('why',)
+
+
+def typed_required_reason(e):
+    """Validation for new typed payloads; old required-field semantics stay put."""
+    import re
+    kind = e.get('type')
+    if kind == 'window-verification-result':
+        return window_result_reason(e)
+    if kind not in ('charter-replan', 'charter-replan-held', 'charter-replan-released'):
+        return None
+    if not isinstance(e.get('subject'), str) or not re.fullmatch(r'L-charter-[0-9]{4}', e['subject']):
+        return kind + ' needs an exact charter subject'
+    if kind == 'charter-replan':
+        if not isinstance(e.get('verdict_src'), str) or not e['verdict_src'].strip():
+            return kind + ' needs nonblank verdict_src'
+        if not isinstance(e.get('findings'), list) or not all(isinstance(f, dict) for f in e['findings']):
+            return kind + ' needs list-of-dict findings'
+        if not isinstance(e.get('uncovered'), list) or not all(isinstance(r, str) for r in e['uncovered']):
+            return kind + ' needs list-of-string uncovered'
+    elif not isinstance(e.get('why'), str) or not e['why'].strip():
+        return kind + ' needs nonblank string why'
+    return None

@@ -71,15 +71,15 @@ class Scratch(unittest.TestCase):
 
     def baseline(self):
         repo = Path(__file__).resolve().parent.parent
-        # Pin the parent of the reader optimization, so later commits cannot
-        # turn the comparison into optimized code versus itself.
+        # Pin git merge-base HEAD main as resolved at dispatch. Moving main after
+        # merge must not turn this comparison into candidate versus itself.
         before = subprocess.check_output(['git', '-C', str(repo), 'rev-parse',
-                                          '789959d0f286ccbb61042096d54766df4239e1a0'],
+                                          '64ad99a8bfca3ecb5d41b1228d1cbb1ad1960345'],
                                          text=True).strip()
-        merged = subprocess.check_output(['git', '-C', str(repo), 'log', before,
-                                          '--format=%s', '--grep=L-charter-0086'], text=True)
-        self.assertEqual(merged, '', 'resolve actual first charter merge parent before extending this fixture')
-        print('BEFORE_SHA:', before, '(pinned reader optimization baseline)', flush=True)
+        merged = subprocess.check_output(['git', '-C', str(repo), 'merge-base',
+                                          'HEAD', before], text=True).strip()
+        self.assertEqual(merged, before, 'pinned dispatch base must remain an ancestor')
+        print('BEFORE_SHA:', before, '(pinned dispatch baseline)', flush=True)
         source = self.root / 'baseline'
         source.mkdir()
         archive = subprocess.check_output(['git', '-C', str(repo), 'archive', before,
@@ -636,7 +636,8 @@ def _steps_fixture(scenario, mode='steps', temperature='cold'):
                     contention=contention, snapshots=len(snapshots), snapshots_distinct=len({id(x) for x in snapshots}),
                     reads=len(read_calls),
                     source_hashes={name: hashlib.sha256((source / name).read_bytes()).hexdigest()
-                                   for name in ('tick.py', 'look.py', 'push_origin.py')})
+                                   for name in ('tick.py', 'look.py', 'push_origin.py',
+                                                'close_reviews.py', 'relay.py', 'fold.py', 'fold_emits.py')})
     finally:
         case.doCleanups()
 
@@ -730,12 +731,12 @@ class TestDispatchEquality(Scratch):
                                     'baseline and candidate must be different code')
                 self.assertEqual(cand['requests'], base['requests'])
                 self.assertEqual(cand['dispatch_results'], base['dispatch_results'])
-                # Base plans twice per pass (dispatch, then todo); the first plan is
-                # the dispatch input, the candidate's only plan.
+                # The pinned dispatch base already has one planning pass.
+                # Compare every selection and clock, including recovery passes.
                 passes = len(cand['selected'])
-                self.assertEqual(len(base['selected']), 2 * passes)
-                self.assertEqual(cand['selected'], base['selected'][::2])
-                self.assertEqual(cand['clocks'], base['clocks'][::2])
+                self.assertEqual(len(base['selected']), passes)
+                self.assertEqual(cand['selected'], base['selected'])
+                self.assertEqual(cand['clocks'], base['clocks'])
                 self.assertEqual(cand['todo'], base['todo'])
                 self.assertEqual(cand['lane'], base['lane'])
                 launched = sorted({argv[argv.index('--detach') + 2] for argv in cand['requests']
@@ -817,7 +818,7 @@ class TestPassDedupe(Scratch):
                 self.assertEqual([subject for subject, _ in skipped(cand)], expected)
                 self.assertEqual(cand['violations'], [])
                 self.assertEqual(cand['launch_events_calls'], 0, 'hidden _launch_events body read')
-                self.assertGreater(base['launch_events_calls'], 0, 'fixture must discriminate the base')
+                self.assertEqual(base['launch_events_calls'], 0, 'pinned base already deduplicates held observations')
                 self.assertTrue(cand['pass_state_clear'], 'pass state leaked past _record')
                 self.assertLessEqual(cand['load_count'], 2 * len(cand['heartbeats']) )
                 for row in cand['fresh']['admitted']:
@@ -981,7 +982,7 @@ class TestStepsOnce(Scratch):
                 self.assertEqual(candidate['full_reads'], 1)
             self.assertEqual(candidate['lane'], len(candidate['todo']), scenario)
             if scenario == 'lane edit between dispatch and render':
-                self.assertTrue(any('edited lane rule' in row for row in base['todo']))
+                self.assertTrue(any('line one line two' in row for row in base['todo']))
                 self.assertTrue(any('line one line two' in row for row in candidate['todo']))
                 self.assertEqual(candidate['next_pass_todo'], base['next_pass_todo'])
                 self.assertTrue(any('edited lane rule' in row for row in candidate['next_pass_todo']))

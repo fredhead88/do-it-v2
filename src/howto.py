@@ -133,6 +133,9 @@ def render(repo: str) -> str:
     lines.extend(['`src/loadgate.py` begin_pass: one scratch disk sample, before optional load admission.',
                   'Builder/grader disk holds survive load off/errors; receiver thresholds default to 5/2 GiB.',
                   'Holds use admission.json holding; dry runs never save. Receiver alone reclaims and rechecks.'])
+    lines.extend(['`src/close_reviews.py`: oldest-verdict replans, two active slots; holds retain queue entries.',
+                  '`charter-replan`: tick-only; held/released: planner/thinker/operator with nonblank why.',
+                  '`relay.plannable`: strict later release; hold/capacity waits preserve existing intake gates.'])
     queue = _toml(repo, 'look.toml')['merge_queue']
     parallel, fresh = queue['member_verify_parallel'], queue['verdict_fresh_hours']
     if type(parallel) is not int or parallel <= 0 or isinstance(fresh, bool) or not isinstance(fresh, (int, float)) or fresh <= 0:
@@ -157,9 +160,6 @@ def render(repo: str) -> str:
                        'A moved ref needs re-gating; failed merge is aborted. cli_gate uses doit gate; '
                        'caller owns queue selection and tick wiring.'))
     lines.extend(_wrap('`src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.'))
-    lines.extend(_wrap('`src/spawns.py`: would_conflict(subject, role) reads shared conflict policy and Linux '
-                       '/proc/locks without taking a flock, creating a lock file or writing ledger events. '
-                       'Unreadable state holds with dispatch-in-progress; acquire/gate remain the atomic receiver checks.'))
     return '\n'.join(lines) + '\n'
 
 

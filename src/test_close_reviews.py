@@ -128,9 +128,22 @@ class DueTests(Fixtures):
                 if marker:
                     self.events.append(event(marker, -500))
                 if replan is not None:
-                    self.events.append(event('charter-replan', replan))
+                    self.events.append(dict(event('charter-replan', replan), actor='tick',
+                                            verdict_src='L-charter-reviewer-9901.jsonl:1',
+                                            findings=[], uncovered=[]))
                 wanted = marker in ('cut-written', 'l1-complete') and (replan is None or replan < -500)
                 self.check_due(f'{marker}-replan={replan}', [CID] if wanted else [])
+
+    def test_unauthorized_or_malformed_replans_cannot_block_review(self):
+        valid = replan()
+        for actor in ('builder', 'reviewer', 'executor', 'operator'):
+            self.events.append(dict(valid, actor=actor))
+            self.check_due('unauthorized-replan-'+actor, [CID])
+            self.events.pop()
+        malformed = dict(valid)
+        malformed.pop('findings')
+        self.events.append(malformed)
+        self.check_due('malformed-replan-cannot-block-review', [CID])
 
     def test_close_reopen_and_verdicts(self):
         self.events.append(event('charter-closed', -50))
@@ -532,6 +545,100 @@ def observe_launch(events, spec):
     raise ValueError('cannot-observe: no attributable due tick launch')
 
 
+def gap(cid=CID, seconds=-100, source='L-charter-reviewer-9901.jsonl:1', **fields):
+    return event('charter-review-not-complete', seconds, cid, _src=source,
+                 uncovered_requirement_ids=['R5'], **fields)
+
+
+def replan(cid=CID, seconds=-90, source='L-charter-reviewer-9901.jsonl:1'):
+    return dict(event('charter-replan', seconds, cid), actor='tick',
+                verdict_src=source, findings=[], uncovered=['R5'])
+
+
+class ReplanSelectionTests(Fixtures):
+    def check_selection(self, label, expected):
+        before = json.dumps(self.events, sort_keys=True)
+        actual = cr.replans_due(self.events, NOW)
+        self.assertEqual([e['subject'] for e in actual], expected, label)
+        self.assertEqual(json.dumps(self.events, sort_keys=True), before)
+        report('AC1', label, expected, actual)
+        return actual
+
+    def test_backlog_and_slots(self):
+        self.events = []
+        for n in range(18):
+            cid = f'L-charter-{9800+n}'
+            self.candidate(cid, f'L-spec-{9800+n}', filed=-900)
+            self.events.append(gap(cid, -300+n, f'L-charter-reviewer-{9800+n}.jsonl:1'))
+        self.check_selection('eighteen-backlog-zero-active', ['L-charter-9800', 'L-charter-9801'])
+        self.events.append(replan('L-charter-9800', -90, 'L-charter-reviewer-9800.jsonl:1'))
+        self.check_selection('one-active', ['L-charter-9801'])
+        self.events.append(replan('L-charter-9801', -89, 'L-charter-reviewer-9801.jsonl:1'))
+        self.check_selection('two-active', [])
+
+    def test_ties_payload_and_open_spawn(self):
+        self.candidate('L-charter-9900', 'L-spec-9900')
+        self.events += [gap(CID, spawn='L-charter-reviewer-9901'),
+                        gap('L-charter-9900', source='L-charter-reviewer-9900.jsonl:1')]
+        self.start(seconds=-110)
+        self.check_selection('open-reviewer-deferred', ['L-charter-9900'])
+        self.events += [event('spawn-done', -80, spawn='L-charter-reviewer-9901'),
+                        dict(event('audit-finding', -79, spawn='L-charter-reviewer-9901',
+                                   text='same review'), actor='charter-reviewer'),
+                        dict(event('audit-finding', -78, spawn='L-charter-reviewer-9999',
+                                   text='unrelated'), actor='charter-reviewer')]
+        rows = self.check_selection('closed-reviewer-complete-findings-and-charter-tie',
+                                    ['L-charter-9900', CID])
+        self.assertEqual(rows[1]['verdict_src'], 'L-charter-reviewer-9901.jsonl:1')
+        self.assertEqual(rows[1]['uncovered'], ['R5'])
+        self.assertEqual([f['text'] for f in rows[1]['findings']], ['same review'])
+        self.events = [e for e in self.events if e.get('spawn') != 'L-charter-reviewer-9901']
+        self.events += [gap(source='L-charter-reviewer-9901.jsonl:8'),
+                        dict(event('audit-finding', -79, text='legacy',
+                                   _src='L-charter-reviewer-9901.jsonl:9'), actor='charter-reviewer')]
+        rows = self.check_selection('legacy-file-findings', ['L-charter-9900', CID])
+        self.assertEqual(rows[1]['findings'][0]['text'], 'legacy')
+
+    def test_exclusions(self):
+        original = list(self.events)
+        cases = [('future', [gap(seconds=1)]),
+                 ('serviced', [gap(), replan(), event('l1-complete', -20)]),
+                 ('superseded-complete', [gap(), event('charter-review-complete', -90)]),
+                 ('held', [gap(), event('charter-replan-held', -90, why='waiting')]),
+                 ('retracted', [gap(), event('charter-retracted', -90)]),
+                 ('closed', [gap(), dict(event('charter-closed', -90), actor='tick')]),
+                 ('unregistered-tied-filing', [gap(), event('charter-filed', -600, project='missing')]),
+                 ('unregistered-newest-filing', [gap(), event('charter-filed', -90, project='missing')])]
+        for label, rows in cases:
+            self.events = original + rows
+            self.check_selection(label, [])
+        self.events = original + [dict(gap(), _src='')]
+        with self.assertRaisesRegex(ValueError, 'verdict identity'):
+            cr.replans_due(self.events, NOW)
+        report('AC1', 'missing-verdict-identity-diagnostic', 'ValueError', 'ValueError')
+
+    def test_waiting_release_competes_with_new_verdict(self):
+        # A released younger verdict must not steal the next free slot from
+        # an older verdict that has not received its event yet.
+        self.events = []
+        for n in range(4):
+            cid = f'L-charter-{9800+n}'
+            self.candidate(cid, f'L-spec-{9800+n}')
+            self.events.append(gap(cid, -200+n, f'L-charter-reviewer-{9800+n}.jsonl:1'))
+        for n in (0, 1, 3):
+            self.events.append(replan(f'L-charter-{9800+n}', -100+n,
+                                      f'L-charter-reviewer-{9800+n}.jsonl:1'))
+        self.events += [event('charter-replan-held', -90, 'L-charter-9803', why='wait'),
+                        event('charter-replan-released', -80, 'L-charter-9803', why='resume'),
+                        event('l1-complete', -70, 'L-charter-9800')]
+        self.check_selection('older-new-verdict-before-waiting-release', ['L-charter-9802'])
+        self.events.append(replan('L-charter-9802', -60, 'L-charter-reviewer-9802.jsonl:1'))
+        self.check_selection('new-event-keeps-slot-ahead-of-younger-release', [])
+        state = cr.replan_state(self.events, NOW)
+        self.assertTrue(state['L-charter-9802']['active'])
+        self.assertFalse(state['L-charter-9803']['active'])
+
+
 if __name__ == '__main__':
     if OBSERVING:
         try:
@@ -551,4 +658,16 @@ if __name__ == '__main__':
             print(str(exc))
             sys.exit(2)
     else:
+        groups = {'AC1': ReplanSelectionTests}
+        if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
+            selector = sys.argv[1]
+            if selector not in groups or len(sys.argv) != 2:
+                print('unknown selector: ' + selector, file=sys.stderr)
+                sys.exit(2)
+            suite = unittest.defaultTestLoader.loadTestsFromTestCase(groups[selector])
+            print(selector + ' criterion group')
+            if not suite.countTestCases():
+                sys.exit(2)
+            result = unittest.TextTestRunner(verbosity=2).run(suite)
+            sys.exit(0 if result.wasSuccessful() else 1)
         unittest.main()
