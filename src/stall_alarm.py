@@ -1,4 +1,4 @@
-"""Pure journey clocks, unit one: plan, dispatch, close, autodispatch and merge.
+"""Pure journey clocks and named consumer readings for all ten journey steps.
 
 ``clocks`` consumes an admitted event snapshot and named reading envelopes. Its
 only mutation is prospective merge continuity in ``state['merge_samples']``;
@@ -17,7 +17,11 @@ UTC = timezone.utc
 DURATIONS = ('plan_idle', 'plan_in_planning', 'dispatch', 'close', 'autodispatch',
              'autodispatch_idle', 'merge', 'build', 'grade', 'review', 'deploy',
              'owed_checks', 'realert')
-STEPS = ('plan', 'dispatch', 'close', 'autodispatch', 'merge')
+STEPS = ('plan', 'dispatch', 'build', 'grade', 'review', 'merge', 'deploy',
+         'owed_checks', 'close', 'autodispatch')
+CENSUS_DWELL = dict.fromkeys(('written', 'building', 'blocked', 'graded', 'reviewing'), -1)
+# Production route inventory: crons.toml auto-deploy. Target values live in TOML.
+DEPLOY_PROJECTS = frozenset(('albert-scott',))
 MERGE_MAX_GAP_S = 1800  # Two scheduled 15-minute observations.
 
 
@@ -196,12 +200,186 @@ def _merge(now, threshold, state, readings):
         raise
 
 
+def read_consumers(events, now):
+    """Read the shared census and owed checks from one admitted nonfuture fold.
+
+    Reader exceptions are isolated and never replaced by healthy empty values.
+    This adapter is outside the pure clocks seam; the census can read plans.
+    Validate timestamps before readers whose timestamp helpers default to now.
+    """
+    import fold
+    import owed
+
+    def failure(name, exc):
+        return dict(value=None, error=name + ': unavailable (' + type(exc).__name__ + ')')
+
+    try:
+        now = _time(now)
+        if now is None or any(not isinstance(e, dict) or _time(e.get('ts')) is None for e in events):
+            raise ValueError('invalid snapshot timestamp')
+        snapshot = [e for e in events if _time(e['ts']) <= now]
+        specs, _, _, by_subject = fold.fold(snapshot)
+        admitted = sorted((e for evs in by_subject.values() for e in evs), key=lambda e: _time(e['ts']))
+    except Exception as exc:
+        return {name: failure(name, exc) for name in ('specs', 'stalls', 'owed')}
+    result = dict(specs=dict(value=specs, error=None))
+    try:
+        result['stalls'] = dict(value=fold.stall_rows(admitted, specs, now=now,
+                                      dwell=dict(CENSUS_DWELL), by_subject=by_subject), error=None)
+    except Exception as exc:
+        result['stalls'] = failure('stalls', exc)
+    try:
+        rows = []
+        for spec in specs.values():
+            # ONE spec at a time, even when several specs use the same AC id.
+            for row in owed.checks(spec['evs'], now):
+                movements = [e for e in spec['evs'] if e.get('type') == 'shipped' or
+                             (e.get('criterion') == row['criterion'] and
+                              (e.get('type', '').startswith('owed-') or e.get('type') == 'criterion-routed'))]
+                moved = max((_time(e['ts']) for e in movements), default=None)
+                rows.append(dict(row, last_moved=moved.isoformat() if moved else None))
+        result['owed'] = dict(value=rows, error=None)
+    except Exception as exc:
+        result['owed'] = failure('owed', exc)
+    return result
+
+
+def _merge_wait(row):
+    reason = row.get('reason', '')
+    return isinstance(reason, str) and (reason.startswith('in merge window ') or
+        reason.startswith('awaiting merge window after ') or reason == 'waited over 2 h for a merge window')
+
+
+def _census(now, thresholds, readings):
+    import fold_stalls
+    rows = _reading(readings, 'stalls', list)
+    specs = _reading(readings, 'specs', dict)
+    items = {stage: [] for stage in ('build', 'grade', 'review')}
+    excluded = dict(terminal=0, merge_waiting=0)
+    defaults = dict(written='build', building='build', graded='grade', reviewing='review')
+    roles = dict(builder='build', grader='grade', reviewer='review', **{'spec-auditor': 'build'})
+    explicit = {'build-done', 'build-blocked', 'evidence-bundle', 'evidence-bundle-failed',
+                'verdict', 'cannot-assess', 'conflict-rework', 'merge-conflict', 'window-dropped',
+                'must-fix', 'rejected-criterion'}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('spec'), str):
+            raise ValueError('stalls: invalid census row')
+        if not isinstance(row.get('state'), str):
+            raise ValueError('stalls: invalid lifecycle state')
+        if row['state'] not in CENSUS_DWELL:
+            excluded['terminal'] += 1
+            continue
+        if _merge_wait(row):
+            excluded['merge_waiting'] += 1
+            continue
+        spec = specs.get(row['spec'])
+        if not isinstance(spec, dict) or not isinstance(spec.get('evs'), list):
+            raise ValueError('specs: missing census history')
+        evs = spec['evs']
+        if any(not isinstance(e, dict) or _time(e.get('ts')) is None for e in evs):
+            raise ValueError('specs: invalid lifecycle timestamp')
+        evs = sorted((e for e in evs if _time(e['ts']) <= now), key=lambda e: _time(e['ts']))
+        trigger, role = fold_stalls.action(evs)
+        stage = defaults.get(row['state'])
+        if row.get('bucket') == 'in-flight':
+            stage = roles.get(row.get('owner'))
+        elif row['state'] == 'blocked' or trigger and (trigger['type'] in explicit or
+                trigger['type'] == 'decision' and (trigger.get('regrade') == 'yes' or trigger.get('rework') == 'yes')):
+            stage = roles.get(role)
+        since = _time(row.get('since'))
+        if stage is None or since is None or since > now:
+            raise ValueError('stalls: unresolved stage or movement')
+        item = dict(row, last_moved=since.isoformat(),
+                    status='alarm' if (now-since).total_seconds() > thresholds[stage] else 'healthy')
+        items[stage].append(item)
+    return {stage: _row('alarm' if any(r['status'] == 'alarm' for r in group) else 'healthy',
+                        thresholds[stage], 'shared census waits' if group else 'no pending stage work',
+                        moved=min((_time(r['since']) for r in group), default=None),
+                        pending=[r['spec'] for r in group], items=group, excluded_counts=dict(excluded),
+                        excluded_reason='terminal states have no stage work; merge waits appear in merge.waiting')
+            for stage, group in items.items()}
+
+
+def _deploy(events, now, threshold, thresholds):
+    targets = thresholds.get('deploy_targets')
+    if not isinstance(targets, dict) or not DEPLOY_PROJECTS <= targets.keys() or any(
+            not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+            for k, v in targets.items()):
+        raise ValueError('config: missing or invalid deploy target association')
+    projects = {}
+    for project, target in sorted(targets.items()):
+        ships = _movement(events, now, lambda e: e.get('type') == 'shipped' and e.get('project') == project)
+        lands = _movement(events, now, lambda e: e.get('type') == 'deploy-landed' and e.get('target') == target)
+        landed = lands[-1][0] if lands else None
+        pending = [(at, e) for at, e in ships if landed is None or at > landed]
+        if any(not isinstance(e.get('subject'), str) or not e['subject'] for _, e in pending):
+            raise ValueError('deploy: invalid shipped subject')
+        projects[project] = (_age_clock(pending, now, threshold, [e['subject'] for _, e in pending],
+                                        'newest shipment after target landing') if pending else
+                             _row('healthy', threshold, 'no undeployed shipments', moved=landed))
+        projects[project].update(target=target, landed_at=landed.isoformat() if landed else None)
+    # Unconfigured projects have no production target; expose why their ships do not alarm.
+    for _, event in _movement(events, now, lambda e: e.get('type') == 'shipped'):
+        project = event.get('project')
+        if not isinstance(project, str) or not project:
+            raise ValueError('deploy: shipped project unavailable')
+        if project not in projects:
+            projects[project] = _row('not-applicable', threshold, 'no configured production deploy target')
+    pending = [sid for row in projects.values() for sid in row['pending']]
+    active = [row for row in projects.values() if row['pending']]
+    return _row('alarm' if any(row['status'] == 'alarm' for row in active) else 'healthy',
+                threshold, 'project/target deployment clocks', pending=pending,
+                moved=min((_time(row['last_moved']) for row in active), default=None), projects=projects)
+
+
+def _owed(now, threshold, readings):
+    import owed
+    rows = _reading(readings, 'owed', list)
+    pending = []
+    excluded = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('status') not in owed.STATUSES:
+            raise ValueError('owed: invalid check row')
+        if row['status'] != 'due':
+            excluded[row['status']] = excluded.get(row['status'], 0) + 1
+            continue
+        due, moved = _time(row.get('due_at')), _time(row.get('last_moved'))
+        if due is None or moved is None or moved > now or due > now or any(
+                not isinstance(row.get(k), str) or not row[k] for k in ('spec', 'criterion', 'project')):
+            raise ValueError('owed: invalid due check identity or timestamp')
+        pending.append(dict(spec=row['spec'], criterion=row['criterion'], project=row['project'],
+                            due_at=due.isoformat(), last_moved=moved.isoformat(),
+                            status='alarm' if (now-due).total_seconds() > threshold else 'healthy'))
+    return _row('alarm' if any(r['status'] == 'alarm' for r in pending) else 'healthy', threshold,
+                'due owed checks' if pending else 'no due owed checks', pending=[r['spec'] for r in pending],
+                moved=min((_time(r['last_moved']) for r in pending), default=None), items=pending, excluded_counts=excluded,
+                excluded_reason='only status=due has an overdue check clock')
+
+
+def failed_readings(readings, decisions):
+    """Safe named diagnostics for unit three's grouped stall:undetermined body.
+
+    This is prospective input only: it sends nothing and cannot clear an alarm.
+    Arbitrary exception strings from envelopes are never copied into output.
+    """
+    failures = {}
+    for name in ('ledger', 'config', 'state', 'ready', 'due', 'queue', 'stalls', 'specs', 'owed', 'autodispatch'):
+        if name in readings:
+            row = readings[name]
+            if not isinstance(row, dict) or row.get('error') is not None or 'value' not in row:
+                failures[name] = name + ': reading unavailable or malformed'
+    for step, row in decisions.items():
+        if row['status'] == 'undetermined':
+            failures.setdefault(step, row['reason'])
+    return failures
+
+
 def clocks(events, now, *, state, thresholds, readings) -> dict[str, dict]:
     """Evaluate one UTC snapshot without IO; unknown readings never turn healthy.
 
     Events must already be normalized and admitted by the caller. Reader
     envelopes are ``{value: result, error: None}`` or ``{value: None, error: diagnostic}``.
-    Future movement is ignored. Unit two extends this mapping with its clocks;
+    Future movement is ignored. All ten steps return decisions only;
     unit three consumes the result and persists prospective state after appends.
     """
     now = _time(now)
@@ -211,20 +389,39 @@ def clocks(events, now, *, state, thresholds, readings) -> dict[str, dict]:
             state['merge_samples'] = []
         reason = 'invalid now/state' if now is None or not isinstance(state, dict) else 'invalid duration: ' + ', '.join(invalid)
         return {step: _row('undetermined', None, reason) for step in STEPS}
+    try:
+        census = _census(now, thresholds, readings)
+    except ValueError as exc:
+        census = {stage: _row('undetermined', thresholds[stage], str(exc))
+                  for stage in ('build', 'grade', 'review')}
     evaluators = dict(plan=lambda: _plan(events, now, thresholds, readings),
                       dispatch=lambda: _dispatch(events, now, thresholds['dispatch']),
                       close=lambda: _close(events, now, thresholds['close'], readings),
                       autodispatch=lambda: _autodispatch(now, thresholds, readings),
-                      merge=lambda: _merge(now, thresholds['merge'], state, readings))
+                      merge=lambda: _merge(now, thresholds['merge'], state, readings),
+                      deploy=lambda: _deploy(events, now, thresholds['deploy'], thresholds),
+                      owed_checks=lambda: _owed(now, thresholds['owed_checks'], readings),
+                      **{stage: (lambda stage=stage: census[stage]) for stage in census})
     result = {}
     clock_thresholds = dict(plan=dict(idle=thresholds['plan_idle'], in_planning=thresholds['plan_in_planning']),
                             autodispatch=dict(slow=thresholds['autodispatch'], idle=thresholds['autodispatch_idle']),
-                            **{key: thresholds[key] for key in ('dispatch', 'close', 'merge')})
+                            **{key: thresholds[key] for key in ('dispatch', 'close', 'merge', 'build', 'grade', 'review', 'deploy', 'owed_checks')})
     for step, evaluator in evaluators.items():
         try:
+            if isinstance(readings, dict):
+                for source in ('config', 'ledger', 'state'):
+                    if source == 'state' and step != 'merge' or source == 'ledger' and step == 'autodispatch':
+                        continue
+                    if source in readings:
+                        _reading(readings, source, list if source == 'ledger' else dict)
             result[step] = evaluator()
         except ValueError as exc:
+            if step == 'merge':
+                state['merge_samples'] = []
             result[step] = _row('undetermined', clock_thresholds[step], str(exc))
+    if isinstance(readings, dict) and isinstance(readings.get('stalls'), dict) and isinstance(readings['stalls'].get('value'), list):
+        result['merge']['waiting'] = [dict(row) for row in readings['stalls']['value']
+                                      if isinstance(row, dict) and _merge_wait(row)]
     future = sum(_time(e.get('ts')) is not None and _time(e['ts']) > now for e in events)
     for row in result.values():
         row['ignored_future_events'] = future

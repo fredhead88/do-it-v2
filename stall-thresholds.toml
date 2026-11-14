@@ -12,3 +12,6 @@ review = 21600
 deploy = 86400
 owed_checks = 86400
 realert = 10800
+
+# Production route inventory: crons.toml auto-deploy. do-it-v2 has no target.
+deploy_targets = {"albert-scott" = "albert-scott/droplet"}

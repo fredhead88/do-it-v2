@@ -1839,7 +1839,7 @@ class SourceGuardTests(unittest.TestCase):
                     or row['symbol'] == 'flow_health.daily']
 
         current = unit_rows(self.current)
-        self.assertEqual(len(current), 11)
+        self.assertEqual(len(current), 15)
         self.assertEqual(unit_rows(self.committed), current)
         self.assertTrue(all(row['surface'] for row in current))
 
