@@ -34,6 +34,7 @@ src/ci_runner.py 1
 src/ci_shadow.py 3
 src/dispatch.py 19
 src/dispatch_builder.py 1
+src/dispatch_disagreement.py 1
 src/empty_grade.py 1
 src/flow_health.py 1
 src/fold.py 6
@@ -260,6 +261,11 @@ def committed_inventory(root, revision):
     return parse_inventory(git(root, 'show', f'{revision}:{INVENTORY}'))
 
 
+def reader_ceiling(records):
+    # L-spec-2156: explicitly ratified one-call observer, including older inventories.
+    return {'src/dispatch_disagreement.py': 1} | {p: row[0] for p, row in records.items()}
+
+
 def ratchet(root, records):
     validate_ceiling(records, SEED, 'seed')
     git(root, 'rev-parse', '--verify', 'HEAD')
@@ -270,7 +276,7 @@ def ratchet(root, records):
     base = git(root, 'merge-base', 'HEAD', ref).strip()
     base_records = committed_inventory(root, base)
     if base_records is not None:
-        validate_ceiling(records, {p: row[0] for p, row in base_records.items()}, 'integration base')
+        validate_ceiling(records, reader_ceiling(base_records), 'integration base')
     # Examine every revision and parent edge, including reductions later restored.
     revisions = git(root, 'rev-list', '--reverse', '--topo-order', f'{base}..HEAD').splitlines()
     history = {base: base_records}
@@ -287,13 +293,13 @@ def ratchet(root, records):
             previous = at(parent)
             parents.append(previous)
             if previous is not None:
-                validate_ceiling(current or {}, {p: r[0] for p, r in previous.items()}, 'branch revision')
+                validate_ceiling(current or {}, reader_ceiling(previous), 'branch revision')
         # Absence before introduction is different from deletion after introduction.
         # Carry an empty ceiling across deletion, including into the working tree.
         history[revision] = current if current is not None else ({} if any(p is not None for p in parents) else None)
     head_records = at(git(root, 'rev-parse', 'HEAD').strip())
     if head_records is not None:
-        validate_ceiling(records, {p: r[0] for p, r in head_records.items()}, 'branch revision working tree')
+        validate_ceiling(records, reader_ceiling(head_records), 'branch revision working tree')
     return []
 
 
@@ -496,11 +502,22 @@ class InventoryTests(ScratchTree):
             read_inventory(self.root / 'missing')
 
     def test_seed_and_reductions(self):
-        self.assertEqual((len(SEED), sum(SEED.values())), (63, 133))
+        self.assertEqual((len(SEED), sum(SEED.values())), (64, 134))
         validate_ceiling({'src/tick.py': (1, 'changed reason')}, SEED, 'seed')
-        for records in ({'src/new.py': (1, '')}, {'src/tick.py': (4, '')}):
+        validate_ceiling({'src/dispatch_disagreement.py': (1, '')}, SEED, 'seed')
+        for records in ({'src/new.py': (1, '')}, {'src/tick.py': (4, '')},
+                        {'src/dispatch_disagreement.py': (2, '')}):
             with self.error('seed'):
                 validate_ceiling(records, SEED, 'seed')
+
+    def test_ratified_observer_has_exactly_one_full_read(self):
+        self.init_repo()
+        self.put(INVENTORY, 'src/dispatch_disagreement.py 1\nsrc/tick.py 3\n')
+        ratchet(self.root, read_inventory(self.root / INVENTORY))
+        self.commit()
+        ratchet(self.root, read_inventory(self.root / INVENTORY))
+        with self.error('seed'):
+            ratchet(self.root, {'src/dispatch_disagreement.py': (2, '')})
 
     def test_each_integration_ref(self):
         for ref in INTEGRATION_REFS:

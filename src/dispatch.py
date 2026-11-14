@@ -1235,7 +1235,7 @@ def _main(a):
     if a.charter:
         base["charter"] = a.charter
     meta = dict(packet_sha256=sha(packet), cli=CLI)
-    backend_ran = False
+    backend_ran = False; comparison = __import__('dispatch_disagreement').Attempt(getattr(a, 'nextstep_approval', None), a.subject, a.role)
     from usage import tokens_for_spawn
     grading_view = None  # L-spec-0481/R12.2-R12.3: set once a grader's own view is built; `fail`
                          # below reads it (closure, late-bound) so a preflight refusal — or any LATER failure in this same run — tears the private cluster down at, never before, the terminal event it emits (SD-R12-3c).
@@ -1273,6 +1273,7 @@ def _main(a):
         return True
 
     def fail(why, reason=None, exit_code=1, backend_failure=False):
+        comparison.refuse(emit, ledger, base, reason, backend_ran=backend_ran or backend_failure)
         import grading_env
         if builder and (reason or '').startswith(('preflight:', 'stale-base', 'branch-not-descendant')):
             why = f'{why} (cwd={cwd})'
@@ -1516,7 +1517,7 @@ def _main(a):
             first_cap = next(c for c in grading_env.CAPABILITIES if c in dict(failures))
             why = (f"{a.subject}: preflight could not prove {first_cap} — refusing role={a.role} "
                   "before any spend")
-            emit(ledger, base, "spawn-failed", why=why, reason=f"preflight:{first_cap}", tokens=None, **meta)
+            comparison.refuse(emit, ledger, base, f"preflight:{first_cap}"); emit(ledger, base, "spawn-failed", why=why, reason=f"preflight:{first_cap}", tokens=None, **meta)
             if grading_view is not None:
                 grading_env.teardown(grading_view)
             print(f"FAILED {spawn}: {why}", file=sys.stderr)
@@ -1793,7 +1794,6 @@ fold.EMITS["manual-dispatch"] = set().union(*fold.EMITS.values()) | {"operator"}
 fold.REQUIRED["manual-dispatch"] = ("role", "reason", "outcome")
 
 CLI = cli_version()
-
 def _prefork_main_sha(project):
     """The runner's master identity (origin preferred, local fallback) for this project; None when it cannot be proved."""
     import precheck, grading_env
@@ -1815,7 +1815,6 @@ def _prefork_main_sha(project):
     except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, AttributeError):
         pass
     return None
-
 def prefork_refusal(a):
     """Parent-side readiness for a detached start (L-spec-2207): the reason to print before any fork, or None to proceed to the child. A start the predicate lets through still meets every in-process gate in `_main`."""
     try:
@@ -1861,7 +1860,7 @@ if __name__ == "__main__":
                     help="do not run `claude -p`; write the packet under $R/seat/ and wait for "
                          "<spawn>.result.json from a seat-billed sub-agent (or DOIT_SEAT=1)")
     ap.add_argument("--manual-override-reason", help="reason for an intentional manual dispatch")
-    ap.add_argument("--cause", choices=__import__("nextstep").REBUILD_CAUSES, help="builder rebuild trigger")
+    ap.add_argument("--cause", choices=__import__("nextstep").REBUILD_CAUSES, help="builder rebuild trigger"); ap.add_argument('--nextstep-approval')
     a = __import__("nextstep").validate_cause(ap.parse_args())
     if a.role == "plan-auditor":
         a._packet = sys.stdin.read() if a.packet == "-" else pathlib.Path(a.packet).read_text() if pathlib.Path(a.packet).is_file() else ""
@@ -1869,7 +1868,7 @@ if __name__ == "__main__":
             main(a)  # preserve the recorded pre-pass refusal ahead of the manual gate
     if a.detach and a.packet != "-" and a.role in ("builder", "grader", "reviewer"):
         if reason := prefork_refusal(a):  # before the audit write, the log open and the fork; no flag bypasses it
-            sys.exit(print(f"refused-before-start: {reason}", file=sys.stderr) or 3)
+            __import__("dispatch_disagreement").prefork(a, reason, sys.modules[__name__]); sys.exit(print(f"refused-before-start: {reason}", file=sys.stderr) or 3)
     refusal = manual_dispatch_refusal(a.role, os.environ, a.manual_override_reason)
     if refusal or ((a.manual_override_reason or "").strip() and not a.detach and manual_dispatch_refusal(a.role, os.environ, None)):
         ledger_write_guard.check(EVENTS); EVENTS.mkdir(parents=True, exist_ok=True)

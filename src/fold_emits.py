@@ -1,7 +1,7 @@
 """Ledger event authorization vocabulary and nightly ownership fold, re-exported by fold."""
 
 # Who may emit what. A type absent here is open to any actor (§2.5).
-EMITS = {"spec-preflight": {"spec-preflight"}, "verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor", "tick"},
+EMITS = {"dispatch-disagreed": {"builder", "grader", "reviewer"}, "spec-preflight": {"spec-preflight"}, "verdict": {"grader"}, "review": {"reviewer"}, "shipped": {"executor", "tick"},
          # SD8: packet authors queue seats; only the relay records service.
          # Static so a standalone fold reader enforces these without dispatch.
          "spawn-failed": {"relay", "grader", "builder", "reviewer", "owed-sweeper",
@@ -486,8 +486,13 @@ for _kind in ('charter-replan-held', 'charter-replan-released'):
     REQUIRED_ROWS[_kind] = ('why',)
 
 
+REQUIRED_ROWS["dispatch-disagreed"] = ("subject", "project", "spawn", "role", "rule", "nextstep_answer", "receiver_answer")
+
+
 def typed_required_reason(e):
     """Validation for new typed payloads; old required-field semantics stay put."""
+    if e.get('type') == 'dispatch-disagreed':
+        return __import__('dispatch_disagreement').event_reason(e)
     import re
     kind = e.get('type')
     if kind == 'window-verification-result':

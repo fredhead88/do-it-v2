@@ -90,6 +90,7 @@ class CacheTests(unittest.TestCase):
                     fresh.add(path.name)
         allowed = [
             ('dispatch.py', 'pre-fork refusal read: no ledger-cache lock and no cache write (SD2)'),
+            ('dispatch_disagreement.py', 'read-only M4 observation: no ledger-cache lock or disk-cache writes'),
             ('spec_preflight.py', 'L-spec-2135 busy-cache fallback to the reference parser in preflight'),
             ('stall_sample.py', 'L-spec-2135 busy-cache fallback to the reference parser in the stall sampler'),
         ]

@@ -80,7 +80,7 @@ def _review_options(evs, sid):
     return depth, round_n
 
 
-def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None, cause=None):
+def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=None, cause=None, approval=None):
     import review_browser
     browser = review_browser.config(sid, options) if role == 'reviewer' else None
     wt = fold.ROOT / 'worktrees' / project / sid.lower()
@@ -103,8 +103,10 @@ def _dispatch(role, sid, project, charter, runner, options=None, *, base_sha=Non
     packet = runner(argv)
     if packet.get('code', 1):
         raise ValueError(packet.get('stderr') or packet.get('stdout') or 'packet failed')
-    argv = ['doit', 'dispatch', '--detach', role, sid, '--packet', packet.get('stdout', '').strip(),
-            '--cwd', str(wt), '--charter', charter or '', '--project', project]
+    argv = ['doit', 'dispatch', '--detach', role, sid, '--packet', packet.get('stdout', '').strip()]
+    if approval is not None:
+        argv += ['--nextstep-approval', json.dumps(approval)]
+    argv += ['--cwd', str(wt), '--charter', charter or '', '--project', project]
     if role == 'builder' and cause is not None:
         argv += ['--cause', cause]
     if role == 'grader':

@@ -135,6 +135,7 @@ class DriverTests(unittest.TestCase):
             ['doit', 'packet', 'reviewer', self.sid, '--worktree', str(self.worktree),
              '--depth', 'gates-only', '--round', '1'],
             ['doit', 'dispatch', '--detach', 'reviewer', self.sid, '--packet', '/packet.md',
+             '--nextstep-approval', json.dumps(__import__('dispatch_disagreement').from_step(self.step())),
              '--cwd', str(self.worktree), '--charter', 'L-charter-0052', '--project', 'proj']])
         rows = fold.read_events(use_cache=False)
         self.assertEqual(len(rows), 1)
