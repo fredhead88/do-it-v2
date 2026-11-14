@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-"""up — start the Planner pane, and PRINT the cron line for the tick (D117, D95).
+"""Planner compatibility entry point, tick launch helpers and relay/Executor owners.
 
-  up.py [--print-only]
-
-One pane and one job. The pane is this script's business: `claude --agent planner`
-with §10.5's RETIRE list denied by name (D119) and its own ledger file, so what it
-appends lands as the actor `planner` (D90).
-
-**The job is cron's, and cron is the operator's.** The line is printed, never
-installed: editing the operator's cron table is an irreversible act on a thing outside this
-system, and §4.9 routes those to a human rather than to an unattended process.
-`test_up.py` holds that as a check, because it is exactly the rule a later edit
-would helpfully break.
+The existing tick admits a short-lived Planner wrapper in do-it-relay. `doit up`
+explains that ownership and returns; --print-only prints the existing tick
+schedule. Scheduling remains the operator's responsibility: never install it.
 """
 import ledger_files
 import fcntl, importlib, json, math, os, pathlib, re, shlex, signal, stat, subprocess, sys, time
@@ -169,72 +161,19 @@ def install(contract):
 
 
 def main(print_only=False, max_cycles=None):
-    """`doit up` no longer supervises. The tick (cron -> `doit tick`) owns Planner
-    scheduling through `ensure_planner`; this prints where Planners run and returns,
-    so the exit is 0 and nothing is launched, slept on or escalated here (L-spec-2310).
-
-    `print_only` is the old one-shot dry run, unchanged in every observable way:
-    no relay call, no child, no event, no launcher file, and no sleep. `max_cycles`
-    is accepted for the old signature and ignored."""
+    """Return without orchestration; accept the retired cycle bound for callers."""
     if print_only:
-        return _supervisor_main(print_only=True)
-    contract = dispatch.AGENTS / "planner.md"
-    if not contract.exists():
-        sys.exit(f"up: no planner contract at {contract} — the pane is the contract (D116)")
-    install(contract)
-    (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
-    (fold.ROOT / "logs").mkdir(parents=True, exist_ok=True)
-    print("# the tick is cron's, and cron is yours — install this line yourself:")
-    print(cron_line())
-    print("# Planners are started by the tick (doit tick) in tmux session do-it-relay;"
-          " doit up starts nothing")
+        print(cron_line())
+    else:
+        print("# The existing tick (doit tick) launches a short-lived doit planner-run"
+              " wrapper in tmux session do-it-relay; doit up starts nothing.")
     return 0
 
 
-def _supervisor_main(print_only=False, max_cycles=None):
-    """One `doit up` is one FOREGROUND SUPERVISOR: derive the next plannable
-    charter, run a Planner pane on it as a child, wait for it to exit, record the
-    outcome, repeat — with no keystroke in between. The launcher never replaces
-    itself with the pane (L-adr-0026): a process that has been replaced is not
-    there to notice the pane end, and the operator becomes the relay.
-
-    `max_cycles` is the fixtures' bound and nothing else's. Unset, the loop is
-    unbounded and a dry queue HOLDS rather than ends it (R6) — `doit up` stops
-    when the operator stops it.
-
-    `print_only` is the old one-shot dry run, unchanged in every observable way:
-    no relay call, no child, no event, no launcher file, and no sleep."""
-    contract = dispatch.AGENTS / "planner.md"
-    if not contract.exists():
-        sys.exit(f"up: no planner contract at {contract} — the pane is the contract (D116)")
-    install(contract)
-    (fold.ROOT / "events").mkdir(parents=True, exist_ok=True)
-    (fold.ROOT / "logs").mkdir(parents=True, exist_ok=True)
-    print("# the tick is cron's, and cron is yours — install this line yourself:")
-    print(cron_line())
-    if print_only:
-        ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
-        name = (_seam("pane_name", "PANE_NAME") or _stem)(ledger.name)
-        cmd = pane_cmd(name=name)
-        print(f"# planner pane: {ledger.stem} · {' '.join(cmd)}")
-        return cmd, _child_env(ledger)
-    started_sha = code_sha()
-    state, cycles = {"up": None, "watermark": None, "said": None}, 0
-    led = _launcher(state)
-    dispatch.emit(led, {}, "supervisor-code", subject="planner", kind="planner",
-                  sha=started_sha or "undetermined", pid=os.getpid(), reason="start")
-    while max_cycles is None or cycles < max_cycles:
-        cycles += 1
-        _cycle(state, started_sha)
-    return cycles
-
-
-# ── the supervisor: constants and the private helpers main() runs on ──────────
-SUPERVISED = "DOIT_SUPERVISED"            # presence-only, on every child this starts
+# Relay waiting and child environment controls.
+SUPERVISED = "DOIT_SUPERVISED"
 INTERVAL_ENV, INTERVAL_DEFAULT = "DOIT_SUPERVISOR_INTERVAL_SEC", 30.0
-POLL_STEP = 0.5                           # how finely a hold notices a ledger write
-RELAY_FNS = ("plannable", "waiting_lines", "ledger_changed",
-             "planner_attempts")
+POLL_STEP = 0.5
 
 
 def _interval():
@@ -257,12 +196,6 @@ def _guarded(fn, *a, **kw):
     except Exception as e:
         print(f"# relay.{fn} unavailable — {type(e).__name__}: {e}")
         return False, None
-
-
-def _degrade():
-    """A relay that failed has already printed its one line. Start nothing, append
-    nothing, and wait out the interval so a missing sibling cannot spin the box."""
-    time.sleep(_interval())
 
 
 def _child_env(ledger, supervised=False):
@@ -318,9 +251,6 @@ def _ended(ledger):
     return any(row.get("type") == "planner-ended" for row in _planner_own_rows(ledger, strict=False))
 
 
-PLANNER_OCCUPIED = "planner-occupied"
-
-
 def _planner_lock():
     """Claim the common lifetime lock; only this parent retains its descriptor."""
     fd = os.open(fold.ROOT / "planner.lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -336,18 +266,6 @@ def _planner_lock():
     return fd
 
 
-def _start(state, subject, mode, attempt, prompt, spawn_ids=None, started_sha=None,
-           *, wrapper_owned=False):
-    fd = _planner_lock()
-    if fd is None:
-        return PLANNER_OCCUPIED
-    try:
-        return _run_planner(subject, mode, attempt, prompt, spawn_ids, started_sha,
-                            wrapper_owned=wrapper_owned)
-    finally:
-        os.close(fd)
-
-
 def _run_planner(subject, mode, attempt, prompt, spawn_ids, started_sha, *, wrapper_owned=False):
     """Start one pane and wait for it. The start row lands in the CHILD's own file
     before the child exists (L-adr-0027) — a pane that dies in its first second has
@@ -355,10 +273,9 @@ def _run_planner(subject, mode, attempt, prompt, spawn_ids, started_sha, *, wrap
     The end row is appended only where the child wrote none: its own clean
     `planner-ended` is the better record and is never doubled.
 
-    `started_sha` (R2): the SAME value `main()`'s own boot `supervisor-code
-    reason="start"` row carries — never a fresh `code_sha()` call here.
-    `maybe_reexec` has already resynced immediately before every call site that
-    reaches this, so `started_sha` is current at the moment this row lands."""
+    `started_sha` is supplied by the lifetime wrapper, which runs current code
+    on each launch. The caller holds `_planner_lock` through the child's exit.
+    """
     ledger = dispatch.alloc(fold.EVENTS, "L-planner-", ".jsonl")
     base, ids = {"spawn": ledger.stem}, ({"spawn_ids": spawn_ids} if spawn_ids else {})
     refusal = dispatch.emit(ledger, base, "planner-started", strict=True, subject=subject, planner=ledger.stem,
@@ -413,35 +330,8 @@ def ctx_handover(events, charter):
     return None
 
 
-def _charter_pass(state, events, charter, started_sha):
-    """One ready charter. False means the relay failed and the cycle holds."""
-    ok, att = _guarded("planner_attempts", events, charter_id=charter)
-    if not ok:
-        return False
-    att = att or {}
-    if att.get("next") == "held":
-        # planner-attempts-hold (L-charter-0042 R6): reachable only if a caller hands
-        # this a charter `relay.plannable` itself would not offer (its own held check
-        # runs ahead of everything else) — a defensive branch, not the normal path.
-        # No pane, no new escalation-blocking: the charter is already held by an
-        # answer that did not carry replan=yes, and re-escalating it here would be
-        # exactly the bug this spec fixes. The cycle continues to the next charter.
-        print(f"# {charter}: held — known-bug escalation answered by {att.get('held_by')} without replan=yes")
-        return True
-    if att.get("next") == "escalate":
-        # ensure_planner is the only writer of the attempt-limit escalation (L-spec-2310).
-        print(f"# {charter}: attempt limit — the tick's ensure_planner escalates it")
-        return True
-    maybe_reexec("planner", started_sha)  # R2 point 5(b): immediately before THIS charter's pane
-    handover = ctx_handover(events, charter)
-    prompt = f"{charter}\nRead the handover file {handover} before continuing." if handover else charter
-    result = _start(state, subject=charter, mode="charter",
-           attempt=int(att.get("attempts") or 0) + 1, prompt=prompt, started_sha=started_sha)
-    return PLANNER_OCCUPIED if result == PLANNER_OCCUPIED else True
-
-
-def _hold(state, lines, *, relay_only=False):
-    """A dry queue holds the loop open (R6). The waiting text is the board's own
+def _relay_hold(state, lines):
+    """Keep the relay alive while its queue is dry. The waiting text is the board's own
     (L-adr-0032) and is re-printed only when it changes, so an idle night does not
     scroll the pane. A ledger write ends the hold immediately; otherwise the
     interval does."""
@@ -451,8 +341,7 @@ def _hold(state, lines, *, relay_only=False):
         state["said"] = lines
     end = time.monotonic() + _interval()
     while True:
-        if relay_only:
-            _relay_heartbeat()
+        _relay_heartbeat()
         ok, res = _guarded("ledger_changed", fold.ROOT, state["watermark"])
         if not ok:
             return
@@ -460,34 +349,6 @@ def _hold(state, lines, *, relay_only=False):
         if changed or time.monotonic() >= end:
             return
         time.sleep(min(POLL_STEP, max(0.0, end - time.monotonic())))
-
-
-def _cycle(state, started_sha):
-    """Plan every ready charter, otherwise hold; seat serving belongs to the relay."""
-    maybe_reexec("planner", started_sha)
-    try:
-        events = fold.read_events()
-    except ledger_cache.LockTimeout as exc:
-        print(str(exc), file=sys.stderr)
-        return _degrade()
-    ok, plan = _guarded("plannable", events, fold.ROOT)
-    if not ok:
-        return _degrade()
-    ready = list(plan[0])
-    if ready:
-        for charter in ready:
-            result = _charter_pass(state, events, charter, started_sha)
-            if result == PLANNER_OCCUPIED:
-                # Unlike a dry-queue hold, ledger writes cannot shorten this wait.
-                _SLEEP(_interval())
-                return
-            if not result:
-                return _degrade()
-        return
-    ok, lines = _guarded("waiting_lines", events, fold.ROOT)
-    if not ok:
-        return _degrade()
-    _hold(state, list(lines))
 
 
 # ── the relay: the sole seat-serving loop (L-spec-1497) ─────────────────────────────────────────────
@@ -1040,16 +901,12 @@ def ensure_relay(events, now, *, launcher=None):
 
 
 def relay_main(print_only=False, max_cycles=None):
-    """The relay's own standing loop (R1), alongside `main()` (Planner) and
-    `executor_loop` (Executor) — a fourth member of this module's family of
-    loop functions, never a branch inside `_cycle()` (see the spec's own
-    Boundaries: merging it there would collapse this module's one-pane-per-tick
-    shape into a second thing per tick).
+    """The relay's standing loop, independent of tick-owned Planner admission
+    and the Executor's supervision.
 
     Every cycle: `relay.pending_packets` then `_unclaimed_pending`. Nothing
     unclaimed -> print `RELAY_DRY`; print_only returns None here, having done
-    no write at all; otherwise `_hold` (this module's own, already used by the
-    Planner) waits out `_interval()` or a ledger change, then the loop
+    no write at all; otherwise `_relay_hold` waits out `_interval()` or a ledger change, then the loop
     continues. Something unclaimed -> allocate one fresh `L-relay-<NNNN>.jsonl`
     (D90), build the pane command naming every unclaimed spawn id, oldest
     first, as the opening prompt; print_only prints and returns `(cmd, env)`
@@ -1109,7 +966,7 @@ def relay_main(print_only=False, max_cycles=None):
                 if print_only:
                     print(RELAY_DRY)
                     return None
-                _hold(state, [RELAY_DRY], relay_only=True)
+                _relay_hold(state, [RELAY_DRY])
                 continue
             ledger = dispatch.alloc(fold.EVENTS, "L-relay-", ".jsonl")
             ids = ",".join(str(p.get("spawn") if isinstance(p, dict) else p) for p in todo)

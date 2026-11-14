@@ -831,10 +831,10 @@ fixpoint instead of an assertion.
 
 ## 3.1 The shape
 
-**Two standing autonomous panes, one shared sub-agent library, ephemeral Thinker
-sessions for anything conversational. The operator lives in none of them.**
-*(D117: one standing pane — the Planner — and one scheduled job — the Executor.
-The diagram is unchanged because what each drives is unchanged.)*
+**The existing tick owns short-lived Planner launches; the relay and Executor
+retain their independent supervisors. Thinker sessions remain conversational.**
+The diagram describes pipeline responsibilities rather than process lifetimes.
+L-charter-0084 supersedes D95/D117's standing Planner supervisor below.
 
 ```
   ephemeral THINKER sessions            operator-driven, short-lived
@@ -855,37 +855,33 @@ The diagram is unchanged because what each drives is unchanged.)*
               SHARED SUB-AGENT LIBRARY   (Part 4)
 ```
 
-**Both panes are autonomous.** Neither is a place the operator sits. Reasoning
-happens in short-lived Thinker sessions that produce an artifact and die.
+**Both pipelines are autonomous.** Reasoning happens in Thinker sessions;
+the operator need not sit in either pipeline.
 
 ### ★ How it is started, and what keeps it alive
 
-*(D95. §8.1 claims this design "survives the operator not looking for a week"
-and never traced it. §3.3 gives the **Thinker** a startup command; the panes had
-none — no command, no supervisor, no restart after a reboot.)*
+The existing `doit tick` calls `up.ensure_planner` only when no Planner is alive.
+It launches a short-lived `doit planner-run` wrapper in `do-it-relay`. The wrapper
+holds `planner.lock` through its child's exit and records the lifetime; each
+launch runs current code. There is no always-on Planner supervisor or Planner
+idle ledger-polling loop. Relay and Executor retain their boundary re-exec and
+failure handling.
 
 ```
-do-it up          # starts both panes as NAMED sessions: planner · executor
+doit up                 # explain tick/wrapper ownership and return 0
+doit up --print-only    # print the existing tick schedule; never install it
 ```
 
-**The naming is mechanical, not cosmetic.** §3.3 already relies on
-`claude agents --json` enumerating named sessions *"without a TTY, so this is a
-fold query, not new machinery"* — that is how an unlanded Thinker is caught, and
-**it is the same enumeration that catches a dead pane.** Two unnamed terminals
-would work and would be **invisible to the fold**, and an invisible pane cannot
-be reported dead.
+The printed schedule retains `DOIT_TICK_MIN`, `DOIT_ROOT` and this checkout's
+`doit` path. Cron remains operator-owned; this change adds no schedule or cron
+installation. Repo `scripts/flow.sh`, including `--no-attach`, keeps Thinker=2.0,
+inert placeholder=2.1, relay=2.2 and Executor=2.3. The placeholder preserves the
+pane addresses used by existing crons without starting a Planner.
 
-**Liveness belongs to a supervisor, and the design names the properties rather
-than the tool** — the same treatment §9.9 gives a backup destination:
-
-| A supervisor must | Why |
-|---|---|
-| start the panes at login | the operator should not have to remember |
-| restart them on exit | **this is what makes D94's seat-exhaustion resume work** |
-| survive a reboot | the three-week absence is the load case, and laptops restart |
-
-*`launchd` satisfies all three on this operator's machine and is named in §12.6
-as ops work, not here as design.*
+The external ~/flow.sh @reboot invocation is accepted: its `doit up` callee
+prints and returns. That external file and the reboot configuration stay
+operator-owned. The historical D95/D117 startup claims below are superseded by
+L-charter-0084; Planner reasoning still runs interactively for one lifetime.
 
 > ### ★ D117 — one pane and one job: the Executor is a tick, not a pane
 >

@@ -306,7 +306,7 @@ class RelaySupervisionTests(unittest.TestCase):
             total[0] += seconds
         with patch.object(up, "_unclaimed_pending", side_effect=[pending([self.sid], self.root), [],
                                                                  pending([self.sid], self.root)]), \
-             patch.object(up, "_hold") as hold, \
+             patch.object(up, "_relay_hold") as hold, \
              patch.object(up.subprocess, "Popen", side_effect=spawn), \
              patch.object(up, "_SLEEP", side_effect=sleep):
             up.relay_main(max_cycles=3)
