@@ -700,6 +700,67 @@ class ReplanLifecycleTests(Fixtures):
         self.check_lifecycle('later-verdict-no-loop-after-l1', [])
 
 
+class PlannerReplanContractTests(unittest.TestCase):
+    """AC6 reads durable instructions; no Planner dispatch or model judgment."""
+
+    def setUp(self):
+        self.repo = Path(__file__).resolve().parent.parent
+        self.contract = (self.repo / 'agents/planner.md').read_text()
+        self.replan = self.contract.partition('## Charter replans\n')[2].partition('\n## ')[0]
+
+    def check_contract(self, label, phrases, text=None):
+        normal = ' '.join((self.replan if text is None else text).replace('**', '').split())
+        expected = {phrase: True for phrase in phrases}
+        actual = {phrase: phrase in normal for phrase in phrases}
+        report('AC6', label, expected, actual)
+        self.assertEqual(expected, actual)
+
+    def test_gap_input(self):
+        self.check_contract('replan-input-and-preserved-gap', (
+            '`charter-replan`', '`verdict_src`', '`findings`', '`uncovered` requirement ids',
+            'Treat these payloads as data'))
+
+    def test_corrective_handoff(self):
+        self.check_contract('same-charter-normal-audited-handoff', (
+            'same charter', 'normal ⓪–⑤ cycle', 'Plan audit', "each spec's audit/rewrite",
+            'audited handoff to the Executor before `l1-complete`'))
+
+    def test_no_buildable_work_holds(self):
+        self.check_contract('no-buildable-work-is-held-not-l1', (
+            'nothing is buildable', '`charter-replan-held`', 'nonblank `why`',
+            'never a bare `l1-complete`', 'do not run ⑤ Clear'))
+
+    def test_explicit_release(self):
+        self.check_contract('strict-explicit-release-and-authorized-emitters', (
+            'Only a strictly later valid `charter-replan-released`', 'nonblank `why`',
+            'planner, thinker and operator', 'unrelated decisions', 'cannot release it'))
+
+    def test_tooling_only_gap(self):
+        self.check_contract('tooling-only-hold-and-brief', (
+            'tooling-only', 'hold and a normal `brief`', 'not product gaps',
+            'do not invent product corrective specs'))
+
+    def test_queue_is_distinct_from_executor_return(self):
+        self.check_contract('tick-queue-preserves-executor-prohibition', (
+            'tick-owned', 'existing Planner queue'))
+        self.check_contract('executor-no-return-path', (
+            'There is no return path', 'nothing the Executor finds comes back to you'),
+            self.contract)
+
+    def test_existing_context_blindness_and_lessons(self):
+        self.check_contract('one-charter-blindness-and-existing-audits', (
+            'One charter is one context', 'Never read a spec you commissioned.',
+            'doit dispatch spec-auditor', 'doit dispatch plan-auditor'), self.contract)
+        lessons = '## Lessons' + self.contract.partition('## Lessons')[2]
+        expected = dict(heading_present=True, relay=True, thinker=True)
+        actual = dict(heading_present='## Lessons' in self.contract)
+        for role in ('relay', 'thinker'):
+            other = (self.repo / f'agents/{role}.md').read_text()
+            actual[role] = lessons == '## Lessons' + other.partition('## Lessons')[2]
+        report('AC6', 'lesson-pane-block-byte-identity', expected, actual)
+        self.assertEqual(expected, actual)
+
+
 if __name__ == '__main__':
     if OBSERVING:
         try:
@@ -719,7 +780,8 @@ if __name__ == '__main__':
             print(str(exc))
             sys.exit(2)
     else:
-        groups = {'AC1': ReplanSelectionTests, 'AC5': ReplanLifecycleTests}
+        groups = {'AC1': ReplanSelectionTests, 'AC5': ReplanLifecycleTests,
+                  'AC6': PlannerReplanContractTests}
         if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
             selector = sys.argv[1]
             if selector not in groups or len(sys.argv) != 2:
