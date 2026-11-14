@@ -3477,6 +3477,134 @@ class BuildPriorityTest(unittest.TestCase):
             self.assertEqual(plain, ['w', 'L-spec-1', 'L-spec-2', 'L-spec-3'])
 
 
+class ReplanTickTests(unittest.TestCase):
+    dispatcher = LauncherTests.dispatcher
+
+    def setUp(self):
+        LauncherTests.setUp(self)
+
+    def test_durable_cap_retry_and_restart(self):
+        import close_reviews, subprocess
+        import install_sync, push_origin, pr_closeout, look, up, notes, tree_cleanup, reap_tmp
+        def emit(actor, kind, second, cid, **fields):
+            at = (self.now + datetime.timedelta(seconds=second)).isoformat()
+            with patch.object(dispatch, 'now', return_value=at):
+                reason = dispatch.emit(self.root / 'events' / f'L-{actor}-9800.jsonl',
+                                       {'subject':cid, 'project':'proj'}, kind, strict=True, **fields)
+            self.assertIsNone(reason)
+        cids = [f'L-charter-{9800+n}' for n in range(5)]
+        for n, cid in enumerate(cids):
+            emit('operator', 'charter-filed', -300, cid)
+            emit('planner', 'l1-complete', -250, cid)
+            emit('charter-reviewer', 'charter-review-not-complete', -200+n, cid,
+                 uncovered_requirement_ids=['R5'])
+            emit('charter-reviewer', 'audit-finding', -100+n, cid, text='gap '+cid)
+        # A recorded-and-ignored filing must not supply append metadata.
+        with patch.object(dispatch, 'now', return_value=(self.now-datetime.timedelta(seconds=50)).isoformat()):
+            reason = dispatch.emit(self.root / 'events/L-builder-9800.jsonl',
+                                   {'subject':cids[0], 'project':'unregistered'}, 'charter-filed')
+        self.assertIsNone(reason)
+        def fresh(restart=False):
+            script = ('import json,os,fold,close_reviews; '
+                      'fold.NOW=fold.ts(os.environ["REPLAN_TEST_NOW"]); '
+                      'e=fold.read_events(use_cache=False); '
+                      'print(json.dumps(dict(events=e,due=close_reviews.replans_due(e,fold.NOW))))')
+            if restart:
+                script = '''
+import contextlib
+from unittest.mock import patch
+import os,dispatch,tick,fold,close_reviews,intake,notes,pr_closeout,install_sync,push_origin,carry
+import pane_resume,up,look,autodispatch,merge_queue,tree_cleanup,reap_tmp
+with contextlib.ExitStack() as stack:
+    stack.enter_context(patch.object(fold,'NOW',fold.ts(os.environ['REPLAN_TEST_NOW'])))
+    stack.enter_context(patch.object(dispatch,'now',return_value=fold.NOW.isoformat()))
+    for module, attr, value in ((intake,'run',{}),(notes,'run',None),
+            (pr_closeout,'run',None),(install_sync,'run',[]),(push_origin,'run',None),
+            (carry,'uncarried',[]),(carry,'sync_v4',[]),(pane_resume,'run',None),
+            (up,'ensure_relay','fixture'),(up,'ensure_planner','idle'),(look,'emit_once',None),(look,'heartbeat_missed',None),
+            (tick,'run_steps',[]),(tick,'_steps',[]),(tick,'launch_precheck',None),
+            (autodispatch,'redispatch_dead',[]),(merge_queue,'enqueue_due',[]),
+            (close_reviews,'run',[]),(tree_cleanup,'reap_worktrees',([],[])),
+            (reap_tmp,'_reap_recorded',[])):
+        stack.enter_context(patch.object(module,attr,return_value=value))
+    tick._record()
+''' + script
+            proc = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True,
+                                  env=dict(os.environ, DOIT_ROOT=str(self.root),
+                                           # A restart is a later pass, independent of wall-clock
+                                           # seconds and the parent fixture's microseconds.
+                                           REPLAN_TEST_NOW=(self.now + datetime.timedelta(
+                                               seconds=1 if restart else 0)).isoformat(),
+                                           PYTHONPATH=str(pathlib.Path(__file__).parent)))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return json.loads(proc.stdout)
+        real_emit = dispatch.emit
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(dispatch, 'now', side_effect=lambda: fold.NOW.isoformat()))
+            for module, attr, value in ((intake, 'run', {}), (notes, 'run', None),
+                    (pr_closeout, 'run', None), (install_sync, 'run', []), (push_origin, 'run', None),
+                    (carry, 'uncarried', []), (carry, 'sync_v4', []), (pane_resume, 'run', None),
+                    (up, 'ensure_relay', 'fixture'), (up, 'ensure_planner', 'idle'), (look, 'emit_once', None),
+                    (look, 'heartbeat_missed', None), (tick, 'run_steps', []), (tick, '_steps', []),
+                    (tick, 'launch_precheck', None), (autodispatch, 'redispatch_dead', []),
+                    (merge_queue, 'enqueue_due', []), (close_reviews, 'run', []),
+                    (tree_cleanup, 'reap_worktrees', ([], [])), (reap_tmp, '_reap_recorded', [])):
+                stack.enter_context(patch.object(module, attr, return_value=value))
+            # The producer and durable append are real. Failures cannot erase
+            # the ordinary heartbeat or reserve an identity that never landed.
+            with patch.object(close_reviews, 'replans_due', side_effect=ValueError('selection-fixture')):
+                tick._record()
+            def refuse(dst, base, kind, **fields):
+                if kind == 'charter-replan':
+                    raise OSError('append-fixture')
+                return real_emit(dst, base, kind, **fields)
+            with patch.object(dispatch, 'emit', side_effect=refuse):
+                tick._record()
+            self.assertEqual(len(fresh()['due']), 2)
+            def partially_refuse(dst, base, kind, **fields):
+                if kind == 'charter-replan' and base['subject'] == cids[1]:
+                    return 'append-refused-fixture'
+                return real_emit(dst, base, kind, **fields)
+            with patch.object(dispatch, 'emit', side_effect=partially_refuse):
+                tick._record()
+            partial = fresh()
+            self.assertEqual([e['subject'] for e in partial['events']
+                              if e['type'] == 'charter-replan'], cids[:1])
+            self.assertEqual([e['subject'] for e in partial['due']], cids[1:2])
+            tick._record()
+            tick._record()
+            snapshot = fresh(restart=True)
+            rows = [e for e in snapshot['events'] if e['type'] == 'charter-replan']
+            self.assertEqual([e['subject'] for e in rows], cids[:2])
+            self.assertEqual(snapshot['due'], [])
+            for e in rows:
+                self.assertEqual(e['project'], 'proj')
+                self.assertEqual(e['uncovered'], ['R5'])
+                self.assertTrue(e['verdict_src'].startswith('L-charter-reviewer-9800.jsonl:'))
+                self.assertEqual([f['text'] for f in e['findings']], ['gap '+e['subject']])
+            heartbeat = [e for e in snapshot['events'] if e['type'] == 'tick']
+            self.assertIn('selection-fixture', heartbeat[0]['replan_error'])
+            self.assertIn('append-fixture', heartbeat[1]['replan_error'])
+            self.assertIn('append-refused-fixture', heartbeat[2]['replan_error'])
+            self.assertEqual(heartbeat[2]['replan_outcomes'], ['recorded ' + cids[0]])
+            self.assertEqual(heartbeat[2]['observer_view'], 'post-dispatch')
+            self.assertTrue(all('lane' in e for e in heartbeat))
+            for n, kind in enumerate(('l1-complete', 'cut-written', 'charter-replan-held')):
+                cid = cids[n]
+                self.now += datetime.timedelta(seconds=2)
+                with patch.object(fold, 'NOW', self.now):
+                    emit('operator' if kind == 'l1-complete' else 'planner', kind, -1, cid,
+                         **({'why':'hold'} if kind.endswith('-held') else {}))
+                    tick._record()
+                    tick._record()
+                snapshot = fresh()
+                rows = [e for e in snapshot['events'] if e['type'] == 'charter-replan']
+                self.assertEqual([e['subject'] for e in rows], cids[:3+n])
+        _launcher_evidence('replan-AC3', dict(events=rows, heartbeat=heartbeat,
+                          fresh_process_reader=True, real_append=True, paid_runner_calls=0,
+                          capacity_freed_by=['l1-complete', 'cut-written', 'charter-replan-held']))
+
+
 class CloseReviewHookTests(unittest.TestCase):
     def test_both_entrypoints_share_record(self):
         # Both public routes invoke the same guarded core exactly once.

@@ -1607,6 +1607,16 @@ def _record_pass():
         close_reviews_error = str(exc)
         close_reviews_outcomes = getattr(exc, 'outcomes', close_reviews_outcomes)
     log_outcomes(close_reviews_outcomes)
+    replan_outcomes = []
+    replan_error = None
+    try:
+        import close_reviews
+        close_reviews._record_replans(ev, fold.NOW, tick_path(), replan_outcomes)
+    except Exception as exc:
+        replan_error = 'replan: ' + type(exc).__name__ + ': ' + str(exc)
+    if replan_outcomes:
+        _committed(None)
+    log_outcomes(replan_outcomes)
     log_outcomes(['start autodispatch'])
     try:
         import autodispatch
@@ -1766,6 +1776,9 @@ def _record_pass():
     if proving_error:
         kv["proving_error"] = proving_error
     kv['close_reviews_outcomes'] = close_reviews_outcomes
+    kv['replan_outcomes'] = replan_outcomes
+    if replan_error:
+        kv['replan_error'] = replan_error
     if close_reviews_error:
         kv['close_reviews_error'] = close_reviews_error
     try:

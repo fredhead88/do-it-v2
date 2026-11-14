@@ -639,6 +639,67 @@ class ReplanSelectionTests(Fixtures):
         self.assertFalse(state['L-charter-9803']['active'])
 
 
+class ReplanLifecycleTests(Fixtures):
+    def check_lifecycle(self, label, reviews, sources=()):
+        actual_reviews = cr.due(self.events, self.specs, NOW)
+        actual_sources = [row['verdict_src'] for row in cr.replans_due(self.events, NOW)]
+        expected = dict(reviews=reviews, replan_sources=list(sources))
+        actual = dict(reviews=actual_reviews, replan_sources=actual_sources)
+        self.assertEqual(actual, expected, label)
+        report('AC5', label, expected, actual)
+
+    def corrective_spec(self, seconds, *, charter=CID, shipped=True):
+        sid = 'L-spec-9999'
+        rows = [event('spec-written', -85, sid, charter=charter)]
+        if shipped:
+            rows.append(event('shipped', seconds, sid))
+        else:
+            rows.append(event('spec-killed', seconds, sid))
+        self.events.extend(rows)
+        self.specs[sid] = dict(id=sid, charter=charter,
+                               state='accepted' if shipped else 'killed', evs=rows)
+
+    def test_no_paid_loop_without_corrective_shipment(self):
+        self.events += [gap(), replan()]
+        self.check_lifecycle('replan-newer-than-completion', [])
+        self.events.append(event('l1-complete', -80))
+        self.check_lifecycle('l1-without-new-spec-or-shipment', [])
+        original = list(self.events)
+        for label, seconds, charter, shipped in (
+                ('older-shipment', -101, CID, True),
+                ('equal-time-shipment', -100, CID, True),
+                ('other-charter-shipment', -70, 'L-charter-9999', True),
+                ('killed-corrective-spec', -70, CID, False),
+                ('new-same-charter-corrective-shipment', -70, CID, True)):
+            with self.subTest(case=label):
+                self.events = list(original)
+                self.corrective_spec(seconds, charter=charter, shipped=shipped)
+                self.events.append(event('l1-complete', -60))
+                self.check_lifecycle(label, [CID] if label.startswith('new-same') else [])
+
+    def test_corrective_shipment_still_needs_later_plan_completion(self):
+        self.events += [gap(), replan()]
+        self.corrective_spec(-80)
+        original = list(self.events)
+        for kind in ('l1-complete', 'cut-written'):
+            for seconds in (-91, -90, -70):
+                with self.subTest(marker=kind, seconds=seconds):
+                    self.events = original + [event(kind, seconds)]
+                    self.check_lifecycle(kind + '-relative-to-replan=' + str(seconds),
+                                         [CID] if seconds > -90 else [])
+
+    def test_distinct_later_verdict_gets_only_one_replan(self):
+        self.events += [gap(), replan(), event('l1-complete', -80)]
+        self.check_lifecycle('first-verdict-serviced-after-completion', [])
+        source = 'L-charter-reviewer-9902.jsonl:1'
+        self.events.append(gap(seconds=-20, source=source))
+        self.check_lifecycle('distinct-later-verdict-eligible', [], [source])
+        self.events.append(replan(seconds=-10, source=source))
+        self.check_lifecycle('distinct-later-verdict-recorded-once', [])
+        self.events.append(event('l1-complete', -1))
+        self.check_lifecycle('later-verdict-no-loop-after-l1', [])
+
+
 if __name__ == '__main__':
     if OBSERVING:
         try:
@@ -658,7 +719,7 @@ if __name__ == '__main__':
             print(str(exc))
             sys.exit(2)
     else:
-        groups = {'AC1': ReplanSelectionTests}
+        groups = {'AC1': ReplanSelectionTests, 'AC5': ReplanLifecycleTests}
         if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
             selector = sys.argv[1]
             if selector not in groups or len(sys.argv) != 2:

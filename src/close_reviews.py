@@ -246,6 +246,21 @@ def replans_due(events, now):
     return [body for _, _, _, body in sorted(candidates)[:available]]
 
 
+def _record_replans(events, now, dst, outcomes):
+    """The tick's append boundary; retain receipts if a later append fails."""
+    import dispatch
+    by_subject = fold.fold(events)[3]
+    for body in replans_due(events, now):
+        filed = next(e for e in reversed(by_subject[body['subject']])
+                     if e['type'] == 'charter-filed' and fold.ts(e['ts']) <= now)
+        refused = dispatch.emit(dst, {'subject': body['subject'], 'project': filed['project']},
+                                'charter-replan', strict=True, verdict_src=body['verdict_src'],
+                                findings=body['findings'], uncovered=body['uncovered'])
+        if refused is not None:
+            raise ValueError('replan append refused: ' + refused)
+        outcomes.append('recorded ' + body['subject'])
+
+
 def due(events, specs, now):
     """Eligible charter IDs from the pass snapshot, without load or paid work."""
     by_subject = defaultdict(list)
