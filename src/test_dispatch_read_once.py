@@ -495,6 +495,7 @@ def equality_setup(d, stack, args, config, pin, meter, real_seat):
                                    (d.AGENTS / "builder.schema.json").read_bytes()))
     elif fixture == "window-override":
         d.spec_path(subject).write_text("window_min: 180\n\nfixture\n")
+        args.timeout = 90  # Compare the same explicit limit at both revisions.
     elif fixture in ("retry-wait", "retry-ready"):
         seed("builder", "infra-failure", role="builder", backend="codex", attempt="prior",
              **{"class": "runner-or-network"})

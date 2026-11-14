@@ -1578,7 +1578,7 @@ def _main(a):
         dsn_role = grading_env.dsn_role(grading_view) if grader_seat else "none"
     elif a.role in ("owed-sweeper", "owed-verifier"): dsn_role = sweep_need.sweep_dsn_role(CONTENT / f"{a.subject}.md", a.project, lambda: provision_sweep_env(cwd, ROOT / "repos" / a.project))
     # L-spec-0269: every start records the window it was offered under and who is waiting on it — any role, any backend (a flat, unbumped cap for run_claude/run_codex; the full formula, load-bearing, for run_seat).
-    wm = window_min(a.role, a.subject, current_events(), backend=backend)
+    wm = window_min(a.role, a.subject, current_events(), backend=backend); run_min = a.timeout if a.timeout is not None else max(tmin, wm)
     waiter_pid = os.getpid()
     waiter_kv = dict(window_min=wm, waiter_pid=waiter_pid, waiter_host=socket.gethostname(),
                      waiter_proc_start=panes.proc_start(waiter_pid))
@@ -1614,16 +1614,16 @@ def _main(a):
     def timed_out(exc, on_seat, tail=""):
         _active_view.get().after_backend = True
         note = __import__("wip_resume").on_timeout(sys.modules[__name__], a, cwd, ledger, base, spawn, start_head, exc, on_seat) if builder else ""
-        fail(f"timeout after {a.timeout or tmin} min{tail}" + (f"; {note}" if note else ""), reason="timeout", backend_failure=True, exit_code=124)
+        fail(f"timeout after {run_min} min{tail}" + (f"; {note}" if note else ""), reason="timeout", backend_failure=True, exit_code=124)
     try:
         if backend == "codex":
-            r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, (a.timeout or tmin) * 60,
+            r = run_codex(spawn, a.role, mm["model"], schema_path, packet, cwd, run_min * 60,
                          path=write_path, effort=mm.get("effort"))
         elif seat:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
+            r = run_seat(spawn, cmd, packet, cwd, run_min * 60, path=write_path,
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view)
         else:
-            r = run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
+            r = run_claude(cmd, packet, cwd, run_min * 60)
     except subprocess.TimeoutExpired as exc:
         timed_out(exc, seat)
     except (Unserved, spawns.Cancelled) as e:
@@ -1649,9 +1649,9 @@ def _main(a):
                     backend_fallback=True, fallback_from="codex")
         _active_view.get().after_backend = False
         try:
-            r = run_seat(spawn, cmd, packet, cwd, (a.timeout or tmin) * 60, path=write_path,
+            r = run_seat(spawn, cmd, packet, cwd, run_min * 60, path=write_path,
                         window=wm * 60, ledger=ledger, base=base, role=a.role, view=view) if seat \
-                else run_claude(cmd, packet, cwd, (a.timeout or tmin) * 60)
+                else run_claude(cmd, packet, cwd, run_min * 60)
         except subprocess.TimeoutExpired as exc:
             timed_out(exc, seat, f" (on the fallback backend {backend})")
         except (Unserved, spawns.Cancelled) as e:
