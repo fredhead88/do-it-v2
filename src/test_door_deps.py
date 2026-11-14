@@ -1699,7 +1699,7 @@ SURFACE_GROUPS = (
      r'project_scope|ledger_files|fold_emits|fold_stalls|evidence_revision|health_alarms|build_runner)',
      'answer-module function that no answer root reaches: CLI main, report, ledger writer or executor '
      'entry living beside a reachable helper'),
-    (r'(brief|daily_summary|digest_actions|flow_health|look|look_.*|realm|realm_.*|scorecard|stuck_digest|'
+    (r'(brief|daily_summary|digest_actions|dispatch_disagreement|flow_health|look|look_.*|realm|realm_.*|scorecard|stuck_digest|'
      r'throughput|speed_report|problems|owed_digest|owed_metrics|usage|seat_usage|howto|plain|plain_backfill|notes|'
      r'notification_policy|merge_news|merge_lane_board|ubicloud_bill|gh_bill|transcript_scan|harvest|'
      r'rounds|spec_history|pace|models|shape|stall_sample|validate|verifier|window_attribution|retired|'

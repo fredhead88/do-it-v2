@@ -60,6 +60,7 @@ PROVING = (LIVE_REPO / "src" / "proving.py") if (LIVE_REPO / "src" / "proving.py
 BRIEF = (LIVE_REPO / "src" / "brief.py") if (LIVE_REPO / "src" / "brief.py").is_file() else (HERE / "brief.py")
 
 KEEP = {
+    "dispatch-disagreed",
     "spawn-started", "spawn-done", "spawn-failed", "spawn-stale", "build-started", "build-done", "build-blocked", "backend-fallback",
     "verdict", "review", "merge-gate-clean", "merge-gate-rework", "merge-gate-undetermined", "shipped", "escalation-blocking",
     "question", "decision", "spec-written", "charter-filed", "plan-written", "tick", "spec-killed",
@@ -112,6 +113,14 @@ def compact(e, actor):
     if ty == "lesson" and not (actor == "thinker" and e.get("problem")):
         return None                      # only the Thinker's problem-naming lessons are a handled signal
     r = {"t": e.get("ts", ""), "ty": ty, "s": subj, "a": actor, "pr": e.get("project")}
+    if ty == 'dispatch-disagreed':
+        import dispatch_disagreement
+        if actor not in dispatch_disagreement.ROLES.values() or dispatch_disagreement.event_reason(e):
+            return None
+        r.update({k: e[k] for k in ('rule', 'nextstep_answer', 'receiver_answer')})
+    if ty == 'spawn-failed':
+        r.update(reason=realm_codex.text(e.get('reason') or 'unspecified', 160) if e.get('backend') == 'codex' else e.get('reason') or 'unspecified',
+                 refused=__import__('dispatch_disagreement').refused(e.get('why')))
     if ty in CHARTER_ONLY:
         r["k"] = e.get("kind") or e.get("stage") or e.get("status")
         r["why"] = trunc(e.get("finding") or e.get("why") or e.get("reason") or e.get("gap") or e.get("text") or e.get("seam") or "", 220)
@@ -1475,6 +1484,7 @@ def bootstrap(hours, states=None, goals=None, proving=None, now=None, part=None)
     if part != 'rest':
         metrics_now = metrics_at(rows, states, claims, now, sys_signals(), None, spec_charter)
         out.update({"glance": glance_payload(now), **views_payload(now), "live": True,
+            "dispatch_readiness": __import__('dispatch_disagreement').daily(rows, now),
             "now": now.isoformat(timespec="seconds"), "root": str(ROOT), "metrics": metrics_now,
             "window": [window_rows[0]["t"] if window_rows else now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")],
             "ledger_start": rows[0]["t"] if rows else None, "n_events": len(raw), "states": states,
