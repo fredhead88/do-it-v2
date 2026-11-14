@@ -124,6 +124,7 @@ Holds use admission.json holding; dry runs never save. Receiver alone reclaims a
 `charter-replan`: tick-only; held/released: planner/thinker/operator with nonblank why.
 `relay.plannable`: strict later release; hold/capacity waits preserve existing intake gates.
 `src/stall_alarm.py`: pure plan/dispatch/close/autodispatch/merge clocks; `stall-thresholds.toml`.
+build/grade/review/deploy/owed_checks: shared readers; failed readings are undetermined.
 `flow_health.daily`: M1 daily summary remains; no per-spec `stuck-over-1h` lessons.
 ## Member verdicts
 Source: `look.toml` `[merge_queue]`, `src/window_members.py`, `src/prequeue.py` (`doit prequeue`).
