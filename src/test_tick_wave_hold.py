@@ -22,6 +22,7 @@ import fold
 import fold_stalls
 import lane_driver
 import lane_rules
+import look
 import nextstep
 import spawns
 import tick
@@ -60,11 +61,13 @@ class WaveHoldBase(unittest.TestCase):
         (self.root / 'state').mkdir()
         (self.root / 'content').mkdir()
         (self.root / 'content' / f'plan-{CHARTER}.md').write_text(PLAN)
+        (self.root / 'look.toml').write_text('[push.main]\ndemo = "main"\n')
         self.scope = patch.dict(os.environ, DOIT_ROOT=str(self.root))
         self.scope.start()
         self.addCleanup(self.scope.stop)
         for p in (patch.object(fold, 'ROOT', self.root), patch.object(fold, 'EVENTS', self.root / 'events'),
-                  patch.object(dispatch, 'CONTENT', self.root / 'content'), patch.object(fold, 'NOW', NOW)):
+                  patch.object(dispatch, 'CONTENT', self.root / 'content'), patch.object(fold, 'NOW', NOW),
+                  patch.object(look, 'DEFAULT_TOML_PATH', self.root / 'look.toml')):
             p.start()
             self.addCleanup(p.stop)
         self.boundary = Boundary()
@@ -233,15 +236,7 @@ class TestAC3EntryPoints(WaveHoldBase):
         self.assertIn(f'hold {SID}: not-ready:{subject_reason}', out)
         out = lane_driver.run(events, specs, NOW, runner=self.boundary)
         self.assertIn(f'hold {SID}: not-ready:{subject_reason}', out)
-        # Direct launch of a stale action Step is re-checked against a fresh read.
-        action = replace(self.step_ignoring_hold(), state='action', action='build', reason='condition met',
-                         clears=None)
-        self.boundary.events, self.boundary.specs, self.boundary.now = events, specs, NOW
-        self.assertIsNone(tick.launch(action, dispatcher=self.boundary))
-        self.assertEqual(tick.HOLD_REASONS.get(SID), f'not-ready:{subject_reason}')
-        self.assertEqual(self.boundary.calls, [])
-        self.assertEqual(self.step().reason, f'not-ready:{subject_reason}')
-        self.assertFalse(list((self.root / 'worktrees').glob('*')) if (self.root / 'worktrees').exists() else [])
+        # a224de0 reverted the L-spec-2316 direct-launch stale-Step re-check.
 
     def step_ignoring_hold(self):
         return self.step()
