@@ -147,7 +147,7 @@ def event_content_key(e):
     return (e.get("subject", "?"), e.get("type", "?"), raw_content_json(e))
 
 
-def _merge_same_ts(items):
+def _merge_same_ts(items, *, content_keys=None):
     """`items` share an identical `str(ts)` and already arrive in original
     (file-glob, then line) order. Re-order them so that two events from the
     SAME source file keep their relative order (a file's own append order is
@@ -167,7 +167,8 @@ def _merge_same_ts(items):
     # Compute a head's canonical JSON once, rather than once for every other
     # file's pop. The ordinal preserves the legacy stable tie for identical
     # content keys (the queues' original insertion order).
-    heap = [(event_content_key(q[0]), ordinal, q)
+    heap = [(content_keys[id(q[0])] if content_keys and id(q[0]) in content_keys
+             else event_content_key(q[0]), ordinal, q)
             for ordinal, q in enumerate(queues.values())]
     heapq.heapify(heap)
     out = []
@@ -178,9 +179,15 @@ def _merge_same_ts(items):
         _key, ordinal, q = heapq.heappop(heap)
         out.append(q.popleft())
         if q:
-            heapq.heappush(heap, (event_content_key(q[0]), ordinal, q))
+            head_key = (content_keys[id(q[0])] if content_keys and id(q[0]) in content_keys
+                        else event_content_key(q[0]))
+            heapq.heappush(heap, (head_key, ordinal, q))
 
     return out
+
+
+def _survivor_order(raw, dead):
+    return ledger_cache.survivor_order(raw, dead, actor_of, _merge_same_ts)
 
 
 def actor_of(filename: str) -> str:
@@ -190,21 +197,9 @@ def actor_of(filename: str) -> str:
     return "-".join(parts[1:-1]) if len(parts) >= 3 else stem
 
 
-def _read_events_uncached():
-    """Reference parser and safe fallback; kept independent of the cache."""
-    out = []
-    for name, lines in ledger_files.iter_sources(EVENTS) if EVENTS.exists() else []:
-        actor = actor_of(name)
-        for n, line in enumerate(lines, 1):
-            if not line.strip():
-                continue
-            try:
-                e = ledger_compact.compact(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-            e["actor"], e["_src"] = actor, f"{name}:{n}"
-            out.append(e)
-    return out
+def _read_events_uncached(with_reaped=True):
+    """Uncached reference parsing, with explicit cleanup-history selection."""
+    return ledger_cache.read_uncached(EVENTS, actor_of, with_reaped)
 
 
 def _immutable_mutation(*args, **kwargs):
@@ -230,7 +225,15 @@ def _immutable(value):
 
 
 class _FoldInput(list):
-    """A caller-owned list carrying only private admission-prefix provenance."""
+    """A caller-owned list carrying only private admission-prefix provenance
+    and, for default reads, what the read skipped (`_skipped`)."""
+    _skipped = None
+
+
+def skipped_counts(events):
+    """{(project, ts): n} of dead records a default read skipped for these
+    events, in the read's own project scope; empty for plain caller lists."""
+    return dict(getattr(events, '_skipped', None) or {})
 
 
 class ReaderSnapshot:
@@ -251,8 +254,9 @@ class ReaderSnapshot:
         self._events = ()
         self._visible = 0
         self._applied = ()
+        self._skipped = None
 
-    def _publish(self, scope, generation, events):
+    def _publish(self, scope, generation, events, skipped=None):
         canonical = list(events)
         positions = {id(e): i for i, e in enumerate(canonical)}
         applied = []
@@ -264,6 +268,7 @@ class ReaderSnapshot:
         self._events = tuple(_immutable(e) for e in canonical)
         self._visible, self._applied = len(events), tuple(applied)
         self._scope, self._generation = scope, generation
+        self._skipped = skipped
 
     def _copy(self):
         # Exactly one shallow event-copy pass, including filtered corrections.
@@ -272,10 +277,11 @@ class ReaderSnapshot:
         result = _FoldInput(out[:self._visible])
         result._snapshot = self
         result._canonical = self._events[:self._visible]
+        result._skipped = self._skipped
         return result
 
 
-def read_events(use_cache=True, *, snapshot=None):
+def read_events(use_cache=True, *, snapshot=None, with_reaped=False):
     """Every event in every file, oldest first. A torn tail never wedges the fold.
 
     Tie-break on identical `ts` (R5/L-charter-0040): two events from the SAME
@@ -288,40 +294,19 @@ def read_events(use_cache=True, *, snapshot=None):
     `"deploy-refused" < "deploy-started"`, used to let a stale `deploy-started`
     win a false "in flight" row (fold.in_flight_deploys); it cannot now, because
     that pair — WERE it in one file — keeps its true append order, and across
-    files the order is content-derived, never filename-derived."""
-    if use_cache and os.environ.get("DOIT_READ_CACHE", "1") != "0":
-        try:
-            import ledger_cache
-            if snapshot is None:
-                out = ledger_cache.read(EVENTS, ROOT / "cache", actor_of)
-            else:
-                scope = (str(EVENTS.resolve()), str((ROOT / "cache").resolve()), PROJECT)
-                previous = snapshot._generation if snapshot._scope == scope else None
-                result = ledger_cache.read_conditional(EVENTS, ROOT / "cache", actor_of,
-                                                       previous=previous)
-                if result.events is not None:
-                    out = finish_events(result.events, owned=True)
-                    snapshot._publish(scope, result.generation, out)
-                return snapshot._copy()
-        except ledger_cache.LockTimeout:
-            if snapshot is not None:
-                snapshot._clear()
-            raise
-        except (OSError, ValueError, EOFError, KeyError, TypeError):
-            # A read-only root, a corrupt cache or a racing writer is harmless.
-            # The ledger remains the only authority.
-            if snapshot is not None:
-                snapshot._clear()
-            out = _read_events_uncached()
-    else:
-        if snapshot is not None:
-            snapshot._clear()
-        out = _read_events_uncached()
-    return finish_events(out, owned=True)
+    files the order is content-derived, never filename-derived.
+
+    Dead project `tree-reaped` records are skipped before JSON decoding and
+    counted (`skipped_counts`). `with_reaped=True` is the explicit full-history
+    request: the uncached reference parse, never touching a cache or snapshot."""
+    if with_reaped:
+        return finish_events(_read_events_uncached(True), owned=True)
+    return ledger_cache.read_default(use_cache, snapshot, sys.modules[__name__])
 
 
 def finish_events(raw, *, owned=False):
     """Normalize events; owned parser-ordered buffers may be consumed in place."""
+    ordering = getattr(raw, 'ordering', {})
     out = raw if owned else [dict(e) for e in raw]
     # Restore parser order for callers supplying files/lines in any order.
     if not owned: out.sort(key=lambda e: (e['_src'].rsplit(':', 1)[0], int(e['_src'].rsplit(':', 1)[1])))
@@ -336,7 +321,11 @@ def finish_events(raw, *, owned=False):
         cur_ts = str(out[i].get("ts", ""))
         while j < n_out and str(out[j].get("ts", "")) == cur_ts:
             j += 1
-        merged.extend(_merge_same_ts(out[i:j]))
+        group = out[i:j]
+        if group and all(e['_src'] in ordering for e in group):
+            merged.extend(sorted(group, key=lambda e: ordering[e['_src']]))
+        else:
+            merged.extend(_merge_same_ts(group))
         i = j
     # ★ Corrections apply BEFORE the project filter, never after (D111). The very
     # mis-write that motivated them was a wrong `project` value — filter first and
@@ -1326,6 +1315,8 @@ def spend_rows(events):
     replayed spawn drew real money.
     """
     seeds = {e["project"] for e in events if e.get("project")}
+    # A skipped dead record still names its project: the standing row survives the skip.
+    seeds |= {p for p, _ in skipped_counts(events) if p}
     # ★ R3: under §9.1 the filter value itself seeds a row, so a project with NO
     # event at all reads `$0.00 · 0 spawns` rather than as silence — zero-out-of-
     # zero-spawns is the measurement R3 exists for. Unfiltered there is no name
@@ -1938,7 +1929,7 @@ def render(events, specs, charters, ignored, by_subject):
     frozen = freeze.state()
 
     scope = f" · project={' '.join(str(PROJECT).split())}" if PROJECT else ""
-    L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events)}{scope}", ""]
+    L = [f"# board · {NOW.isoformat(timespec='seconds')} · fold @ {len(events) + sum(skipped_counts(events).values())}{scope}", ""]
     if frozen is not None:
         cap = frozen["cap"] or "lifted by the Thinker"
         text = " ".join(frozen["text"].split())
@@ -2463,7 +2454,7 @@ if __name__ == "__main__":
             print(json.dumps(event, sort_keys=True))
         if not show_board:
             sys.exit(0)
-    ev = read_events()
+    ev = read_events(with_reaped=cmd == "events")
     if cmd == "inbound":
         sys.stdout.writelines("  " + row + "\n" for row in inbound_rows(ev))
         sys.exit(0)

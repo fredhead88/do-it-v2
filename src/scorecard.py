@@ -302,6 +302,10 @@ def _cells(row):
 def day_rows(events: list[dict], now: datetime, days: int = 7, samples: list[dict] | None = None) -> list[dict]:
     now = _utc(now)
     parsed = _events(events)
+    # Dead cleanup records a default read skipped still count here exactly as
+    # when decoded: each is one skipped event when its timestamp is invalid.
+    skipped_events = len(events) - len(parsed) + sum(
+        n for (_, stamp), n in (getattr(events, '_skipped', None) or {}).items() if _utc(stamp) is None)
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     written, shipped, builds = {}, {}, defaultdict(list)
     histories = defaultdict(list)
@@ -330,7 +334,7 @@ def day_rows(events: list[dict], now: datetime, days: int = 7, samples: list[dic
         until = min(since + timedelta(days=1), now)
         cohort = [s for s, t in shipped.items() if s in written and since <= t < until]
         row = dict(date=str(since.date()), partial=ago == 0, through=until.isoformat(),
-                   skipped_events=len(events) - len(parsed), sampled=dict(stall=False, pace=False),
+                   skipped_events=skipped_events, sampled=dict(stall=False, pace=False),
                    shipped=len(cohort), median_lead_h=_median([(shipped[s] - written[s]).total_seconds() / 3600 for s in cohort]),
                    multi_build_pct=100 * sum(sum(t <= shipped[s] for t in builds[s]) > 1 for s in cohort) / len(cohort) if cohort else None)
         ws = window_stats(events, since, until)

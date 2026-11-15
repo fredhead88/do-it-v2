@@ -96,7 +96,9 @@ VIRTUAL = {
     'src/fold.py': {'iter_sources': 1},
     'src/grading_env.py': {'iter_sources': 1},
     'src/guards_live.py': {'read_text': 1},
-    'src/ledger_cache.py': {'_members': 1, '_open_binary': 1},
+    # L-spec-2137: cache skip accounting and full-history byte/text primitives.
+    'src/ledger_cache.py': {'_members': 1, '_open_binary': 2, 'iter_sources': 1,
+                            '_read_bytes': 1, 'read_text': 2},
     'src/ledger_gate.py': {'iter_sources': 1},
     'src/look.py': {'read_text': 1},  # L-spec-2176: raw own-file ledger input.
     'src/merge_deadman.py': {'read_text': 1},

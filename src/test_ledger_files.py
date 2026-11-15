@@ -221,8 +221,8 @@ class LedgerFilesTests(unittest.TestCase):
             for dbpath in (self.root / 'cache').glob('*.sqlite3'):
                 with closing(sqlite3.connect(dbpath)) as db:
                     versions.append(db.execute('PRAGMA user_version').fetchone()[0])
-            self.assertIn(4, versions)
-        self.assertEqual(ledger_cache.VERSION, 4)
+            self.assertIn(5, versions)
+        self.assertEqual(ledger_cache.VERSION, 5)
         print('L-spec-1787 AC2 ok')
 
     def test_ac3_adopted_readers(self):

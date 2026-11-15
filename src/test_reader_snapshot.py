@@ -294,7 +294,7 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(states, ['shipped-owed-evidence', 'shipped-owed-due'])
             self.assertEqual((read.call_count, finish.call_count), (1, 1))
             self.assertEqual(set(vars(self.snapshot)),
-                {'_events', '_visible', '_applied', '_scope', '_generation'})
+                {'_events', '_visible', '_applied', '_scope', '_generation', '_skipped'})
         print('AC3 controlled-clock waiting/due reference parity; actor/correction/ordering ok; loads=1 normalizations=1')
         print('L-spec-1711 AC3 ok')
 
