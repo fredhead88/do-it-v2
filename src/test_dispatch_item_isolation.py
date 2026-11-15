@@ -20,6 +20,9 @@ NOW = datetime(2026, 11, 1, 5, tzinfo=timezone.utc)
 IDS = ['L-spec-9001', 'L-spec-9002', 'L-spec-9003']
 
 
+from test_nextstep import clean_preflights
+
+
 class ItemIsolationTests(unittest.TestCase):
     def test_unwritable_counter_cannot_abort_healthy_dispatch(self):
         with tempfile.TemporaryDirectory(prefix='item-state-') as tmp:
@@ -43,11 +46,12 @@ class ItemIsolationTests(unittest.TestCase):
                 self.assertEqual([e['subject'] for e in events if e['type'] == 'autodispatch-failed'], [IDS[0]])
 
     def test_bad_wave_preparation_cannot_abort_snapshot(self):
-        rows = [dict(type='spec-written', subject=sid, actor='operator',
+        rows = clean_preflights([dict(type='spec-written', subject=sid, actor='operator',
                      ts=NOW.isoformat(), project='fixture', charter='L-charter-9001',
                      _src='L-operator-fixture.jsonl:' + sid.rsplit('-', 1)[-1],
-                     footprint=['poison' if sid == IDS[0] else sid + '.py']) for sid in IDS]
-        specs = {e['subject']: dict(state='written', evs=[e]) for e in rows}
+                     footprint=['poison' if sid == IDS[0] else sid + '.py']) for sid in IDS])
+        specs = {e['subject']: dict(state='written', evs=[e]) for e in rows
+                 if e['type'] == 'spec-written'}
         def wave(charter, footprint):
             if footprint == ['poison']:
                 raise RuntimeError('private payload')
@@ -63,8 +67,8 @@ class ItemIsolationTests(unittest.TestCase):
                 root = Path(tmp)
                 (root / 'events').mkdir()
                 specs = {sid: dict(state='written') for sid in IDS}
-                rows = [dict(type='spec-written', subject=sid, actor='operator',
-                             ts=NOW.isoformat(), project='fixture') for sid in IDS]
+                rows = clean_preflights([dict(type='spec-written', subject=sid, actor='operator',
+                             ts=NOW.isoformat(), project='fixture') for sid in IDS])
                 steps = [nextstep.Step(sid, 'spec', 'checking', 'action', 'grade', 'tick',
                                       None, 'ready', None, NOW.isoformat()) for sid in IDS]
                 if phase == 'planning':

@@ -575,9 +575,12 @@ class TestReworkPendingPreflight(unittest.TestCase):
                                unchanged_head=True, unchanged_branch=True, backup_branches=0))
 
     def failure_history(self):
-        return self.rows(('2026-11-10T10:00:00Z', 'build-done', dict(status='DONE')),
+        from test_nextstep import clean_preflights
+        return clean_preflights(self.rows(
+                         ('2026-11-10T09:59:00Z', 'spec-written', dict(project='demo')),
+                         ('2026-11-10T10:00:00Z', 'build-done', dict(status='DONE')),
                          *[(f'2026-11-10T11:0{i}:00Z', 'spawn-failed',
-                            dict(role='builder', reason='branch-not-descendant')) for i in range(3)])
+                            dict(role='builder', reason='branch-not-descendant')) for i in range(3)]))
 
     def test_three_branch_failures_hold_and_escalate_once(self):
         import autodispatch

@@ -20,6 +20,9 @@ NOW = datetime(2026, 11, 1, 5, tzinfo=timezone.utc)
 SID, DEP = 'L-spec-9001', 'L-spec-9002'
 
 
+from test_nextstep import clean_preflights
+
+
 def event(kind, minute=0, **fields):
     return dict(type=kind, subject=SID, actor='operator', project='fixture',
                 ts=(NOW + timedelta(minutes=minute)).isoformat(), **fields)
@@ -45,7 +48,7 @@ class TextHoldTests(unittest.TestCase):
             (root / 'content').mkdir()
             (root / 'events').mkdir()
             (root / 'content' / (SID + '.md')).write_text(f'Dependency-hold: waits_for="{DEP}"\n')
-            events = [event('spec-written')]
+            events = clean_preflights([event('spec-written')])
             class Transport:
                 dry_run = False
                 def __call__(self, argv):

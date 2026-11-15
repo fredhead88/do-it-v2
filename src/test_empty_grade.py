@@ -15,6 +15,9 @@ import tick
 import test_lane_driver as fixtures
 
 
+from test_nextstep import write_clean_preflights
+
+
 class EmptyGradeTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.DriverTests(methodName='runTest')
@@ -39,6 +42,8 @@ class EmptyGradeTests(unittest.TestCase):
         for actor, events in groups.items():
             (self.f.root / 'events' / ('L-' + actor + '-fixture.jsonl')).write_text(
                 ''.join(json.dumps(e) + '\n' for e in events))
+
+        write_clean_preflights(self.f.root)
 
     def snapshot(self):
         events = fold.read_events(use_cache=False)

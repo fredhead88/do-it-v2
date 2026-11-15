@@ -28,6 +28,7 @@ import fold
 import lane_rules
 import nextstep as ns
 import tick
+from test_nextstep import clean_preflights
 
 NOW = datetime(2026, 11, 7, 12, tzinfo=timezone.utc)
 SID = 'L-spec-9901'
@@ -48,7 +49,7 @@ def history(kind='spawn-failed', diagnostic='stale-base', count=1, role='builder
         else:
             extra['spawn'] = str(3000+n)
         rows.append(event(kind, -count+n, **extra))
-    return rows
+    return clean_preflights(rows)
 
 
 def specs(rows):
@@ -56,7 +57,7 @@ def specs(rows):
 
 
 def selected(rows, now=NOW, **kwargs):
-    return ns.step_for(rows, specs(rows), SID, now, lane_rules.load(), **kwargs)
+    return ns.step_for(clean_preflights(rows), specs(rows), SID, now, lane_rules.load(), **kwargs)
 
 
 def signed(name, body):

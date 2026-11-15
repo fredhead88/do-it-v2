@@ -39,6 +39,71 @@ def specs_for(events):
             if sid.startswith('L-spec-')}
 
 
+def clean_preflights(events):
+    """Admission evidence for fixtures testing unrelated dispatch behavior.
+
+    Each current preflight sits directly after its spec-written, so the final
+    event of a fixture history is unchanged."""
+    events = list(events)
+    existing = {e.get('_src') for e in events if e.get('type') == 'spec-preflight'}
+    rows = []
+    for event in events:
+        rows.append(event)
+        if (event.get('type') != 'spec-written'
+                or not isinstance(event.get('subject'), str) or not event.get('ts')):
+            continue
+        sid = event['subject']
+        identity = int(hashlib.sha256(json.dumps(event, sort_keys=True).encode()).hexdigest()[:12], 16)
+        checked = dict(type='spec-preflight', subject=sid, spec=sid,
+                       ts=(datetime.fromisoformat(event['ts'].replace('Z', '+00:00'))
+                           + timedelta(microseconds=1)).isoformat(),
+                       actor='spec-preflight', _src=f'L-spec-preflight-fixture.jsonl:{identity}',
+                       findings=[], red_on_master=[], undetermined=[], refused=[], cpu_s=0.0)
+        source = event.get('_src') or event.get('src')
+        if source:
+            checked['spec_written_src'] = source
+        if checked['_src'] not in existing:
+            rows.append(checked)
+    return rows
+
+
+def write_clean_preflights(root, events=None):
+    """Store current fixture evidence through its authorized emitter file."""
+    directory = Path(root) / 'events'
+    if events is None:
+        events = []
+        for path in sorted(directory.glob('*.jsonl')):
+            for number, line in enumerate(path.read_text().splitlines(), 1):
+                row = json.loads(line)
+                row.update(actor=fold.actor_of(path.name), _src=f'{path.name}:{number}')
+                events.append(row)
+    events = list(events)
+    captured = {(e.get('subject'), e.get('spec_written_src')) for e in events
+                if e.get('type') == 'spec-preflight'}
+    with (directory / 'L-spec-preflight-fixture.jsonl').open('a') as stream:
+        for written in events:
+            if (written.get('type') != 'spec-written'
+                    or not isinstance(written.get('subject'), str) or not written.get('ts')):
+                continue
+            try:
+                event = clean_preflights([written])[1]
+            except ValueError:
+                continue
+            key = (event['subject'], event.get('spec_written_src'))
+            if key not in captured:
+                stream.write(json.dumps({k: v for k, v in event.items()
+                                         if k not in {'actor', '_src'}}) + '\n')
+                captured.add(key)
+
+
+def fixture_steps(events, *args, **kwargs):
+    return ns.next_steps(clean_preflights(events), *args, **kwargs)
+
+
+def fixture_step(events, *args, **kwargs):
+    return ns.step_for(clean_preflights(events), *args, **kwargs)
+
+
 def replay(name):
     directory = FIXTURES / name
     events = [json.loads(l) for l in (directory / 'events.jsonl').read_text().splitlines()]
@@ -48,6 +113,7 @@ def replay(name):
     events += [dict(type='spawn-done', subject=e['subject'], ts=e['ts'],
                     actor='spec-auditor', bad_cut=False, _src='L-spec-auditor-fixture.jsonl:1')
                for e in list(events) if e['type'] == 'spec-written']
+    events = clean_preflights(events)
     normalized = ns._snapshot(events, {})[0]
     with patch.object(fold, 'NOW', now):
         specs = fold.fold(normalized)[0]
@@ -98,7 +164,7 @@ class NextStepTests(unittest.TestCase):
         self.addCleanup(content_patch.stop)
 
     def steps(self, events, specs=None, now=NOW, rules=None, waves=None):
-        return ns.next_steps(events, specs if specs is not None else specs_for(events),
+        return fixture_steps(events, specs if specs is not None else specs_for(events),
                              now, self.rules if rules is None else rules, waves)
 
     def one(self, events, specs=None, **kwargs):
@@ -297,7 +363,7 @@ class NextStepTests(unittest.TestCase):
         events = AttemptsRebuild1855Tests().fixture('rebuild') + [
             event('decision', -20, close='superseded'),
             event('queue-add', -190, project='do-it-v2', branch='l-spec-9001')]
-        step = ns.step_for(events, {SID: dict(state='building')}, SID, NOW, lr.load())
+        step = fixture_step(events, {SID: dict(state='building')}, SID, NOW, lr.load())
         self.assertEqual((step.state, step.action), ('action', 'close'), step)
         self.assertFalse(step.reason.startswith('undetermined'), step)
         self.assertEqual(self.queued_action(events, 'close',
@@ -369,8 +435,8 @@ class NextStepTests(unittest.TestCase):
         events[0]['footprint'] = ['fixture.py']
         originals = deepcopy((events, specs, self.rules, waves))
         def calls():
-            return (ns.next_steps(events, specs, now, self.rules, waves),
-                    ns.step_for(events, specs, 'L-spec-1459', now, self.rules, waves),
+            return (fixture_steps(events, specs, now, self.rules, waves),
+                    fixture_step(events, specs, 'L-spec-1459', now, self.rules, waves),
                     ns.classify_failure('ENOSPC', 1, self.rules),
                     ns.flow_counts(events, specs, now, self.rules, waves))
         expected = calls()
@@ -392,7 +458,7 @@ class NextStepTests(unittest.TestCase):
             stack.enter_context(patch.object(fold, 'NOW', NOW.replace(year=2040)))
             self.assertEqual(calls(), expected)
         self.assertEqual((events, specs, self.rules, waves), originals)
-        later = ns.next_steps(events, specs, now + timedelta(days=1), self.rules, waves)
+        later = fixture_steps(events, specs, now + timedelta(days=1), self.rules, waves)
         self.assertNotEqual(later, expected[0])
         a, b = 'L-spec-9002', SID
         wave_events = [event('spec-written', subject=s, charter='L-charter-9001', footprint=['file.py'])
@@ -419,11 +485,11 @@ class NextStepTests(unittest.TestCase):
         terminals = events[:1] + [event('shipped', -10), event('spec-killed', -5)]
         self.assertTrue(self.one(terminals, {SID: dict(state='killed')}).reason.startswith('undetermined:'))
         for rules in (None, {}, [], 1, {'build': {}}, dict(self.rules, build={'name': 'build'})):
-            steps = ns.next_steps(events, specs_for(events), NOW, rules)
+            steps = fixture_steps(events, specs_for(events), NOW, rules)
             self.assertEqual(len(steps), 2)
             self.assertTrue(all(s.state == 'hold' and s.owner == 'executor'
                                 and s.reason.startswith('undetermined:') for s in steps))
-        missing = ns.next_steps([], {SID: dict(state='written')}, NOW, self.rules)[0]
+        missing = fixture_steps([], {SID: dict(state='written')}, NOW, self.rules)[0]
         self.assertTrue(missing.reason.startswith('undetermined:'))
         missing = self.selected({'build': dict(since='not-a-time', reason='ready')})
         self.assertTrue(missing.reason.startswith('undetermined:'))
@@ -490,7 +556,7 @@ class NextStepTests(unittest.TestCase):
                    'w51': ('L-spec-1417', 'L-thinker-0004.jsonl:6210', '2026-10-22T11:21:20+00:00')}
         for name, (sid, trigger, since) in actions.items():
             events, specs, now, waves = replay(name)
-            steps = ns.next_steps(events, specs, now, self.rules, waves)
+            steps = fixture_steps(events, specs, now, self.rules, waves)
             matching = [s for s in steps if s.item == sid]
             self.assertEqual(len(matching), 1)
             expected = ns.Step(sid, 'spec', 'building', 'action', 'rebuild', 'tick', trigger,
@@ -503,10 +569,10 @@ class NextStepTests(unittest.TestCase):
                 self.assertEqual(decision['ref'], blocked['_src'])
                 ship = json.loads((FIXTURES/name/'shipped.json').read_text())
                 specs[sid]['state'] = 'shipped'
-                self.assertFalse(any(s.item == sid for s in ns.next_steps(events+[ship], specs, now, self.rules, waves)))
+                self.assertFalse(any(s.item == sid for s in fixture_steps(events+[ship], specs, now, self.rules, waves)))
             print(name, json.dumps(asdict(expected), sort_keys=True))
         events, specs, now, waves = replay('w42')
-        step = ns.step_for(events, specs, 'L-spec-1459', now, self.rules, waves)
+        step = fixture_step(events, specs, 'L-spec-1459', now, self.rules, waves)
         expected = ns.Step('L-spec-1459', 'spec', 'checking', 'hold', None, 'tick',
                            'L-thinker-0004.jsonl:6353', 'dependency: blocker-open: build',
                            'L-spec-1457 shipped', '2026-10-22T16:42:29+00:00')
@@ -518,15 +584,15 @@ class NextStepTests(unittest.TestCase):
                                    ('L-spec-1417', 'spec', 'in flight: L-builder-3018')]:
             expected = ns.Step(item, kind, 'building', 'hold', None, 'tick', 'L-builder-3018.jsonl:1',
                                reason, 'L-builder-3018 spawn-done/spawn-failed', '2026-10-22T10:14:59+00:00')
-            self.assertEqual(ns.step_for(events, specs, item, now, self.rules, waves), expected)
+            self.assertEqual(fixture_step(events, specs, item, now, self.rules, waves), expected)
         self.assertEqual(next(e for e in events if e['_src'] == 'L-builder-3018.jsonl:1')['issued_by'], 'executor')
         print('w56', json.dumps(asdict(expected), sort_keys=True))
         events, specs, now, waves = replay('disk')
         expected = ns.Step('L-spec-1186', 'spec', 'checking', 'hold', None, 'executor',
                            'L-executor-0001.jsonl:21570', 'infra: retry required',
                            'infra-retry backoff or freed disk', '2026-10-23T08:11:56+00:00')
-        self.assertEqual(ns.step_for(events, specs, expected.item, now, self.rules, waves), expected)
-        window = ns.step_for(events, specs, 'win-proj-a', now, self.rules, waves)
+        self.assertEqual(fixture_step(events, specs, expected.item, now, self.rules, waves), expected)
+        window = fixture_step(events, specs, 'win-proj-a', now, self.rules, waves)
         self.assertEqual(window, ns.Step('win-proj-a', 'window', 'merging', 'hold', None, 'executor',
                                         'L-executor-0001.jsonl:21568', 'window waiting; elapsed_min=0',
                                         'window resolution', '2026-10-23T08:11:22+00:00'))
@@ -1094,7 +1160,7 @@ class RulingReplayTests(RulingMixin, unittest.TestCase):
             original = deepcopy((evs, specs, self.rules))
             step = self.steps(evs)[0]
             self.assertEqual(step.owner, 'executor')
-            self.assertEqual(ns.step_for(evs, specs, subject, NOW, self.rules), step)
+            self.assertEqual(fixture_step(evs, specs, subject, NOW, self.rules), step)
             self.assertEqual(ns.flow_counts(evs, specs, NOW, self.rules)['planned'], 1)
             self.assertEqual(fold.step_row(step, self.rules, NOW)['spec'], subject)
             self.assertEqual(tick._steps(evs, specs, NOW), [step])
@@ -1204,7 +1270,7 @@ class NoSilentUndeterminedTests(unittest.TestCase):
             events = self.built() + [failure]
             with self.subTest(field=field):
                 self.assertEqual(ns._failure(events, self.rules), (failure, 'spec-defect'))
-                step = ns.step_for(events, specs_for(events), SID, NOW, self.rules)
+                step = fixture_step(events, specs_for(events), SID, NOW, self.rules)
                 self.assertEqual(self.steps(events), [step])
                 self.assertEqual((step.state, step.action, step.owner), ('hold', None, 'executor'))
                 self.assertTrue(step.reason.startswith('spec-defect:'))
@@ -1277,7 +1343,7 @@ class NoSilentUndeterminedTests(unittest.TestCase):
             events = original + [judgment]
             with self.subTest(kind=kind):
                 self.assertIsNone(ns._enqueue(self.context(events)))
-                step = ns.step_for(events, specs_for(events), SID, NOW, self.rules)
+                step = fixture_step(events, specs_for(events), SID, NOW, self.rules)
                 self.assertEqual(self.steps(events), [step])
                 self.assertEqual((step.state, step.action, step.owner), ('action', 'review', 'tick'))
                 self.assertEqual((step.trigger, step.since), (judgment['_src'], judgment['ts']))
@@ -1336,8 +1402,8 @@ class NoSilentUndeterminedTests(unittest.TestCase):
             allow_dependency_reads(stack)
             stack.enter_context(patch.object(tick, 'launch', side_effect=AssertionError('launch')))
             self.assertEqual(grading_env.failure_kind(self.diagnostic), 'unknown')
-            held = ns.step_for(events, specs, SID, NOW, rules)
-            review = ns.step_for(review_events, specs, SID, NOW, rules)
+            held = fixture_step(events, specs, SID, NOW, rules)
+            review = fixture_step(review_events, specs, SID, NOW, rules)
             self.assertEqual((held.owner, held.action), ('executor', None))
             self.assertEqual(review.action, 'review')
             self.assertEqual(set(asdict(held)), KEYS)
@@ -2005,7 +2071,7 @@ class AttemptsRebuild1855Tests(unittest.TestCase):
 
     def one(self, evs, now=NOW, specs=None):
         specs = specs or {SID: dict(state='written' if len(evs) == 2 else 'building')}
-        return ns.step_for(evs, specs, SID, now, lr.load())
+        return fixture_step(evs, specs, SID, now, lr.load())
 
     def context(self, evs, now=NOW):
         return dict(evs=evs, events=evs, sid=SID, now=now, dependency=None, wave=None,
@@ -2112,8 +2178,8 @@ class AttemptsRebuild1855Tests(unittest.TestCase):
                 release = row(kind, actor, minute=2, **({'ref': ref} if ref else {}))
                 with self.subTest(legacy=legacy, actor=actor, kind=kind, ref=ref), admitted(prefix+[release]) as (_, events, folded):
                     self.assertEqual(folded[0][real_sid]['state'], 'building' if legacy else 'blocked')
-                    steps = ns.next_steps(events, folded[0], cut, lr.load())
-                    step = ns.step_for(events, folded[0], real_sid, cut, lr.load())
+                    steps = fixture_steps(events, folded[0], cut, lr.load())
+                    step = fixture_step(events, folded[0], real_sid, cut, lr.load())
                     self.assertIn(step, steps)
                     self.assertEqual(step.action == 'rebuild', expected, step)
                     if expected:
@@ -2128,7 +2194,7 @@ class AttemptsRebuild1855Tests(unittest.TestCase):
                          [row('unblocked', 'operator', minute=2), row('spec-killed', 'operator', minute=3)]):
                 with admitted(prefix+tail) as (_, events, folded):
                     self.assertFalse(any(s.item == real_sid and s.action == 'rebuild'
-                                         for s in ns.next_steps(events, folded[0], cut, lr.load())))
+                                         for s in fixture_steps(events, folded[0], cut, lr.load())))
         self.evidence('AC3', checked)
 
 
@@ -2154,13 +2220,13 @@ class RetryRegressions1857Tests(unittest.TestCase):
                         release=event(kind,-20,actor=actor);release['_src']=f'L-{actor}-release.jsonl:1'
                         evs.append(release)
                         specs={SID:dict(state='written' if role=='builder' else 'building')}
-                        s=ns.step_for(evs,specs,SID,NOW,lr.load())
+                        s=fixture_step(evs,specs,SID,NOW,lr.load())
                         self.assertEqual(s.state,'action',s)
                         self.assertEqual((s.state,s.action,s.trigger,s.since,s.attempt),
                             ('action',{'builder':'build','grader':'grade','reviewer':'review'}[role],release['_src'],release['ts'],1),s)
-                        self.assertEqual(s,next(x for x in ns.next_steps(evs,specs,NOW,lr.load()) if x.item==SID))
+                        self.assertEqual(s,next(x for x in fixture_steps(evs,specs,NOW,lr.load()) if x.item==SID))
                         failed=event('autodispatch-failed',-1,role=role,reason='fresh failure')
-                        again=ns.step_for(evs+[failed],specs,SID,NOW,lr.load())
+                        again=fixture_step(evs+[failed],specs,SID,NOW,lr.load())
                         self.assertEqual((again.state,again.attempt),('hold',2));self.assertIn('retry-wait',again.reason)
 
     def test_retry1857_AC2_unauthorized_and_historical_holds(self):
@@ -2175,7 +2241,7 @@ class RetryRegressions1857Tests(unittest.TestCase):
                         release['actor']=actor;release['_src']=f'L-{actor}-release.jsonl:1'
                     else: release.pop('_src',None)
                     evs.append(release)
-                    s=ns.step_for(evs,{SID:dict(state='written')},SID,NOW,lr.load())
+                    s=fixture_step(evs,{SID:dict(state='written')},SID,NOW,lr.load())
                     self.assertEqual(s.state,'hold');self.assertIn(SID,tick.in_flight(evs))
                     self.assertIn(SID,tick.handled_items([s]))
 
@@ -2190,7 +2256,7 @@ class RetryRegressions1857Tests(unittest.TestCase):
                     hold=event('escalation-blocking',-30,actor='tick',role=role,ref=trigger['_src'])
                     hold.update(kind='retries-exhausted',_src='L-tick-retries.jsonl:1');evs.append(hold)
                     evs.append(event('decision',-20,**fields))
-                    step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+                    step=fixture_step(evs,{SID:dict(state='building')},SID,NOW,lr.load())
                     self.assertEqual(step.action,expected,step)
 
     def test_retry1857_AC1_ruling_exhaustion_stays_durable(self):
@@ -2198,7 +2264,7 @@ class RetryRegressions1857Tests(unittest.TestCase):
         evs[-1]['action']='rework'
         for i,minute in enumerate((-90,-70,-50)):
             evs.append(event('spawn-failed',minute,role='builder',spawn=f'L-builder-{9900+i}',reason='crash'))
-        step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+        step=fixture_step(evs,{SID:dict(state='building')},SID,NOW,lr.load())
         self.assertTrue(step.reason.startswith('retries-exhausted:'),step)
         self.assertEqual((step.state,step.attempt),('hold',3))
 
@@ -2214,7 +2280,7 @@ class RetryRegressions1857Tests(unittest.TestCase):
                     for i,minute in enumerate(minutes):
                         evs.append(event('spawn-failed',minute,role='builder',
                                          spawn=f'L-builder-{9900+i}',reason='crash'))
-                    step=ns.step_for(evs,{SID:dict(state='building')},SID,NOW,lr.load())
+                    step=fixture_step(evs,{SID:dict(state='building')},SID,NOW,lr.load())
                     self.assertTrue(step.reason.startswith(prefix),step)
                     self.assertIn('a.py',step.reason)
                     self.assertEqual((step.state,step.attempt),('hold',attempt))

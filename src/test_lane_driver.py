@@ -23,6 +23,9 @@ import nextstep
 from dataclasses import replace
 
 
+from test_nextstep import clean_preflights, write_clean_preflights
+
+
 class DriverTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='lane-driver-')
@@ -59,8 +62,8 @@ class DriverTests(unittest.TestCase):
         self.addCleanup(config_patch.stop)
         self.sid = 'L-spec-1001'
         self.calls = []
-        self.events = [self.event('spec-written', 40, project='proj', charter='L-charter-0052'),
-                       self.event('verdict', 1, confirmed=True)]
+        self.events = clean_preflights([self.event('spec-written', 40, project='proj', charter='L-charter-0052'),
+                       self.event('verdict', 1, confirmed=True)])
         self.specs = {self.sid: {'id': self.sid, 'state': 'graded', 'evs': self.events}}
         self.worktree = self.root / 'worktrees/proj' / self.sid.lower()
         (self.root / 'content' / (self.sid + '.md')).write_text('AC1 [backend]: fixture.\n')
@@ -407,6 +410,8 @@ class R7Fixture:
         with path.open('a') as stream:
             stream.write(json.dumps(dict(v=1, type=kind, subject=self.sid,
                               ts=fields.pop('ts', self.now.isoformat()), **fields)) + '\n')
+        if kind == 'spec-written':
+            write_clean_preflights(self.root)
 
     def events(self):
         return fold.read_events(use_cache=False)

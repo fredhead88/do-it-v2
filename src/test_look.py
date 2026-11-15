@@ -57,6 +57,9 @@ crons.CROND_DEFAULT = str(pathlib.Path(tempfile.mkdtemp()))
 n = 0
 
 
+from test_nextstep import clean_preflights, write_clean_preflights
+
+
 def ok(cond, why):
     global n
     assert cond, why
@@ -86,6 +89,8 @@ def append_raw(root, filename, ts, **kv):
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
         f.write(json.dumps({"v": 1, "ts": ts, **kv}) + "\n")
+    if kv.get("type") == "spec-written":
+        write_clean_preflights(root)
 
 
 def iso(dt):
@@ -2111,8 +2116,8 @@ root = newroot()
 saved = _ad_root_setup(root, project="watchdog")
 try:
     (root / "content" / f"{_WA}.md").write_text(CLEAN_SPEC_AD)
-    events = [_wev("spec-written", project="watchdog", actor="spec-writer"),
-              _wev("spawn-done", age=119, actor="spec-auditor", bad_cut=False)]
+    events = clean_preflights([_wev("spec-written", project="watchdog", actor="spec-writer"),
+                               _wev("spawn-done", age=119, actor="spec-auditor", bad_cut=False)])
     specs = fold.fold(events)[0]
     before = autodispatch.candidates(events, specs, _WNOW)
     ok(any(r["spec"] == _WA and r["status"] == "dispatchable" for r in before), "watchdog: build initially dispatchable")
