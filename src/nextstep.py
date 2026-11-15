@@ -1377,7 +1377,7 @@ def _bundle_step(c, row):
              'not-ready:bundle-pending'))
             or __import__('empty_grade').proof(c['events'], sid) is not None):
         return None
-    if _bundle_usable(evs, sid, ready):
+    if _bundle_usable(evs, sid, ready, main_sha=_main_identity(c)):
         if row['reason'].startswith(('grade-wait: bundle-pending', 'exhausted: bundle-pending',
              'not-ready:bundle-pending')):
             row.update(retry_hold=False, reason='evidence ready')
