@@ -16,7 +16,6 @@ import dispatch, fold, shape, tick, autodispatch  # noqa: E402
 import subprocess
 import unittest
 from unittest.mock import patch
-from test_nextstep import clean_preflights, write_clean_preflights
 
 
 class WorktreeRecordTests(unittest.TestCase):
@@ -81,7 +80,6 @@ class R7PinReplayTests(unittest.TestCase):
         for case in ('default','other-head','realm'):
             with self.subTest(case=case),contextlib.ExitStack() as stack:
                 f=R7Fixture(stack,'main',case); f.worktree()
-                write_clean_preflights(f.root, f.events())
                 lane_driver._dispatch('builder',f.sid,'proj',None,f.runner)
                 saved=f.dispatched[-1]; retained=f.commit(f.wt,'builder-work')
                 for attempt in range(2):
@@ -116,7 +114,6 @@ class R7PinReplayTests(unittest.TestCase):
         for failure in ('resolver','packet'):
             with self.subTest(failure=failure),contextlib.ExitStack() as stack:
                 f=R7Fixture(stack);f.worktree()
-                write_clean_preflights(f.root, f.events())
                 lane_driver._dispatch('builder',f.sid,'proj',None,f.runner)
                 self.replay_files(f,'L-builder-9901',f.dispatched[-1]);f.calls.clear()
                 if failure=='resolver': stack.enter_context(patch.object(packet,'_effective_base',side_effect=ValueError('unresolved')))
@@ -141,7 +138,6 @@ class R7PinReplayTests(unittest.TestCase):
         for entry in ('create','rebuild','replay'):
             with self.subTest(entry=entry),contextlib.ExitStack() as stack:
                 f=R7Fixture(stack)
-                write_clean_preflights(f.root, f.events())
                 f.event('L-spec-auditor-9001.jsonl','spawn-done',role='spec-auditor',bad_cut=False,
                         ts=(f.now-datetime.timedelta(minutes=30)).isoformat())
                 # The actual verification wrapper must carry an observable base.
@@ -262,12 +258,6 @@ def _builder_replay_base(root, project):
 def _write(root, name, *events):
     p = root / "events" / name
     p.write_text("".join(json.dumps(e) + "\n" for e in events))
-    from test_nextstep import clean_preflights
-    checked = root / 'events/L-spec-preflight-fixture.jsonl'
-    with checked.open('a') as stream:
-        for event in clean_preflights(events):
-            if event['type'] == 'spec-preflight':
-                stream.write(json.dumps({k: v for k, v in event.items() if k not in {'actor', '_src'}}) + '\n')
     return p
 
 
@@ -1264,7 +1254,6 @@ class HeldCandidateTests(unittest.TestCase):
                        for kind,age in (('build-started',85),('spawn-started',84),('spawn-done',71),('build-done',70))]
         events += [dict(type='verdict',subject=e,ts=ago(80),verdict='REWORK',actor='grader'),
                    dict(type='shipped',subject=f,ts=ago(60),actor='executor')]
-        events = clean_preflights(events)
         specs = fold.fold(events)[0]
         self.assertEqual((specs[d]['state'],specs[e]['state']),('graded','reviewing'))
         state_path = root / 'state/admission.json'
@@ -1348,7 +1337,6 @@ class AuditCandidateTests(unittest.TestCase):
         dispatch.emit(root / 'events' / 'L-operator-9673.jsonl', {}, 'spec-carried', subject='L-spec-9675', source='fixture', tier='fixture', audited_at=now.isoformat())
         with patch.object(autodispatch, 'capacity', return_value=1):
             events = fold.read_events(use_cache=False)
-            events = clean_preflights(events)
             rows = autodispatch.candidates(events, fold.fold(events)[0], now)
             self.assertEqual(_row(rows, 'L-spec-9673')['status'], 'blocked')
             self.assertTrue(_row(rows, 'L-spec-9673')['reason'].startswith('unaudited'))
@@ -1356,7 +1344,6 @@ class AuditCandidateTests(unittest.TestCase):
             self.assertEqual(_row(rows, 'L-spec-9675')['status'], 'seat-wait')
             dispatch.emit(root / 'events' / 'L-spec-auditor-9673.jsonl', {}, 'spawn-done', subject='L-spec-9673', bad_cut=False)
             events = fold.read_events(use_cache=False)
-            events = clean_preflights(events)
             after = autodispatch.candidates(events, fold.fold(events)[0], now)
             self.assertEqual(_row(after, 'L-spec-9673')['status'], 'dispatchable')
         with patch.object(autodispatch, 'capacity', return_value=3):
@@ -1386,7 +1373,6 @@ class VanishedRecoveryTests(unittest.TestCase):
                     with patch.object(dispatch, 'now', return_value=(NOW+datetime.timedelta(minutes=minute)).isoformat()):
                         self.assertIsNone(dispatch.emit(path, {}, kind, strict=True, subject=sid, project='proj', **kw))
                 emit('operator', 'spec-written', -300)
-                write_clean_preflights(root, fold.read_events(use_cache=False))
                 for n in range(count):
                     spawn = f'L-builder-{9860+n}'
                     emit('builder', 'build-started', -250+n, spawn=spawn, role='builder')

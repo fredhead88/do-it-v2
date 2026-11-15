@@ -29,27 +29,6 @@ import up
 up.ensure_planner = lambda events, now, **kw: 'idle'
 
 
-from test_nextstep import clean_preflights, write_clean_preflights
-
-
-def admitted_steps(events, steps=()):
-    events = list(events)
-    subjects = {e.get('subject') for e in events if e.get('type') == 'spec-written'}
-    for step in steps:
-        if step.action not in {'build', 'rebuild'} or step.item in subjects:
-            continue
-        events.append(dict(type='spec-written', subject=step.item, project='proj',
-                           actor='operator', ts=step.since))
-        subjects.add(step.item)
-    return clean_preflights(events)
-
-
-def fixture_run_steps(events, *args, **kwargs):
-    """Supply the admission prerequisite to unrelated tick transport fixtures."""
-    events = admitted_steps(events, kwargs.get('steps', ()))
-    return tick.run_steps(events, *args, **kwargs)
-
-
 def _launcher_evidence(criterion, body):
     import hashlib
     payload = json.dumps(body, sort_keys=True)
@@ -149,7 +128,7 @@ class LauncherTests(unittest.TestCase):
         steps += [self.step(state='hold', action=None, clears='decision'),
                   self.step(owner='executor'), self.step('gate'),
                   self.step('enqueue'), self.step('merge')]
-        out = fixture_run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=steps)
+        out = tick.run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=steps)
         actual = [(a[4], a[3]) for a in self.calls if a[:2] == ['doit', 'dispatch']]
         expected = [(s.item, tick.ROUTINE_ROLES[s.action]) for s in steps
                     if s.state == 'action' and s.owner == 'tick' and s.action in tick.ROUTINE_ACTIONS]
@@ -163,13 +142,12 @@ class LauncherTests(unittest.TestCase):
     def test_launch_real_snapshot(self):
         self.prepare('L-spec-9001')
         self.events[0]['_src'] = 'L-planner-fixture.jsonl:1'
-        self.events[:] = clean_preflights(self.events)
         specs = {'L-spec-9001': dict(id='L-spec-9001', state='written', evs=self.events)}
         expected = [step for step in tick._steps(self.events, specs, self.now)
                     if step.state == 'action' and step.owner == 'tick'
                     and step.action in tick.ROUTINE_ACTIONS]
         self.assertEqual([(step.item, step.action) for step in expected], [('L-spec-9001', 'build')])
-        fixture_run_steps(self.events, specs, self.now, dispatcher=self.dispatcher)
+        tick.run_steps(self.events, specs, self.now, dispatcher=self.dispatcher)
         actual = [(a[4], a[3]) for a in self.calls if a[:2] == ['doit', 'dispatch']]
         self.assertEqual(actual, [(step.item, tick.ROUTINE_ROLES[step.action]) for step in expected])
         _launcher_evidence('AC1-replay', dict(expected=[step.action for step in expected], dispatches=actual))
@@ -178,7 +156,7 @@ class LauncherTests(unittest.TestCase):
         self.prepare('L-spec-9001')
         for step in (self.step(state='hold', action=None, clears='decision'),
                      self.step(reason='undetermined: missing input')):
-            out = fixture_run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=[step])
+            out = tick.run_steps(self.events, {}, self.now, dispatcher=self.dispatcher, steps=[step])
             self.assertTrue(out[0].startswith(('hold ', 'undetermined ')))
         self.assertEqual(self.calls, [])
         for failure in (RuntimeError('packet raised'), dict(code=2, stdout='', stderr='packet refused')):
@@ -374,8 +352,6 @@ def ticks():
 def write(name, *events):
     p = EV / name
     p.write_text("".join(json.dumps({"v": 1, "ts": NOW, **e}) + "\n" for e in events))
-    if any(e.get('type') == 'spec-written' for e in events):
-        write_clean_preflights(EV.parent)
     return p
 
 
@@ -491,7 +467,7 @@ class AdmissionTests(unittest.TestCase):
                 stack.enter_context(fault)
             checks = stack.enter_context(patch.object(loadgate, 'admit', wraps=loadgate.admit))
             info = {}
-            lines = fixture_run_steps(self.events, {}, self.now, dispatcher=dispatcher,
+            lines = tick.run_steps(self.events, {}, self.now, dispatcher=dispatcher,
                                    steps=self.scenario(), admission=info, dry_run=dry)
             rows = self.rows() if tick.tick_path().exists() else []
             for row in rows:
@@ -517,7 +493,7 @@ class AdmissionTests(unittest.TestCase):
         with self.isolated('observe') as (root, stack):
             stack.enter_context(patch.object(tick, 'launch', side_effect=['one', 'two', RuntimeError('third'), *['healthy'] * 5]))
             info = {}
-            lines = fixture_run_steps([], {}, self.now, steps=self.scenario(), admission=info)
+            lines = tick.run_steps([], {}, self.now, steps=self.scenario(), admission=info)
             self.assertTrue(any(line.startswith('failed L-spec-9603') for line in lines))
             self.assertTrue(any(line.startswith('acted L-spec-9608') for line in lines))
             self.assertGreater(info['admission_checked'], 3)
@@ -691,10 +667,8 @@ class EnforcementTests(unittest.TestCase):
 
     def steps(self):
         actions = ['build', 'grade', 'rebuild', 'regrade', 'review', 'merge', 'review']
-        steps = [self.step(a, item=f'L-spec-{9601+i}', since=self.ago(1 if i == 6 else 2))
-                 for i,a in enumerate(actions)] + [self.step(state='hold', item='L-spec-9699', clears='decision')]
-        self.events[:] = admitted_steps(self.events, steps)
-        return steps
+        return [self.step(a, item=f'L-spec-{9601+i}', since=self.ago(1 if i == 6 else 2))
+                for i,a in enumerate(actions)] + [self.step(state='hold', item='L-spec-9699', clears='decision')]
 
     def run_pass(self, steps, *, outcomes=None, admission=True):
         info, calls = {}, []
@@ -708,7 +682,7 @@ class EnforcementTests(unittest.TestCase):
                 raise result
             return result
         with patch.object(tick, 'launch', side_effect=launch):
-            lines = fixture_run_steps(self.events, {}, self.now, steps=steps,
+            lines = tick.run_steps(self.events, {}, self.now, steps=steps,
                                    **({'admission':info} if admission else {}))
         return lines, calls, info
 
@@ -742,11 +716,7 @@ class EnforcementTests(unittest.TestCase):
 
     def test_enforce_AC3_AC4_and_AC5_retry(self):
         with self.enforcing() as (root, stack):
-            seeded = self.steps()
-            # steps() seeds admission rows; prepare() writes the written revisions itself, so
-            # start clean and let each actual() pass re-admit the revision prepare() wrote.
-            self.events.clear()
-            for step in seeded:
+            for step in self.steps():
                 self.prepare(step.item)
                 self.events[-1]['ts'] = step.since
             self.events += [dict(type='queue-entered', subject='L-spec-9606', ts=self.ago(3), project='proj')]
@@ -759,7 +729,7 @@ class EnforcementTests(unittest.TestCase):
                     return real_launch(step, **kw)
                 with patch.object(tick, 'launch', side_effect=launch):
                     info = {}
-                    lines = fixture_run_steps(self.events, {}, self.now, steps=self.steps(),
+                    lines = tick.run_steps(self.events, {}, self.now, steps=self.steps(),
                                            dispatcher=self.dispatcher, admission=info)
                 events = self.rows() if tick.tick_path().exists() else []
                 return lines,calls,[(e['type'],e.get('subject')) for e in events],info
@@ -787,9 +757,7 @@ class EnforcementTests(unittest.TestCase):
         with self.enforcing(), patch.dict(os.environ, DOIT_ADMISSION='off'):
             off = self.run_pass(self.steps())
         with self.enforcing(), patch.dict(os.environ,DOIT_ADMISSION='off'):
-            seeded = self.steps()
-            self.events.clear()
-            for step in seeded:
+            for step in self.steps():
                 self.prepare(step.item)
                 self.events[-1]['ts'] = step.since
             self.events += [dict(type='queue-entered',subject='L-spec-9606',ts=self.ago(3),project='proj')]
@@ -827,7 +795,7 @@ class EnforcementTests(unittest.TestCase):
         with self.enforcing(trip=40):
             info = {}
             with patch.object(tick,'launch',side_effect=RuntimeError('after dispatch')):
-                lines = fixture_run_steps(self.events,{},self.now,
+                lines = tick.run_steps(self.events,{},self.now,
                     steps=[self.step('build',item='raised',since=self.ago(20))],admission=info)
                 self.assertTrue(any(line.startswith('failed raised build: RuntimeError') for line in lines))
             self.assertEqual(info['admission_escape_due'],1)
@@ -961,7 +929,7 @@ class EnforcementTests(unittest.TestCase):
                 with patch.object(lg,'read_enforce_file',wraps=lg.read_enforce_file) as reader, \
                      patch.object(tick,'launch',return_value='spawn') as launch:
                     if entry == 'direct':
-                        lines = fixture_run_steps(self.events,{},self.now,steps=steps)
+                        lines = tick.run_steps(self.events,{},self.now,steps=steps)
                     else:
                         lines = (autodispatch if entry == 'auto' else lane_driver).run(self.events,{},self.now)
                     reader.assert_not_called()
@@ -971,9 +939,6 @@ class EnforcementTests(unittest.TestCase):
             with self.enforcing(trip=20 if entry == 'record' else 1,seats=4) as (root,stack):
                 steps = ([self.step('build',item=f'L-spec-{10000+i}',since=self.ago(20)) for i in range(1000)]
                          if entry == 'record' else self.steps())
-                # read_events normally stamps the filename actor (D90); the snapshot stands in for it.
-                snapshot = [{'actor': 'executor', **e} for e in admitted_steps(self.events, steps)]
-                stack.enter_context(patch.object(fold, 'read_events', return_value=snapshot))
                 for module,name,value in ((tick,'_steps',steps),(tick,'launch','spawn'),
                     (autodispatch,'redispatch_dead',[]),(merge_queue,'enqueue_due',[]),
                     (intake,'run',None),(carry,'sync_v4',None),(_watchdog_look,'emit_once',None),
@@ -1123,10 +1088,9 @@ class RetryRegressionTests(unittest.TestCase):
         from test_nextstep import RetryRegressions1857Tests, NOW, SID, event
         fixture=LauncherTests('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
         evs,hold=RetryRegressions1857Tests().fixture('builder');evs.remove(hold)
-        evs = clean_preflights(evs)
         specs={SID:dict(state='written')}
         with patch.object(dispatch,'now',return_value=NOW.isoformat()):
-            out=fixture_run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
+            out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
         self.assertTrue(any('retries-exhausted' in x for x in out),out)
         env=dict(os.environ,DOIT_ROOT=str(fixture.root),PYTHONPATH=str(pathlib.Path(__file__).parent.resolve()))
         import subprocess
@@ -1141,7 +1105,7 @@ class RetryRegressionTests(unittest.TestCase):
         self.assertEqual(nextstep._time(record['deadline'])-nextstep._time(record['ts']),datetime.timedelta(hours=24))
         self.assertIn(record,fold.open_escalations(rows))
         with patch.object(dispatch,'now',return_value=NOW.isoformat()):
-            fixture_run_steps(evs+rows,specs,NOW,dispatcher=fixture.dispatcher)
+            tick.run_steps(evs+rows,specs,NOW,dispatcher=fixture.dispatcher)
         self.assertEqual(len([e for e in fresh() if e.get('kind')=='retries-exhausted']),1)
         self.assertEqual(fixture.calls,[])
         # The fold collapses by subject; raw dedup must retain every role/ref.
@@ -1150,7 +1114,7 @@ class RetryRegressionTests(unittest.TestCase):
         extra=[release,review_trigger]+[event('spawn-failed',3+i,role='reviewer',spawn=f'L-reviewer-{9910+i}',reason=f'review-{i}') for i in range(3)]
         later=NOW+datetime.timedelta(minutes=60)
         with patch.object(dispatch,'now',return_value=later.isoformat()):
-            fixture_run_steps(evs+rows+extra,{SID:dict(state='building')},later,dispatcher=fixture.dispatcher)
+            tick.run_steps(evs+rows+extra,{SID:dict(state='building')},later,dispatcher=fixture.dispatcher)
         both=fresh();records=[e for e in both if e.get('kind')=='retries-exhausted']
         self.assertEqual({e['role'] for e in records},{'builder','reviewer'})
         self.assertEqual(len(fold.open_escalations(both)),1)
@@ -1161,14 +1125,14 @@ class RetryRegressionTests(unittest.TestCase):
         another=[renewed]+[event('spawn-failed',62+i,role='builder',spawn=f'L-builder-{9920+i}',reason=f'renewed-{i}') for i in range(3)]
         final_now=NOW+datetime.timedelta(minutes=120)
         with patch.object(dispatch,'now',return_value=final_now.isoformat()):
-            fixture_run_steps(evs+both+extra+another,{SID:dict(state='building')},final_now,dispatcher=fixture.dispatcher)
+            tick.run_steps(evs+both+extra+another,{SID:dict(state='building')},final_now,dispatcher=fixture.dispatcher)
         records=[e for e in fresh() if e.get('kind')=='retries-exhausted']
         self.assertEqual(len(records),3)
         self.assertEqual({e['ref'] for e in records if e['role']=='builder'},{evs[0]['_src'],renewed['_src']})
         # Failure to persist is visible and must not be described as success.
         tick.tick_path().unlink()
         with patch.object(dispatch,'emit',return_value='fixture refused'):
-            out=fixture_run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
+            out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher)
         self.assertTrue(any('fixture refused' in x for x in out),out)
 
     def test_retry1857_AC2_release_and_legacy_tail(self):
@@ -1181,7 +1145,6 @@ class RetryRegressionTests(unittest.TestCase):
                     fixture.calls.clear();tick.tick_path().unlink(missing_ok=True)
                     evs,hold=RetryRegressions1857Tests().fixture(role);hold.update(kind=kind,dead_spawn=f'L-{role}-9902')
                     evs[0]['project']='proj'
-                    evs = clean_preflights(evs)
                     if role == 'grader':
                         build = next(e for e in evs if e['type'] == 'build-done')
                         build['ready_sha'] = 'a' * 40
@@ -1193,12 +1156,12 @@ class RetryRegressionTests(unittest.TestCase):
                     usable=patch.object(nextstep,'_bundle_usable',return_value=True)
                     usable.start();self.addCleanup(usable.stop)
                     held=tick._steps(evs,specs,NOW)
-                    fixture_run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=held)
+                    tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=held)
                     autodispatch.redispatch_dead(evs,specs,NOW,runner=fixture.dispatcher,handled=tick.handled_items(held))
                     self.assertEqual(fixture.calls,[])
                     release=event('unblocked',-20);release['_src']='L-operator-release.jsonl:1';evs.append(release)
                     steps=tick._steps(evs,specs,NOW)
-                    out=fixture_run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=steps)
+                    out=tick.run_steps(evs,specs,NOW,dispatcher=fixture.dispatcher,steps=steps)
                     autodispatch.redispatch_dead(evs,specs,NOW,runner=fixture.dispatcher,handled=tick.handled_items(steps))
                     self.assertEqual(sum(a[:2]==['doit','dispatch'] for a in fixture.calls),1,out)
 
@@ -1630,8 +1593,6 @@ if __name__ == '__main__':
     def write_to(d, name, *events):
         p = d / name
         p.write_text("".join(json.dumps({"v": 1, "ts": NOW, **e}) + "\n" for e in events))
-        if any(e.get('type') == 'spec-written' for e in events):
-            write_clean_preflights(d.parent)
         return p
 
     # ══════════════════════════════════════════════════════════════════════════════
@@ -3179,8 +3140,6 @@ class AuditTickTests(unittest.TestCase):
     def emit(self, actor, kind, sid='L-spec-9673', minutes=-31, **kw):
         with patch.object(dispatch, 'now', return_value=(self.now + datetime.timedelta(minutes=minutes)).isoformat()):
             self.assertIsNone(dispatch.emit(self.root / 'events' / ('L-' + actor + '-9673.jsonl'), {}, kind, subject=sid, **kw))
-        if kind == 'spec-written':
-            write_clean_preflights(self.root)
 
     def read(self):
         events = fold.read_events(use_cache=False)
@@ -3201,7 +3160,7 @@ class AuditTickTests(unittest.TestCase):
         events, specs = self.read()
         now = now or self.now
         steps = tick._steps(events, specs, now)
-        out = fixture_run_steps(events, specs, now, dispatcher=self.record, steps=steps, **kwargs)
+        out = tick.run_steps(events, specs, now, dispatcher=self.record, steps=steps, **kwargs)
         return events, specs, steps, out
 
     def test_ac6_audit_argv_failure_validation_and_cap(self):
@@ -3239,9 +3198,9 @@ class AuditTickTests(unittest.TestCase):
             self.emit('spec-writer', 'spec-written', sid, project='proj')
             steps.append(replace(step, item=sid))
         events, specs = self.read()
-        dry = fixture_run_steps(events, specs, self.now, steps=steps, dispatcher=self.record, dry_run=True)
+        dry = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record, dry_run=True)
         self.assertEqual(self.calls, [])
-        out = fixture_run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        out = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
         self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in self.calls), tick.AUDIT_PASS_MAX)
         self.assertEqual(sum(line.startswith('seat-wait ') for line in out), 2)
         _launcher_evidence('AC6-cap', dict(out=out, dry=dry))
@@ -3258,13 +3217,13 @@ class AuditTickTests(unittest.TestCase):
         # Isolate audit launches while allowing the exempt specs their normal build Steps.
         events, specs = self.read()
         steps = tick._steps(events, specs, self.now)
-        out = fixture_run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        out = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
         self.assertEqual([a[4] for a in self.calls if a[:2] == ['doit', 'dispatch']],
                          ['L-spec-9802', 'L-spec-9801', 'L-spec-9800'])
         self.calls.clear()
         events, specs = self.read()
         steps = tick._steps(events, specs, self.now)
-        second = fixture_run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+        second = tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
         self.assertEqual(self.calls, [])
         _launcher_evidence('AC7-catchup', dict(first=out, second=second))
         import attempts
@@ -3275,7 +3234,7 @@ class AuditTickTests(unittest.TestCase):
             events, specs = self.read()
             steps = [s for s in tick._steps(events, specs, self.now) if s.item == 'L-spec-9673']
             self.calls.clear()
-            fixture_run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
+            tick.run_steps(events, specs, self.now, steps=steps, dispatcher=self.record)
             replay = autodispatch.redispatch_dead(events, specs, self.now, runner=self.record, handled=tick.handled_items(steps))
             self.assertEqual(self.calls, [])
             self.assertFalse(any(line.startswith('replayed ') for line in replay))
@@ -3284,7 +3243,7 @@ class AuditTickTests(unittest.TestCase):
             if n == 0:
                 later = self.now + datetime.timedelta(minutes=1)
                 due = [s for s in tick._steps(events, specs, later) if s.item == 'L-spec-9673']
-                fixture_run_steps(events, specs, later, steps=due, dispatcher=self.record)
+                tick.run_steps(events, specs, later, steps=due, dispatcher=self.record)
                 autodispatch.redispatch_dead(events, specs, later, runner=self.record, handled=tick.handled_items(due))
                 self.assertEqual(sum(a[:2] == ['doit', 'dispatch'] for a in self.calls), 1)
                 # Close the recording runner's synthetic start before testing exhaustion.
@@ -3347,8 +3306,6 @@ class VanishedTickTests(unittest.TestCase):
             name = spawn if spawn and fold.actor_of(spawn) == actor else f'L-{actor}-9861'
             path = tick.tick_path() if actor == 'tick' else fold.EVENTS / (name+'.jsonl')
             self.assertIsNone(dispatch.emit(path, {}, kind, strict=True, **fields))
-        if kind == 'spec-written':
-            write_clean_preflights(self.root)
 
     def fresh(self):
         # A different interpreter opens real committed ledger files, bypassing cache.
@@ -3926,14 +3883,14 @@ class BundleExhaustionTests(unittest.TestCase):
         specs = fold.fold(stale)[0]
         # Refused append stays visibly failed and cannot be described as escalated.
         with patch.object(dispatch, 'emit', return_value='fixture refused'):
-            out = fixture_run_steps(stale, specs, f.now, dispatcher=f.no_paid)
+            out = tick.run_steps(stale, specs, f.now, dispatcher=f.no_paid)
         self.assertTrue(any('failed durable exhaustion: fixture refused' in x for x in out), out)
         self.assertFalse(any(e.get('kind') == 'retries-exhausted' for e in f.readback()))
         with patch.object(tick.subprocess, 'Popen', side_effect=AssertionError('checker after exhaustion')):
-            for _ in range(3): fixture_run_steps(stale, specs, f.now, dispatcher=f.no_paid)
+            for _ in range(3): tick.run_steps(stale, specs, f.now, dispatcher=f.no_paid)
         for _ in range(3):
             rows = f.readback()
-            fixture_run_steps(rows, fold.fold(rows)[0], f.now, dispatcher=f.no_paid)
+            tick.run_steps(rows, fold.fold(rows)[0], f.now, dispatcher=f.no_paid)
         code = ('import datetime,fold,tick; from unittest.mock import patch; '
                 'ev=[e for e in fold.read_events(use_cache=False) if e.get("subject")=="L-spec-9911"]; '
                 'no=lambda *a,**k: (_ for _ in ()).throw(AssertionError("launch after exhaustion")); '

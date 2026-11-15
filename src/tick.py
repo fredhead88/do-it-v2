@@ -13,7 +13,6 @@ is a supervised pane that reads the same lane for itself.
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar, copy_context
 from itertools import chain
-from threading import Event
 
 import ledger_files
 import ledger_cache
@@ -884,30 +883,9 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
             return
         batch = list(pending_builders)
         pending_builders.clear()
-
-        def ordered_launch(step, preceding, started):
-            def ordered_dispatch(argv):
-                if argv[:2] == ['doit', 'dispatch']:
-                    preceding.wait()
-                    started.set()
-                return runner(argv)
-
-            ordered = _PassDispatcher(ordered_dispatch, events, specs, now, dry_run)
-            try:
-                return launch(step, dispatcher=ordered)
-            finally:
-                # A refused or failed preparation must also release its place.
-                preceding.wait()
-                started.set()
-
-        preceding = Event()
-        preceding.set()
         with ThreadPoolExecutor(max_workers=min(len(batch), BUILDER_LAUNCH_WORKERS)) as pool:
-            futures = []
-            for step, index, context in batch:
-                started = Event()
-                futures.append(pool.submit(context.run, ordered_launch, step, preceding, started))
-                preceding = started
+            futures = [pool.submit(context.run, launch, step, dispatcher=runner)
+                       for step, index, context in batch]
             for (step, index, context), future in zip(batch, futures):
                 lines = []
                 try:

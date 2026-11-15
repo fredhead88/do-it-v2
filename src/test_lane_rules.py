@@ -40,9 +40,6 @@ KEYS = {'spec', 'rule', 'action', 'actor', 'since', 'limit_min', 'overdue',
 ACTING = set(NAMES) - {'idle', 'wave-held', 'dependency-held'}
 
 
-from test_nextstep import clean_preflights
-
-
 def event(event_type, minute=-90, subject=SID, actor='operator', **fields):
     return dict(type=event_type, ts=(NOW + dt.timedelta(minutes=minute)).isoformat(),
                 subject=subject, actor=actor, **fields)
@@ -112,7 +109,6 @@ class LaneRulesTests(unittest.TestCase):
                         x['type'] in ('queue-remove', 'shipped', 'window-dropped', 'merge-conflict') for x in ev)]
 
     def rows(self, ev, now=NOW, **kw):
-        ev = clean_preflights(ev)
         rows = lr.due(ev, specs(ev), now, **kw)
         for row in rows:
             self.assertEqual(set(row), KEYS)
@@ -420,7 +416,7 @@ class LaneRulesTests(unittest.TestCase):
         for role in ('builder', 'grader'):
             with self.subTest(role=role):
                 spawn = 'L-' + role + '-9001'
-                dead = clean_preflights(base) + [event('spawn-stale', -5, role=role, spawn=spawn)]
+                dead = base + [event('spawn-stale', -5, role=role, spawn=spawn)]
                 self.assertEqual(len(autodispatch.dead_spawns(dead, NOW)), 1)
                 self.assertEqual(autodispatch.dead_spawns(dead + [hold], NOW), [])
                 self.assertEqual(len(autodispatch.dead_spawns(
@@ -556,7 +552,6 @@ true && echo VERIFIED
 
     def candidates(self, ev, now=NOW):
         with patch.object(tick, 'in_flight', return_value=set()):
-            ev = clean_preflights(ev)
             return next(r for r in autodispatch.candidates(ev, specs(ev), now) if r['spec'] == SID)
 
     def test_holds_lift_on_shipped(self):

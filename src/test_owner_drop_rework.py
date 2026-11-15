@@ -21,9 +21,6 @@ NODES = ['tests/test_shared.py::test_one', 'tests/test_shared.py::test_two']
 RUN = 'https://example.invalid/actions/runs/1790'
 
 
-from test_nextstep import clean_preflights
-
-
 def event(kind, minute, subject=SID, **fields):
     return dict(type=kind, subject=subject,
                 ts=(NOW + timedelta(minutes=minute)).isoformat(),
@@ -59,10 +56,10 @@ class OwnerDropReworkTests(unittest.TestCase):
             self.assertTrue(callable(prechange(packet, 'p_builder')))
 
     def history(self, subject=SID):
-        return clean_preflights([event('spec-written', -60, subject),
+        return [event('spec-written', -60, subject),
                 event('build-done', -50, subject, status='DONE'),
                 event('review', -40, subject, n_blocking=0),
-                event('merge-gate-clean', -30, subject)])
+                event('merge-gate-clean', -30, subject)]
 
     def step(self, events, subject=SID, old=False, specs=None):
         specs = specs or {e['subject']: dict(state='graded') for e in events}
@@ -142,7 +139,7 @@ class OwnerDropReworkTests(unittest.TestCase):
                             '-c', 'user.email=fixture@example.invalid', 'commit', '-q',
                             '--allow-empty', '-m', 'fixture'], check=True)
             tip = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
-            events = clean_preflights([event('spec-written', -60, path=str(spec), footprint=['src/nextstep.py'], project='fixture')])
+            events = [event('spec-written', -60, path=str(spec), footprint=['src/nextstep.py'], project='fixture')]
 
             def render(rows, old=False):
                 with patch.object(fold, 'read_events', return_value=rows), \

@@ -6,15 +6,12 @@ import nextstep
 import fold
 
 
-from test_nextstep import clean_preflights
-
-
 class EvaluationTests(unittest.TestCase):
     def test_table_vs_steps_agreement(self):
         now = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
-        events = clean_preflights([dict(type='spec-written', subject='L-spec-9401', project='fixture',
+        events = [dict(type='spec-written', subject='L-spec-9401', project='fixture',
                        ts='2026-10-23T10:00:00+00:00', actor='planner',
-                       _src='L-planner-fixture.jsonl:1')])
+                       _src='L-planner-fixture.jsonl:1')]
         specs = fold.fold(events)[0]
         rules = lane_rules.load()
         steps = nextstep.next_steps(events, specs, now, rules)

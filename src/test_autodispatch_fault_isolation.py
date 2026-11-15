@@ -270,10 +270,6 @@ class PerSpecIsolationTests(Scratch):
 
     def test_exception_isolation(self):
         rows = [self.written(s) for s in ('L-spec-1894', SID, 'L-spec-1896')]
-        rows += [event('spec-preflight', subject=s, actor='spec-preflight', minute=-119,
-                       spec=s, findings=[], red_on_master=[], undetermined=[],
-                       refused=[], cpu_s=0.0)
-                 for s in ('L-spec-1894', SID, 'L-spec-1896')]
         # Operator-written fixtures are exempt from the initial audit.
         original = json.dumps(rows, sort_keys=True)
         healthy_rows = [r for r in rows if r['subject'] != SID]

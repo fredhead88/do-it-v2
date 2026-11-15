@@ -202,8 +202,7 @@ def AC4():
     for commands in (("src/test_first.py", "src/test_second.py"), ("src/test_sleep.py",)):
         f.spec("\n".join('/usr/bin/python3 ' + path for path in commands))
         start = time.monotonic()
-        with mock.patch.object(sp, "TEST_CAP_S", 3), mock.patch.object(sp, "CHAIN_LIMIT_S", 3), \
-                mock.patch.object(subprocess, "Popen", side_effect=track):
+        with mock.patch.object(sp, "TEST_CAP_S", 3), mock.patch.object(subprocess, "Popen", side_effect=track):
             body = f.run()
         assert time.monotonic() - start < 8
         assert any("timeout" in x and commands[-1] in x for x in body["undetermined"]), body
@@ -312,8 +311,7 @@ def AC6():
     f.spec()
     before = {p.name: p.read_bytes() for p in (f.root / "events").iterdir()}
     for body in (f.run(), sp.run("L-spec-unknown", root=f.root)):
-        assert set(body) == {"spec", "findings", "red_on_master", "undetermined", "refused", "cpu_s"}
-        assert isinstance(body["refused"], list) and type(body["cpu_s"]) is float
+        assert set(body) == {"spec", "findings", "red_on_master", "undetermined"}
         assert all(isinstance(body[k], list) for k in ("findings", "red_on_master", "undetermined"))
     assert f.run()["spec"] == "L-spec-9001"
     assert not any(f.run()[k] for k in ("findings", "red_on_master", "undetermined"))
@@ -326,12 +324,9 @@ def AC6():
 def AC7():
     events = [dict(type=t, subject=s) for t, s in (("spec-written", "A"), ("spec-written", "B"),
               ("spec-preflight", "A"), ("spec-written", "A"), ("spec-written", "C"), ("spec-preflight", "C"))]
-    for e in events:
-        if e["type"] == "spec-preflight":
-            e["refused"] = []
     assert sp.pending(events) == ["B", "A"]
     assert sp.pending([]) == []
-    assert sp.pending([dict(type="spec-preflight", subject="X", refused=[])]) == []
+    assert sp.pending([dict(type="spec-preflight", subject="X")]) == []
     f = Fixture()
     for i in range(10):
         f.spec(sid=f"L-spec-{9100+i}")
@@ -340,7 +335,7 @@ def AC7():
         f.event(kind, f"L-spec-{9100+i}")
     # Test eligibility directly as well as a tick with the append boundary observed.
     old = dict(type="spec-written", subject="old", ts=(NOW-timedelta(days=4)).isoformat())
-    assert sp._eligible("old", [old], NOW)  # old unbuilt work stays eligible
+    assert not sp._eligible("old", [old], NOW)
     bodies = []
     with mock.patch.object(sp, "_append", side_effect=lambda root, body, **kwargs: bodies.append(body)):
         assert sp.tick(root=f.root, now=NOW) == 0
@@ -426,7 +421,7 @@ def AC2046():
         assert row["lag_s"] == (NOW - written[row["subject"]]).total_seconds(), row
         assert f"{row['subject']}:{row['lag_s']}" in output.getvalue(), output.getvalue()
     print(f"L-spec-2046 AC4 scratch run cost: {elapsed:.3f}s for {len(rows)} specs")
-    assert sp.TICK_BUDGET_S == 900
+    assert sp.TICK_BUDGET_S == 240
 
     budget = Fixture()
     for i in range(3):
@@ -438,7 +433,7 @@ def AC2046():
     def slow(sid, **kwargs):
         calls.append(sid)
         body = actual(sid, **kwargs)
-        clock[0] += sp.TICK_BUDGET_S + 1
+        clock[0] += 241
         return body
     with mock.patch.object(sp.time, "monotonic", side_effect=lambda: clock[0]), \
             mock.patch.object(sp, "run", side_effect=slow), contextlib.redirect_stdout(output):

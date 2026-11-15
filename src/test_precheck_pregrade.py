@@ -18,9 +18,6 @@ import precheck_targeted as pt
 NOW=datetime(2026,10,30,12,tzinfo=timezone.utc)
 
 
-from test_nextstep import clean_preflights, write_clean_preflights
-
-
 class PregradeTests(unittest.TestCase):
     def setUp(self):
         self.stack=ExitStack(); self.addCleanup(self.stack.close)
@@ -37,8 +34,6 @@ class PregradeTests(unittest.TestCase):
     def build(self,sid='L-spec-9001',sha='a1',minute=-10):
         for kind,fields in [('spec-written',{}),('spawn-done',dict(actor='spec-auditor',bad_cut=False)),('build-done',dict(ready_sha=sha,status='DONE',actor='builder'))]:
             self.events.append(dict(type=kind,subject=sid,ts=(NOW+timedelta(minutes=minute)).isoformat(),actor='operator',project='proj',_src=f'L-operator-fixture.jsonl:{len(self.events)+1}')|fields)
-
-        self.events = clean_preflights(self.events)
 
     def emit(self,sid,kind,**fields):
         event=dict(type=kind,subject=sid,actor='executor',project='proj',ts=NOW.isoformat(),_src=f'L-executor-fixture.jsonl:{len(self.events)+1}',**fields)

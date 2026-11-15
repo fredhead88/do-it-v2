@@ -35,34 +35,9 @@ NOW = datetime(2026, 11, 5, 20, tzinfo=timezone.utc)
 SID = 'L-spec-9901'
 
 
-from test_nextstep import clean_preflights, write_clean_preflights
-
-
 def row(kind='conflict-rework', seconds=-1801, subject=SID, **fields):
     return dict(type=kind, subject=subject,
                 ts=(NOW + timedelta(seconds=seconds)).isoformat(), **fields)
-
-
-def admitted_fixture(events):
-    events = list(events)
-    written = {e.get('subject') for e in events if e.get('type') == 'spec-written'}
-    for sid in {e.get('subject') for e in events}:
-        if not isinstance(sid, str) or not sid.startswith('L-spec-') or sid in written:
-            continue
-        times = []
-        for event in events:
-            if event.get('subject') != sid:
-                continue
-            try:
-                stamp = datetime.fromisoformat(event['ts'])
-                if stamp.tzinfo is not None:
-                    times.append(stamp)
-            except (KeyError, TypeError, ValueError):
-                pass
-        stamp = min(times, default=NOW) - timedelta(hours=1)
-        events.append(dict(type='spec-written', subject=sid, project='fixture',
-                           actor='operator', ts=stamp.isoformat()))
-    return clean_preflights(events)
 
 
 class Scratch(unittest.TestCase):
@@ -95,7 +70,7 @@ class Scratch(unittest.TestCase):
                               body_excerpt=payload)), flush=True)
 
     def waits(self, events, seats=1, now=NOW):
-        return tick.rework_waits(admitted_fixture(events), now, seats)
+        return tick.rework_waits(events, now, seats)
 
     def read(self, cached=False):
         return fold.read_events(use_cache=cached)
@@ -112,17 +87,8 @@ print(json.dumps(dict(events=events, digests=digests)))'''
         return json.loads(proc.stdout)
 
     def observe(self, events, seats=1, now=NOW, steps=(), outcomes=()):
-        events = admitted_fixture(events)
-        stored = {e.get('subject') for e in self.read() if e.get('type') == 'spec-written'}
-        with (self.root / 'events/L-spec-writer-fixture.jsonl').open('a') as stream:
-            for event in events:
-                if event.get('type') == 'spec-written' and event['subject'] not in stored:
-                    stream.write(json.dumps({k: v for k, v in event.items()
-                                             if k not in {'actor', '_src'}}) + '\n')
-                    stored.add(event['subject'])
-        write_clean_preflights(self.root)
         with patch.object(fold, 'NOW', now), patch.object(dispatch, 'now', return_value=now.isoformat()):
-            return tick._record_rework_waits(admitted_fixture(events), steps, now, seats, outcomes)
+            return tick._record_rework_waits(events, steps, now, seats, outcomes)
 
     def alarms(self):
         return [e for e in self.fresh_files()['events']
@@ -132,14 +98,6 @@ print(json.dumps(dict(events=events, digests=digests)))'''
         # Input lifecycle fixtures only; alarm rows always use production emit_once.
         path = self.root / 'events/L-operator-local.jsonl'
         path.write_text(''.join(json.dumps(dict(v=1, **e)) + '\n' for e in events))
-        existing = {e.get('subject') for e in events if e.get('type') == 'spec-written'}
-        written = [row('spec-written', seconds=-86400, subject=sid, project='fixture')
-                   for sid in {e.get('subject') for e in events}
-                   if isinstance(sid, str) and sid.startswith('L-spec-') and sid not in existing]
-        (self.root / 'events/L-spec-writer-fixture.jsonl').write_text(
-            ''.join(json.dumps(dict(v=1, **e)) + '\n' for e in written))
-        write_clean_preflights(self.root)
-
 
 
 class AC1Tests(Scratch):
@@ -205,7 +163,7 @@ class AC2Tests(Scratch):
             self.assertEqual(self.waits([trigger, tied]), [])
             reopened = [reset]
             if kind in ('shipped', 'spec-killed', 'spec-closed'):
-                reopened += clean_preflights([row('spec-written', seconds=-2500)])
+                reopened += [row('spec-written', seconds=-2500)]
             if kind in ('escalation-blocking',) or fields.get('verdict') == 'escalate':
                 reopened += [row('unblocked', seconds=-2500)]
             new = row(seconds=-2000)
@@ -417,7 +375,7 @@ class AC5Tests(Scratch):
         for index, (name, changes, hold, spawned, expected) in enumerate(scenarios):
             sid = 'L-spec-' + str(9920 + index)
             event = row(subject=sid)
-            fixture = clean_preflights([row('spec-written', seconds=-4000, subject=sid), event])
+            fixture = [row('spec-written', seconds=-4000, subject=sid), event]
             if name == 'dependency-held':
                 fixture += [row('dependency-hold', seconds=-1700, subject=sid,
                                 waits_for='L-spec-9999', why='fixture dependency')]
@@ -534,7 +492,7 @@ def historical_fixture():
         if n % 5 == 4:
             events += [event('unblocked', 15), event('verdict', 20, confirmed=False), event('shipped', 25)]
         if n % 5 == 2:
-            events += clean_preflights([event('spec-written', 15), event('verdict', 20, confirmed=False), event('spec-closed', 25)])
+            events += [event('spec-written', 15), event('verdict', 20, confirmed=False), event('spec-closed', 25)]
     return sorted(events, key=lambda e: e['ts'])
 
 

@@ -27,20 +27,17 @@ import stuck_digest as digest
 NOW = datetime(2026, 10, 18, 6, 15, tzinfo=timezone.utc)
 
 
-from test_nextstep import clean_preflights, write_clean_preflights
-
-
 def fixture():
     def ev(kind, spec, minutes, actor='planner', **kv):
         return dict(type=kind, subject=spec, actor=actor,
                     ts=(NOW - timedelta(minutes=minutes)).isoformat(),
                     _src=f'L-{actor}-fixture.jsonl:{spec}:{kind}', **kv)
-    return clean_preflights([ev('spec-written', 'L-spec-9001', 90, project='fixture'),
+    return [ev('spec-written', 'L-spec-9001', 90, project='fixture'),
             ev('build-done', 'L-spec-9001', 89, actor='builder', status='DONE'),
             ev('escalation-blocking', 'L-spec-9001', 80, actor='operator',
                asks='blocker\nkeeps moving', deadline=(NOW + timedelta(days=1)).isoformat()),
             ev('spec-written', 'L-spec-9002', 90, project='fixture'),
-            ev('spec-written', 'L-spec-9003', 1, project='fixture')])
+            ev('spec-written', 'L-spec-9003', 1, project='fixture')]
 
 
 class DigestTests(unittest.TestCase):
@@ -65,16 +62,12 @@ class DigestTests(unittest.TestCase):
     def install(self, events):
         grouped = {}
         for event in events:
-            if event['type'] == 'spec-preflight':
-                continue
             row = dict(event)
             actor = row.pop('actor')
             grouped.setdefault(actor, []).append(row)
         for actor, rows in grouped.items():
             (self.events / f'L-{actor}-fixture.jsonl').write_text(
                 ''.join(json.dumps(e) + '\n' for e in rows))
-
-        write_clean_preflights(self.root)
 
     def sender(self, argv):
         self.sent.append(argv)

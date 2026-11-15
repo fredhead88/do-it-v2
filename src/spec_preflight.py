@@ -6,11 +6,9 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
-import resource
 import shlex
 import signal
 import subprocess
@@ -21,16 +19,14 @@ from typing import Callable
 
 import fold
 import ledger_cache
-import effective_writes
 import merge_gate
 import packet
 import scratch
 import verification
 
 TEST_CAP_S = 600
-CHAIN_LIMIT_S = 120
 TICK_MAX = 4  # Legacy threshold, no longer a selection cap.
-TICK_BUDGET_S = 900  # holds a 180s first chain and still leaves room; cron cap is 3300s
+TICK_BUDGET_S = 240
 DOIT = Path(__file__).resolve().parent.parent / "doit"
 HEX = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 TEST_TOKEN = re.compile(r"(?<![\w/])(?:[\w./-]+/)?test_[\w.-]+\.py(?:::[\w.\[\]/:-]+)?")
@@ -93,20 +89,13 @@ def _events(root, *, full=False):
 
 
 def pending(events):
-    """Subjects whose newest spec-written lacks current new-schema evidence.
-
-    Old-schema evidence (no `refused`) and evidence captured for an older
-    revision do not count, so each newest revision is rechecked once."""
-    unmatched, newest = {}, {}
+    unmatched = {}
     for index, event in enumerate(events):
         sid = event.get("subject")
         if event.get("type") == "spec-written":
             unmatched[sid] = index
-            newest[sid] = event.get("_src") or event.get("src")
-        elif event.get("type") == "spec-preflight" and "refused" in event:
-            captured = event.get("spec_written_src")
-            if captured is None or captured == newest.get(sid):
-                unmatched.pop(sid, None)
+        elif event.get("type") == "spec-preflight":
+            unmatched.pop(sid, None)
     return sorted(unmatched, key=unmatched.get)
 
 
@@ -141,119 +130,6 @@ def _finding(body, n, identifier, line):
     row = dict(check=n, id=identifier, line=line)
     if row not in body["findings"]:
         body["findings"].append(row)
-
-
-def _refusal(body, check, identifier, reason, seconds):
-    body["refused"].append(dict(check=check, id=identifier, reason=reason,
-                                seconds=float(max(0.0, seconds))))
-
-
-def _full_suite(code):
-    """Inspect executable command words, excluding comments and quoted prose."""
-    # Keep quote boundaries until after separator/comment classification.
-    # shlex's built-in comment handling consumes newlines, joining commands.
-    lexer = shlex.shlex(code.replace("\\\n", ""), posix=False, punctuation_chars=";&|()\n")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    commands, command = [], []
-    comment = False
-    for token in lexer:
-        if token.startswith("#"):
-            comment = True
-        if token and all(c in ";&|()\n" for c in token):
-            if comment and "\n" not in token:
-                continue
-            comment = False
-            if command:
-                commands.append(command)
-                command = []
-        elif not comment:
-            command.append(shlex.split(token)[0] if token else token)
-    if command:
-        commands.append(command)
-    refused = []
-    for words in commands:
-        # Environment assignments and the standard exec/command wrappers do
-        # not change the invocation being screened.
-        while words:
-            if re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", words[0]) or words[0] in {"then", "do", "!"}:
-                words = words[1:]
-            elif Path(words[0]).name in {"env", "exec", "command"}:
-                words = words[1:]
-                while words and words[0].startswith("-"):
-                    option, words = words[0], words[1:]
-                    if option in {"-u", "--unset", "-C", "--chdir", "-a"}:
-                        words = words[1:]
-            else:
-                break
-        if not words:
-            continue
-        executable, args = Path(words[0]).name, words[1:]
-        if executable == "doit" and args[:1] == ["test"]:
-            refused.append(" ".join(words))
-            continue
-        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable):
-            # Python's -c/script operands are not module invocations.
-            if "-m" not in args or any(a in args[:args.index("-m")] for a in ("-c", "--")):
-                continue
-            index = args.index("-m")
-            if args[index + 1:index + 2] != ["pytest"]:
-                continue
-            args = args[index + 2:]
-        elif executable != "pytest":
-            continue
-        targets = []
-        takes_value = {"-k", "-m", "-c", "-o", "--override-ini", "--rootdir", "--confcutdir",
-                       "--ignore", "--ignore-glob", "--deselect", "--basetemp", "--import-mode",
-                       "--maxfail", "--tb", "--capture", "--color", "--junitxml", "--junit-xml",
-                       "--log-file", "--log-level", "-p", "-n", "--dist", "--durations"}
-        skip = False
-        for arg in args:
-            if skip:
-                skip = False
-            elif arg in takes_value:
-                skip = True
-            elif not arg.startswith("-"):
-                targets.append(arg)
-        if not targets or any(not t.split("::", 1)[0].endswith(".py") for t in targets):
-            refused.append(" ".join(words))
-    return refused
-
-
-def _check_frontmatter(body, text):
-    start = time.monotonic()
-    try:
-        if merge_gate.FRONTMATTER.match(text):
-            # The merge parser's regex fallback is not a trustworthy YAML parse.
-            import yaml  # noqa: F401
-        merge_gate._frontmatter_grant(text)
-    except merge_gate.Undetermined as exc:
-        _refusal(body, "frontmatter", "frontmatter", str(exc), time.monotonic() - start)
-    except Exception as exc:
-        _reason(body, "frontmatter", "parser unavailable: " + type(exc).__name__)
-
-
-def _check_chain(body, code, checkout, env):
-    if code is None or not code.strip():
-        _reason(body, "chain", "no nonempty fenced Verification block")
-        return
-    if checkout is None:
-        _reason(body, "chain", "repository checkout unavailable")
-        return
-    start = time.monotonic()
-    timed_out = False
-    try:
-        # The chain supplies only the timing verdict. Individual test results
-        # remain authoritative for red-on-master evidence.
-        _process(["/bin/bash", "-c", code], cwd=checkout, env=env, timeout=CHAIN_LIMIT_S)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-    except OSError:
-        _reason(body, "chain", "Verification runner unavailable")
-    seconds = time.monotonic() - start
-    if timed_out or seconds > CHAIN_LIMIT_S:
-        _refusal(body, "verification-overtime", "Verification", f"chain exceeded {CHAIN_LIMIT_S}s limit", seconds)
 
 
 def _imports(code):
@@ -474,8 +350,6 @@ def _check_tests(body, text, project, checkout, env, writes):
                 result = _process(argv, cwd=checkout, env=env, timeout=remaining)
                 if result.returncode:
                     body["red_on_master"].append(identifier)
-                    _refusal(body, "verification-red", identifier,
-                             f"test exited with status {result.returncode}", time.monotonic() - start)
             except subprocess.TimeoutExpired:
                 _reason(body, 4, "timeout running " + identifier)
             except OSError:
@@ -485,17 +359,9 @@ def _check_tests(body, text, project, checkout, env, writes):
 
 
 def _validate(body):
-    assert set(body) - {"lag_s"} == {"spec", "findings", "red_on_master", "undetermined", "refused", "cpu_s"}
+    assert set(body) - {"lag_s"} == {"spec", "findings", "red_on_master", "undetermined"}
     if "lag_s" in body:
-        assert type(body["lag_s"]) in (int, float) and math.isfinite(body["lag_s"]) and body["lag_s"] >= 0
-    assert type(body["cpu_s"]) is float and math.isfinite(body["cpu_s"]) and body["cpu_s"] >= 0
-    assert isinstance(body["refused"], list)
-    for row in body["refused"]:
-        assert isinstance(row, dict) and set(row) == {"check", "id", "reason", "seconds"}
-        assert all(isinstance(row[k], str) and row[k].strip() for k in ("check", "id", "reason"))
-        assert row["check"] in {"verification-red", "verification-overtime", "full-suite", "frontmatter", "non-spec-hold",
-                           "coupled-files"}
-        assert type(row["seconds"]) is float and math.isfinite(row["seconds"]) and row["seconds"] >= 0
+        assert type(body["lag_s"]) in (int, float) and body["lag_s"] >= 0
     assert isinstance(body["spec"], str)
     for row in body["findings"]:
         assert set(row) == {"check", "id", "line"} and type(row["check"]) is int and 1 <= row["check"] <= 4
@@ -516,29 +382,12 @@ def _text_identity(root, event):
             hashlib.sha256(source.read_bytes()).hexdigest())
 
 
-def _child_cpu():
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return usage.ru_utime + usage.ru_stime
-
-
 def run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_identity=None):
-    start = _child_cpu()
-    body = _run(spec_id, root=root, now=now, events=events, hooks=hooks,
-                expected_identity=expected_identity)
-    body["cpu_s"] = float(max(0.0, _child_cpu() - start))
-    _validate({k: v for k, v in body.items() if not k.startswith("_")})
-    return body
-
-
-def _run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_identity=None):
     root = Path(root) if root is not None else fold.ROOT
-    body = dict(spec=spec_id, findings=[], red_on_master=[], undetermined=[], refused=[], cpu_s=0.0)
+    body = dict(spec=spec_id, findings=[], red_on_master=[], undetermined=[])
     try:
         if events is None:
-            authorized = _events(root, full=True)
-            events = _project(authorized)
-        else:
-            authorized = events
+            events = _events(root)
         written = next((e for e in reversed(events) if e.get("type") == "spec-written"
                         and e.get("subject") == spec_id), None)
         if written is None:
@@ -551,24 +400,11 @@ def _run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_iden
         project = written.get("project") or ""
         if not re.fullmatch(r"[A-Za-z0-9_-]+", project):
             raise ValueError("missing or unsafe project")
-        _check_frontmatter(body, text)
         try:
-            writes = effective_writes.effective_grant(spec_id, text, authorized)
+            writes = merge_gate.grant_from_text(text)
         except merge_gate.Undetermined as exc:
             writes = []
             _reason(body, 3, str(exc))
-        except Exception as exc:
-            writes = []
-            _reason(body, 3, "grant unavailable: " + type(exc).__name__)
-        code = verification.block(text)
-        try:
-            banned = _full_suite(code or "")
-        except ValueError as exc:
-            banned = []
-            code = None
-            _reason(body, "chain", "cannot parse Verification: " + str(exc))
-        for invocation in banned:
-            _refusal(body, "full-suite", invocation, "full-suite Verification invocation is forbidden", 0.0)
         with tempfile.TemporaryDirectory(prefix="spec-", dir=scratch.sub("spec-preflight")) as temp:
             allocation = Path(temp)
             env = _environment(allocation)
@@ -595,17 +431,13 @@ def _run(spec_id, *, root=None, now=None, events=None, hooks=None, expected_iden
                     lambda: _check_interpreter(body, text, project, checkout),
                     lambda: _check_shas(body, text, checkout, env),
                     lambda: _check_reach(body, writes, checkout),
-                    lambda: None if banned else _check_tests(body, text, project, checkout, env, writes)), 1):
+                    lambda: _check_tests(body, text, project, checkout, env, writes)), 1):
                 try:
                     check()
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     _reason(body, number, str(exc))
-            if not banned and any(r.startswith("check 4:") for r in body["undetermined"]):
-                _reason(body, "chain", "not executed: per-test screening incomplete")
-            elif not banned:
-                _check_chain(body, code, checkout, env)
-            # Validate before hooks while the checkout is alive; run validates
-            # again after hooks and the final child CPU sample.
+            # Validate the original schema before extensions, while the checkout
+            # is alive. Hook-added fields belong to the consuming units.
             _validate(body)
             token = _DISCOVERY.set((text, writes))
             try:
@@ -638,7 +470,7 @@ def _eligible(sid, events, now):
     index, newest = written[-1]
     try:
         stamp = datetime.fromisoformat(newest["ts"].replace("Z", "+00:00"))
-        if stamp.tzinfo is None or now < stamp:
+        if not timedelta(0) <= now - stamp < timedelta(days=3):
             return False
     except (KeyError, ValueError, TypeError):
         return False
@@ -656,9 +488,6 @@ def _append(root, body, *, spec_written=None):
         raise ValueError("preflight append has no project")
     argv = [str(DOIT), "append", "spec-preflight", body["spec"], "project=" + project]
     argv.extend(key + ":=" + json.dumps(value) for key, value in body.items())
-    if written.get("_src"):
-        # Ties the evidence to the revision it screened, so a later rewrite restarts admission.
-        argv.append("spec_written_src:=" + json.dumps(written["_src"]))
     result = _process(argv, env={**os.environ, "DOIT_ROOT": str(root),
                                "DOIT_LEDGER_FILE": "L-spec-preflight-local.jsonl"}, timeout=30)
     if result.returncode:
@@ -720,7 +549,7 @@ def tick(*, root=None, now=None):
             if identities[sid] is None:
                 print(f"preflight recheck next pass: {sid} spec text changed during the pass", file=sys.stderr)
                 continue
-            body = run(sid, root=root, now=now, events=authorized,
+            body = run(sid, root=root, now=now, events=events,
                        hooks=after_run, expected_identity=identities[sid])
             deferred = body.pop(_DEFERRED, False)
             tests = body.pop(_GRANT, None)
@@ -751,7 +580,7 @@ def tick(*, root=None, now=None):
     print(f"spec-preflight: processed={processed} "
           f"deferred={len(eligible)-processed} (tick budget {TICK_BUDGET_S}s); "
           f"skipped={len(waiting)-len(eligible)} "
-          "(requires a valid, non-future timestamp, no later build-started, and no closed state); "
+          "(requires a valid timestamp under 3 days old, no later build-started, and no closed state); "
           f"lag_s={', '.join(lags) or 'none'}; "
           f"deferred specs={', '.join(eligible[processed:]) or 'none'}")
     return 0

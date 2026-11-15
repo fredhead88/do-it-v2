@@ -382,10 +382,6 @@ class RoutingTests(unittest.TestCase):
             error = dispatch.emit(self.root / "events" / name, dict(subject=subject, project="demo"), kind, **fields)
         self.assertIsNone(error)
 
-        if kind == "spec-written":
-            from test_nextstep import write_clean_preflights
-            write_clean_preflights(self.root)
-
     def block(self, seconds, spawn, *, reason=SECRET, receipt_first=False, sha="a" * 40, subject=SID, start=True):
         if start:
             self.emit("build-started", "builder", seconds - 600, subject=subject, spawn=spawn, role="builder")
@@ -560,8 +556,6 @@ class RoundTripTests(Repos):
             for kind, actor, kv in (("spec-written", "spec-writer", dict(path=str(self.root / "content" / (SID + ".md")))),
                                     ("spawn-done", "spec-auditor", dict(bad_cut=False))):
                 dispatch.emit(self.root / "events" / f"L-{actor}-local.jsonl", dict(subject=SID, project="do-it-v2"), kind, **kv)
-        from test_nextstep import write_clean_preflights
-        write_clean_preflights(self.root)
         rows = self.reader()
         specs = fold.fold(rows)[0]
         now = datetime.now(timezone.utc) + timedelta(minutes=1)

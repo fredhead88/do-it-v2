@@ -807,8 +807,6 @@ class ParallelBuilderLaunch(Scratch):
         self.steps = [nextstep.Step(sid, 'spec', 'checking', 'action', 'build', 'tick',
                                    f'fixture:{n}', 'condition met', None, self.rows[n]['ts'])
                       for n, sid in enumerate(self.subjects)]
-        from test_nextstep import clean_preflights
-        self.rows = clean_preflights(self.rows)
 
     def runner(self, argv):
         if argv[0] == 'git':

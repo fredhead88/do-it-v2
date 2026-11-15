@@ -19,7 +19,6 @@ import fold_emits
 import lane_rules
 import nextstep
 import tick
-from test_nextstep import clean_preflights
 
 
 NOW = dt.datetime(2026, 10, 29, 9, tzinfo=dt.timezone.utc)
@@ -36,10 +35,6 @@ def signed(ac, body):
     print(json.dumps(dict(url='cli://autodispatch-held/' + ac, status=0,
                          body_sha256=hashlib.sha256(payload.encode()).hexdigest(),
                          body_excerpt=payload)))
-
-
-def automatic_hold(spec_evs, all_evs):
-    return ad._automatic_hold(clean_preflights(spec_evs), clean_preflights(all_evs))
 
 
 class HeldDispatch1863Tests(unittest.TestCase):
@@ -83,7 +78,6 @@ class HeldDispatch1863Tests(unittest.TestCase):
                 for s in subjects}
 
     def step(self, events, sid=SID):
-        events = clean_preflights(events)
         specs = self.specs(events)
         step = nextstep.step_for(events, specs, sid, NOW, self.rules)
         self.assertEqual(step, next(s for s in nextstep.next_steps(events, specs, NOW, self.rules)
@@ -91,12 +85,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
         return step
 
     def written(self, sid=SID):
-        written = event('spec-written', -120, sid, actor='operator', project='fixture')
-        # This fixture already satisfies the independent current-preflight gate.
-        path = self.root / 'events/L-spec-preflight-fixture.jsonl'
-        with path.open('a') as out:
-            out.write(json.dumps(clean_preflights([written])[1]) + '\n')
-        return written
+        return event('spec-written', -120, sid, actor='operator', project='fixture')
 
     def runner(self, argv):
         self.calls.append(argv)
@@ -160,7 +149,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
                     if build_minute is not None:
                         sample.append(event('build-started', build_minute, actor='builder'))
                     held = expected and (build_minute is None or build_minute < -10)
-                    self.assertEqual(bool(automatic_hold(sample, sample)), held)
+                    self.assertEqual(bool(ad._automatic_hold(sample, sample)), held)
                     if held:
                         step = self.step(sample)
                         self.assertEqual(step.state, 'hold')
@@ -180,26 +169,26 @@ class HeldDispatch1863Tests(unittest.TestCase):
                                 clears = (release_actor in ('thinker', 'operator') and minute > -10
                                           and (kind == 'unblocked' or ref == ruling['_src']))
                                 sample = [written, ruling, release]
-                                self.assertEqual(bool(automatic_hold(sample, sample)), not clears)
+                                self.assertEqual(bool(ad._automatic_hold(sample, sample)), not clears)
                 unrelated = event('decision', -5, subject='L-spec-9999', action='hold')
-                self.assertIsNone(automatic_hold([written], [written, unrelated]))
+                self.assertIsNone(ad._automatic_hold([written], [written, unrelated]))
                 tail = [event('decision', -9), event('spec-written', -8, actor='operator')]
                 sample = [written, ruling, *tail]
                 self.assertEqual(self.step(sample).state, 'hold')
                 completion = event('unblocked', -7, actor='operator')
-                self.assertIsNone(automatic_hold(sample + [completion], sample + [completion]))
+                self.assertIsNone(ad._automatic_hold(sample + [completion], sample + [completion]))
                 self.assertFalse(self.step(sample + [completion]).reason.startswith('held: ruling'))
                 rehold = dict(ruling, ts=event('x', -6)['ts'], _src=ruling['_src'] + '0')
                 self.assertIn(rehold['_src'], self.step(sample + [completion, rehold]).reason)
                 dep = event('dependency-hold', -11, waits_for='L-spec-9002', _src='L-thinker-fixture.jsonl:9')
-                self.assertIn('waits for L-spec-9002', automatic_hold([written, ruling, dep], []))
+                self.assertIn('waits for L-spec-9002', ad._automatic_hold([written, ruling, dep], []))
                 self.assertIn('L-spec-9002', self.step([written, ruling, dep]).reason)
                 # Releasing an older ruling never releases a newer one.
                 old_release = event('decision', -5, ref=ruling['_src'])
                 newer = dict(rehold, ts=event('x', -8)['ts'])
                 for sample in ([written, ruling, newer, old_release],
                                [newer, old_release, ruling, written]):
-                    self.assertIn(newer['_src'], automatic_hold(sample, sample))
+                    self.assertIn(newer['_src'], ad._automatic_hold(sample, sample))
                     self.assertEqual(self.step(sample).state, 'hold')
         signed('AC2', dict(ruling_matrix=results, explicit_release_and_recut_completion=True))
 
@@ -241,7 +230,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
         for sid, events in self.replay_cases():
             specs = self.specs(events)
             self.assertEqual(self.step(events, sid).state, 'hold')
-            self.assertTrue(automatic_hold(events, events))
+            self.assertTrue(ad._automatic_hold(events, events))
             stale = event('spawn-stale', -1, sid, actor='tick', role='builder', spawn='L-builder-fixture')
             for dry_run in (True, False):
                 before = list(self.root.joinpath('events').glob('*'))
@@ -266,7 +255,7 @@ class HeldDispatch1863Tests(unittest.TestCase):
         control = self.written('L-spec-9998')
         (self.root / 'content/L-spec-9998.md').write_text('AC1 [backend]: fixture.\n')
         (self.root / 'worktrees/fixture/l-spec-9998').mkdir(parents=True)
-        events = clean_preflights(held + [control])
+        events = held + [control]
         steps = [nextstep.Step(s, 'spec', 'building', 'action', 'build', 'tick', 'fixture:1',
                               'condition met', None, '2026-10-25T00:00:00Z') for s in (sid, control['subject'])]
         with patch.object(ad, 'capacity', return_value=1), \
@@ -324,7 +313,7 @@ tick.run_steps(events,specs,datetime.datetime.fromisoformat(__import__('sys').ar
             rows = self.fresh_read()
             self.assertEqual(len(rows), expected)
             self.assertTrue(all(e['actor'] == 'tick' and e['subject'] == SID and e['reason'] for e in rows))
-            self.assertEqual(rows[-1]['reason'], automatic_hold(fixture, fixture))
+            self.assertEqual(rows[-1]['reason'], ad._automatic_hold(fixture, fixture))
             counts.append(len(rows))
         # Another subject is independent; diagnostic and dry passes remain pure.
         other = 'L-spec-9999'

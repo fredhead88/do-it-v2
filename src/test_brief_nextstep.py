@@ -18,9 +18,6 @@ NOW = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
 SID, CID, GID = 'L-spec-9901', 'L-charter-9901', 'L-goal-9901'
 
 
-from test_nextstep import clean_preflights
-
-
 class DossierNextStepTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='dossier-next-')
@@ -30,12 +27,12 @@ class DossierNextStepTests(unittest.TestCase):
         for item in (SID, CID, GID):
             (self.root / 'content' / f'{item}.md').write_text(
                 '# Fixture\n\n## 1. Intent\nA fixture.\n')
-        self.events = clean_preflights([self.event('goal-filed', GID, goal=None),
+        self.events = [self.event('goal-filed', GID, goal=None),
                        self.event('charter-filed', CID, goal=GID, covers='none'),
                        self.event('plan-written', CID, actor='planner'),
                        self.event('spec-written', SID, charter=CID, project='fixture'),
                        dict(self.event('spawn-done', SID, spawn='L-spec-auditor-9901'),
-                            actor='spec-auditor', bad_cut=False, _src='L-spec-auditor-9901.jsonl:1')])
+                            actor='spec-auditor', bad_cut=False, _src='L-spec-auditor-9901.jsonl:1')]
         admitted = fold.fold(self.events)[1][CID]['evs']
         self.assertTrue(any(e['type'] == 'plan-written' and e['actor'] == 'planner'
                             and e['_src'].startswith('L-planner-') for e in admitted))

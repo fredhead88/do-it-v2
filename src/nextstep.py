@@ -1702,14 +1702,6 @@ def next_steps(events, specs, now, rules, waves=None, mains=None):
             steps.append(_hold(item, kind, 'idea' if kind == 'charter' else 'merging',
                                dict(e, ts=''), 'undetermined: ' + bad[item], 'valid timestamp'))
             seen.add((kind, item))
-    # Gate every builder launch, including ruling/retry and recovery actions,
-    # after role selection so auditors, graders and other roles are unaffected.
-    for index, step in enumerate(steps):
-        if step.item_kind == 'spec' and step.state == 'action' and step.action in {'build', 'rebuild'}:
-            reason = autodispatch._automatic_hold(by.get(step.item, []), events, shipped=shipped)
-            if reason:
-                steps[index] = replace(step, state='hold', action=None, reason=reason,
-                                       clears='current determined clean spec-preflight and standing holds released')
     return sorted(steps, key=lambda s: (s.item_kind, s.item))
 
 

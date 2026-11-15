@@ -80,10 +80,6 @@ class WaveHoldBase(unittest.TestCase):
                                   dict(subject=subject, project='demo'), kind, **fields)
         self.assertIsNone(error)
 
-        if kind == 'spec-written':
-            from test_nextstep import write_clean_preflights
-            write_clean_preflights(self.root)
-
     def spec(self, subject, wave_file, seconds=-5000):
         self.emit('spec-written', 'spec-writer', seconds=seconds, subject=subject, charter=CHARTER,
                   footprint=[wave_file], path=str(self.root / 'content' / (subject + '.md')))

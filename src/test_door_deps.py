@@ -552,9 +552,7 @@ class _Evaluator:
     def answer(self, kind, raw, item, now):
         import nextstep
         import tick
-        from test_nextstep import clean_preflights
-        # These seeds exercise dependency routing with admission already screened.
-        events = fold.finish_events(clean_preflights([dict(e) for e in raw]))
+        events = fold.finish_events([dict(e) for e in raw])
         env = {'DOIT_LANE_RULES': str(self.rules)} if self.rules else {}
         seen = {}
         real_wave, real_next = nextstep._wave, nextstep.next_steps

@@ -147,8 +147,3 @@ Before rework: isolated rebase, Verification/guards, adoption, bundle, re-gate; 
   gate with unchanged main/branch shas; merge --no-ff, emit shipped. A moved ref needs re-gating;
   failed merge is aborted. cli_gate uses doit gate; caller owns queue selection and tick wiring.
 - `src/coupled_files.py`: spec pre-flight grants or asks for merge-gate-pinned non-test files.
-- Spec preflight gate: automatic builders await a determined clean spec-preflight after the newest
-  spec-written. Old-schema evidence awaits recheck; refusals and undetermined checks hold admission
-  with a diagnostic. Dependency, spec-text and standing ruling holds still apply. Preflight screens
-  red tests, full-suite commands, invalid frontmatter and chains over 120 seconds on detached
-  master; cpu_s reports added child CPU.

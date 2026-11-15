@@ -145,7 +145,7 @@ class HookTests(Repo):
         written = self.of("spec-written")[-1]
         self.assertEqual(grant["spec_written_src"], written["_src"])
         self.assertFalse(self.of("build-started"))
-        self.assertEqual(self.of("spec-preflight")[-1].get("refused"), [])
+        self.assertEqual(self.of("spec-preflight")[-1].get("refused"), None)
         grant_text = spec(["tests/test_x.py"], "pg_scratch")
         self.assertIn(cf.SCRATCH, effective_writes.effective_grant(self.sid, grant_text, self.read()))
 
@@ -200,7 +200,7 @@ class HoldTests(Repo):
         self.assertIsNone(cf.held_reason(self.read(), self.sid))
         self.tick()
         self.assertIsNone(cf.held_reason(self.read(), self.sid))
-        self.assertEqual(self.of("spec-preflight")[-1].get("refused"), [])
+        self.assertEqual(self.of("spec-preflight")[-1].get("refused"), None)
 
     def test_clean_spec_is_never_held(self):
         self.written(spec(["src/x.py"]))

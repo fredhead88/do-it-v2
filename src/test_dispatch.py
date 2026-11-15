@@ -932,10 +932,6 @@ class R7DispatchTests(unittest.TestCase):
         subject = kw.pop('subject', self.sid)
         self.assertIsNone(self.d.emit(self.root / 'events' / ('L-' + actor + '-9774.jsonl'),
                                      dict(subject=subject, project='do-it-v2'), kind, **kw))
-        if kind == 'spec-written':
-            # Imported late: test_nextstep's import-time setup must not leak into the historical chunks.
-            from test_nextstep import write_clean_preflights
-            write_clean_preflights(self.root)
 
     def dispatch(self, pin=None, transport='file', project='do-it-v2', extra=''):
         import argparse, contextlib, io

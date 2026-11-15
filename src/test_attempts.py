@@ -381,9 +381,6 @@ REAL = json.loads(r'''
 ''')
 
 
-from test_nextstep import clean_preflights, write_clean_preflights
-
-
 def event(kind, minute=0, subject=SUBJECT, **extra):
     row = dict(type=kind, subject=subject,
                ts=(NOW + timedelta(minutes=minute)).isoformat())
@@ -640,8 +637,7 @@ class AttemptsTests(unittest.TestCase):
             if stale:
                 evs.append(dict(s, type='spawn-stale', role='builder', ts=event('x', -age)['ts']))
             self.assertFalse((fold.EVENTS / (s['spawn'] + '.jsonl')).exists())
-            admitted = clean_preflights([event('spec-written', -age - 10)] + evs)
-            rows = autodispatch.dead_spawns(admitted, NOW)
+            rows = autodispatch.dead_spawns(evs, NOW)
             if age == 30 and stale:
                 row = next(r for r in rows if r['spawn'] == s['spawn'])
                 self.assertEqual(row['role'], 'builder')
