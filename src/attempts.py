@@ -57,6 +57,8 @@ def _reason(event):
 
 def _refusal(event):
     reason = str(_reason(event))
+    if event.get('type') == 'autodispatch-failed':
+        return reason.startswith('refused-before-start: bundle-pending')
     return (event.get('type') == 'spawn-failed'
             and (reason.startswith(('bundle-pending', 'duplicate-dispatch', 'wave-order'))
                  or reason == 'dispatch-in-progress'
@@ -161,11 +163,11 @@ def history(evs, trigger, role, *, now, dead=frozenset()):
         if e.get('spawn') in older:
             continue
         if (e.get('type') == 'autodispatch-failed' and row[1] not in associated
-                and e.get('spawn') not in groups):
+                and e.get('spawn') not in groups and not _refusal(e)):
             failures.append((row[0], row[1], _reason(e)))
         if e.get('type') in _STARTS:
             starts.append(row)
-        if e.get('type') == 'spawn-failed' and _reason(e).startswith('bundle-pending'):
+        if _refusal(e) and 'bundle-pending' in _reason(e):
             refusals.append(row)
 
     live = False

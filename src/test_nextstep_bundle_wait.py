@@ -182,9 +182,9 @@ class BundleWaitTests(unittest.TestCase):
         print('durable claims suppress repeat launch; amendment and new SHA acquire independently')
 
     def test_ac2_main_only_change_and_base_only(self):
-        self.publish()
-        # Snapshot evidence releases the advisory pending-main hold; the
-        # receiving gate independently revalidates live main identity.
+        self.publish(main='d' * 40)
+        # Snapshot evidence with the current main releases the advisory hold;
+        # the receiving gate independently revalidates live main identity.
         self.assertEqual(self.step(mains={'demo': 'd' * 40}).action, 'grade')
         (self.root / 'events/L-build-runner-local.jsonl').unlink()
         for fields, expect in [(dict(base_only=True), False),
