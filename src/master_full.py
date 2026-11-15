@@ -23,7 +23,7 @@ SHA = re.compile(r"[a-f0-9]{40}")
 COVERED = ["pg-parity", "pytest"]
 MAX_BYTES = 8 * 1024 * 1024
 EXPIRY_AGE = timedelta(hours=24)
-SHARD_NAME = re.compile(r"pytest — shard ([0-9]+) of ([0-9]+)")
+SHARD_NAME = re.compile(r"pytest — shard ([0-9]+) of (?:([0-9]+)|\$\{\{[^\r\n]*\}\})")
 # Failures that say nothing about the run itself: never a reason to expire an intent.
 TRANSIENT = frozenset({
     "GitHub API failed", "missing GitHub API pages", "invalid GitHub API page",
@@ -170,12 +170,17 @@ def _active_shards(jobs):
     parsed = [SHARD_NAME.fullmatch(j["name"]) for j in shards]
     if not shards or any(m is None for m in parsed):
         return shards
-    counts = {int(m[2]) for m in parsed}
+    # Skipped jobs can retain the raw Actions expression instead of a count.
+    # Only expanded names prove the plan; never interpret the expression.
+    counts = {int(m[2]) for m in parsed if m[2] is not None}
     if len(counts) != 1:
         return shards
     plan = counts.pop()
     # A complete plan cannot require more shard numbers than there are jobs.
     if plan < 1 or plan > len(shards) or not set(range(1, plan + 1)) <= {int(m[1]) for m in parsed}:
+        return shards
+    if any(m[2] is None and (int(m[1]) <= plan or j.get("conclusion") != "skipped")
+           for j, m in zip(shards, parsed)):
         return shards
     return [j for j, m in zip(shards, parsed)
             if not (int(m[1]) > plan and j.get("conclusion") == "skipped")]
