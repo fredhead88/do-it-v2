@@ -169,7 +169,7 @@ def _dependency_reason(holds, all_evs):
 
 def held_by_dependency(spec_evs, all_evs, *, shipped=None) -> str | None:
     """Fail closed until every ledger and declared prerequisite is resolved."""
-    all_evs = list(all_evs)
+    all_evs = all_evs if isinstance(all_evs, list) else list(all_evs)
     holds = _open_dependency_holds(spec_evs, all_evs, shipped=shipped)
     return _dependency_reason(holds, all_evs)
 

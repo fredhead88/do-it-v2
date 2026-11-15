@@ -350,15 +350,14 @@ def _launch_events():
         return None
 
 
-def _record_held_skips(events, specs, *, reporter=None):
+def _record_held_skips(events, specs, *, reporter=None, shipped=None):
     """Persist only changes from the latest observed skip for each live spec."""
     import autodispatch
     by_subject = {}
-    shipped = set()
+    shipped = shipped if shipped is not None else {
+        e.get('subject') for e in events if e.get('type') == 'shipped'}
     for e in events:
         by_subject.setdefault(e.get('subject'), []).append(e)
-        if e.get('type') == 'shipped':
-            shipped.add(e.get('subject'))
     reasons = {}
     for sid, spec in sorted(specs.items()):
         try:
@@ -556,9 +555,9 @@ def launch(step, *, dispatcher):
             return None
     if any(release is None for hold,release in nextstep.retry_hold_pairs(evs)):
         return None
-    if step.action in ('build', 'rebuild') and autodispatch._automatic_hold(evs, events):
+    if step.action in ('build', 'rebuild') and autodispatch._automatic_hold(evs, events, shipped=getattr(dispatcher, '__dict__', {}).get('shipped')):
         if not getattr(dispatcher, 'dry_run', False):
-            _record_held_skips(events, {step.item: {'state': 'written'}})
+            _record_held_skips(events, {step.item: {'state': 'written'}}, shipped=getattr(dispatcher, '__dict__', {}).get('shipped'))
         return None
     if step.action != 'audit':
         failure = autodispatch._standing_autodispatch_failed(evs)
@@ -813,16 +812,19 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     import autodispatch
     import lane_driver
     events = events if isinstance(events, list) else list(events)
-    by_subject = {}
+    by_subject, shipped = {}, set()
     for e in events:
         by_subject.setdefault(e.get('subject'), []).append(e)
+        if e.get('type') == 'shipped':
+            shipped.add(e.get('subject'))
     import dispatch_isolation
     reporter = None if dry_run else dispatch_isolation.Pass(events, now)
     if not dry_run:
-        _record_held_skips(events, specs, reporter=reporter)
+        _record_held_skips(events, specs, reporter=reporter, shipped=shipped)
     if steps is None:
         steps = _steps(events, specs, now)
     runner = _PassDispatcher(dispatcher or autodispatch._real_runner, events, specs, now, dry_run)
+    runner.shipped = shipped
     in_flight = {role: lane_driver._in_flight_role(events, now, role)
                  for role in ('builder', 'reviewer', 'grader')}
     slots = dict(builder=max(0, autodispatch.capacity() - in_flight['builder']),
@@ -842,7 +844,6 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
     merged = _PASS_MERGED
     merged.clear()
     pending_builders, reserved_items = [], set()
-
     def act(step, role, get_spawn, lines, *, reserved=False):
         nonlocal audit_launches, gate_disabled
         accepted = False
@@ -877,7 +878,6 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
         finally:
             if reserved and not accepted:
                 slots['builder'] += 1
-
     def flush_builders():
         if not pending_builders:
             return
@@ -942,7 +942,7 @@ def run_steps(events, specs, now, *, dispatcher=None, dry_run=False, handled=fro
                     if exhaustion:
                         out.append(exhaustion)
                 evs = by_subject.get(step.item, [])
-                hold = autodispatch._automatic_hold(evs, events)
+                hold = autodispatch._automatic_hold(evs, events, shipped=shipped)
                 if hold and step.action in ('build', 'rebuild'):
                     out.append(f'hold {step.item}: {hold}')
                     continue
@@ -1218,12 +1218,13 @@ def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
     state = _PASS.get()
     if state is not None and state.get('observer_excluded'):
         candidates = [row for row in candidates if row['subject'] not in state['observer_excluded']]
-    by_subject = {}
+    by_subject, shipped = {}, set()
     for event in events:
         by_subject.setdefault(event.get('subject'), []).append(event)
+        if event.get('type') == 'shipped':
+            shipped.add(event.get('subject'))
     by_step = {step.item: step for step in steps}
     summary = dict(eligible=len(candidates), held=0, held_reasons={}, observed=0)
-
     def emitted(candidate):
         condition = 'rework-wait:' + candidate['trigger']
         # The shared snapshot supplies archived ledger evidence. Read the current
@@ -1248,13 +1249,12 @@ def _record_rework_waits(events, steps, now, free_slots, outcomes=()):
                    for item in event.get('items', [])):
                 return True
         return False
-
     for candidate in candidates:
         subject = candidate['subject']
         step = by_step.get(subject)
         base_hold = step is not None and step.reason.startswith('base-refresh:')
         reason = None
-        if autodispatch._automatic_hold(by_subject.get(subject, []), events):
+        if autodispatch._automatic_hold(by_subject.get(subject, []), events, shipped=shipped):
             reason = 'automatic-hold'
         elif step is not None and (step.state == 'hold' or step.reason.startswith('undetermined:')) and not base_hold:
             reason = 'step-hold'
