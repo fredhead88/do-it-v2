@@ -1682,6 +1682,9 @@ def check_inventory(analysis, roots, inputs, surfaces, committed, exclusions=Non
 # any other answer root; the guard re-derives reachability, so a function that
 # an answer root starts to call loses this exemption.
 SURFACE_GROUPS = (
+    (r'charter_carry',
+     'carry admission and charter reports: append guard, closure bookkeeping and read-only views; '
+     'answer-root helpers remain in the checked graph'),
     (r'fable_dossier',
      'offline test-review dossier builder/checker: reads tracked tests and evidence files for '
      'an operator proposal, never called by tick or an answer root'),

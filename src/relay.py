@@ -145,6 +145,14 @@ def _landed(cid, specs, charters):
     landed — which would make `after:` gate on nothing and the throttle count
     nothing. The vacuous-truth trap is the whole reason this is a function."""
     c = charters.get(cid)
+    if c and c.get("state") == "carried":
+        # L-spec-2138: a carried charter has landed only when the work it was
+        # carried into has. Its own specs and its closed state cannot answer.
+        import charter_carry
+        final = charter_carry.final_target(c.get("carried_to"), charters)
+        if final == cid or charters.get(final, {}).get("state") == "carried":
+            return False                      # a loop never lands
+        return _landed(final, specs, charters)
     if c and c.get("state") in ("L2-complete", "retracted"):
         return True
     mine = [s for s in specs.values() if s["charter"] == cid and s["state"] != "void"]
@@ -260,7 +268,8 @@ def open_charters(events, by_subject=None, *, root=None):
         filed = next((e for e in reversed(evs) if e['type'] == 'charter-filed'), {})
         project = filed.get('project')
         pending = replans.get(sid, {}).get('pending', False)
-        if (isinstance(project, str) and project in projects and 'charter-retracted' not in types
+        if (isinstance(project, str) and project in projects
+                and not (types & {'charter-retracted', 'charter-carried'})
                 and not close_reviews.standing_close(evs)
                 and (pending or not (types & {'cut-written', 'l1-complete'}))):
             out.append(sid)
@@ -414,7 +423,7 @@ def waiting_lines(events, root=None):
     mapping = fold.fold(events)[3]
     replans = close_reviews.replan_state([e for rows in mapping.values() for e in rows], root=root)
     excluded = sum(bool(any(e['type'] == 'charter-filed' for e in rows))
-                   and not any(e['type'] == 'charter-retracted' for e in rows)
+                   and not any(e['type'] in ('charter-retracted', 'charter-carried') for e in rows)
                    and not close_reviews.standing_close(rows)
                    and (replans.get(cid, {}).get('pending') or not any(
                        e['type'] in ('cut-written', 'l1-complete') for e in rows))

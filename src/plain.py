@@ -162,6 +162,9 @@ PHRASE = {
         "proving": "built, waiting for proof",
         "reopened": "reopened: a check failed",
         "L2-complete": "proven and closed",
+        # L-spec-2138: closed because its remaining work moved. Never "proven":
+        # the brief supplies the target-specific wording.
+        "carried": "closed, carried into another charter",
         "retracted": "withdrawn",
     },
     "goal": {s: s for s in GOAL_STATES},

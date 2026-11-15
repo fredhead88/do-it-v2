@@ -253,6 +253,10 @@ EMITS["criterion-cleared"].add("builder")
 EMITS["charter-proving"] = {"tick"}        # R1: the tick's own automatic move into Proving
 EMITS["charter-closed"] = {"tick"}         # R1/R3: the tick's own close, never a hand edit
 EMITS["charter-reopened"] = {"tick"}       # R4: the tick's own reopen, naming the failing check
+# L-spec-2138/carried-close: a request is a Thinker or operator act; the close it
+# asks for stays the tick's (charter-closed above), and so does the failure record.
+EMITS["charter-carried"] = {"thinker", "operator"}
+EMITS["carried-check-failed"] = {"tick"}
 # R3: an explicit ledger decision, never a builder or a grading seat (charter
 # constraint, verbatim: "Waivers are explicit ledger decisions with a reason").
 EMITS["owed-waived"] = {"operator", "thinker"}

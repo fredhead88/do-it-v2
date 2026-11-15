@@ -9,7 +9,7 @@ AGENTS = HERE.parent / "agents"
 sys.path.insert(0, str(HERE))
 import models  # noqa: E402
 import grader_packet
-import coupled_tests, sweep_need
+import coupled_tests, sweep_need, charter_carry
 import panes, spawns, scratch, cpu_share  # noqa: E402 — panes: proc_start/alive; spawns: dup-dispatch/cancel/clear
 from spawns import (LedgerView, dispatch_view, current_events, _active_view,
                     coverage_changes, with_dispatch_view as _with_dispatch_view)
@@ -117,7 +117,8 @@ def emit(dst, base, type_, /, *, strict=False, **kv):
         return reason
     actor = fold.actor_of(dst.name) if len(dst.stem.split("-")) >= 3 else None
     ignored = fold.admits(e, actor) if actor else None
-    if ignored and strict:
+    ignored = ignored or (charter_carry.guard(e.get("subject"), e)[1] if type_ == "charter-carried" else None)
+    if ignored and (strict or type_ == "charter-carried"):
         return ignored
     if ignored:
         print(f"fold: recorded-and-ignored {type_} by {actor}", file=sys.stderr)

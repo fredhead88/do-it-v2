@@ -227,6 +227,7 @@ EXPECTED_PHRASE = {
         "proving": "built, waiting for proof",
         "reopened": "reopened: a check failed",
         "L2-complete": "proven and closed",
+        "carried": "closed, carried into another charter",
         "retracted": "withdrawn",
     },
     "goal": {s: s for s in plain.GOAL_STATES},
