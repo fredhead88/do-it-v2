@@ -65,13 +65,19 @@ def _stop_pg(path, env):
     return provision._stop_pg(_pg_path(path), env, PG_CTL)
 
 
-def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
-    """Execute in a shared profile, retaining bounded signal-safe cleanup."""
+def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP, env=None, profile=None, confine=None):
+    """Execute in a shared profile, retaining bounded signal-safe cleanup.
+
+    `env` replaces the inherited-environment default with an exact child
+    environment (BASE is still set); `profile` overrides the marker-based
+    choice; `confine(has_pg)` returns an argv prefix that sandboxes the shell.
+    """
     import checks
     import provision
     summary = json.loads(pathlib.Path(record).read_text())
     subject = summary.get("subject") or pathlib.Path(tree).parent.name
-    profile = "repo-scratch-pg" if PG_MARKERS.search(commands) else "repo-venv"
+    profile = profile or ("repo-scratch-pg" if PG_MARKERS.search(commands) else "repo-venv")
+    child = grading_env._clean_env({"BASE": base}) if env is None else {**env, "BASE": base}
     check = checks.CheckRecord("sweep:check", subject, "check", [], base,
                                "scratch", False, profile, "pre-merge", "model")
     previous = {sig: signal.signal(sig, build_runner._interrupted)
@@ -79,13 +85,15 @@ def run_check(tree, base, commands, record, *, timeout=build_runner.WALL_CAP):
     prepared = None
     try:
         deadline = time.monotonic() + timeout
-        with _resource_ledger(), provision.context(tree=tree, env=grading_env._clean_env({"BASE": base}),
+        with _resource_ledger(), provision.context(tree=tree, env=child,
                 pg_script=PRIVATE_PG, pg_ctl=PG_CTL, pg_deadline=deadline, pg_prefix="owed-pg-", pg_parent="/var/tmp"):
             prepared = provision.prepare(check, lane="owed")
         summary.update(pg=prepared.summary.get("pg", "none"), prod_dsns="unset")
         pathlib.Path(record).write_text(json.dumps(summary, indent=2) + "\n")
-        return build_runner._process(["/bin/bash", "-euo", "pipefail", "-c", commands],
-                                     cwd=tree, env=prepared.env, deadline=deadline)
+        argv = ["/bin/bash", "-euo", "pipefail", "-c", commands]
+        if confine is not None:
+            argv = confine(prepared.summary.get("pg", "none") != "none") + ["--"] + argv
+        return build_runner._process(argv, cwd=tree, env=prepared.env, deadline=deadline)
     except provision.Undetermined as exc:
         raise build_runner.Undetermined(str(exc)) from None
     except (build_runner.Undetermined, OSError, subprocess.SubprocessError) as exc:

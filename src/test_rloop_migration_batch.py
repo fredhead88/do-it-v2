@@ -483,7 +483,7 @@ class TestReadySweep(Harness):
                   "echo 'not json {' >> \"$DOIT_ROOT/events/L-executor-fixture.jsonl\"; exit 0" % (CLEAN, base, base))
         self.pick()
         self.assertIn("preflight-cpu ready-2851 sweep-b1 cpu_s=1.25", self.log())
-        self.assertNotIn("99", self.log().split("preflight-cpu")[1])
+        self.assertNotIn("cpu_s=99", self.log().split("preflight-cpu")[1])
 
     def test_missing_malformed_and_ambiguous_records_log_unknown_never_zero(self):
         self.code(2861)

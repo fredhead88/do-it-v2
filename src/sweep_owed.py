@@ -51,7 +51,7 @@ if __name__ == '__main__':
     sys.modules['sweep_owed'] = sys.modules[__name__]
 import provision, verifier
 import loadgate
-import build_runner, dispatch, fold, grading_env, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes, sweep_provision  # noqa: E402
+import build_runner, chain_runner, dispatch, fold, grading_env, owed, owed_failures, packet, scratch, prod_runner, prod_browser, owed_routes, sweep_provision  # noqa: E402
 
 LEDGER_NAME = "L-sweep-local.jsonl"
 MAX_BATCH = 8
@@ -812,6 +812,9 @@ def run(*, dry_run=False, runner=None, now=None):
     now = now or datetime.now(timezone.utc)
     started = cpu_start()
     snapshot = fold.ReaderSnapshot()
+    def refresh_events():
+        # re-read: share the sweep snapshot for runner and append-time freshness.
+        return fold.read_events(snapshot=snapshot)
     all_ev = fold.read_events(snapshot=snapshot)  # events=None default: initial sweep snapshot
     specs = fold.fold(all_ev)[0]
     budget, yield_reason, _ = admission('owed-sweeper', all_ev, now)
@@ -829,12 +832,12 @@ def run(*, dry_run=False, runner=None, now=None):
     if not dry_run and any(line.startswith(("sweep-owed: escalated ", "sweep-owed: reopened ",
                                             "sweep-owed: recheck ")) for line in lines):
         # re-read: expiry/failure escalation or recheck appended before observations.
-        all_ev = fold.read_events(snapshot=snapshot)
+        all_ev = refresh_events()
     observations = prod_runner.run(now, dry_run=dry_run or budget == 0, events=all_ev)
     lines.extend(observations["lines"])
     if not dry_run:
         # re-read: runner verdicts must govern routing and open-batch decisions.
-        all_ev = fold.read_events(snapshot=snapshot)
+        all_ev = refresh_events()
     specs = fold.fold(all_ev)[0]
     lines.extend(close_unverifiable(all_ev, now, dry_run=dry_run))
     no_runner_counts = {}
@@ -871,6 +874,18 @@ def run(*, dry_run=False, runner=None, now=None):
     due_keys = {(r["spec"], r["criterion"]) for r in due}
     due.extend(r for r in retries if (r["spec"], r["criterion"]) not in due_keys)
     due = without_reservations(due, all_ev, now, lines, 'sweep-owed')
+    # Verification-chain rows are observed by their own command before any script or model route.
+    chain_input = {(r["spec"], r["criterion"]) for r in due}
+    pending, chain_lines = chain_runner.run(due, all_ev, fold.EVENTS / "L-owed-sweeper-script.jsonl",
+                                            limit=budget, dry_run=dry_run, refresh=refresh_events)
+    lines.extend(chain_lines)
+    chain_held = {(r["spec"], r["criterion"]) for r in pending.held}
+    chain_gone = chain_input - ({(r["spec"], r["criterion"]) for r in pending} - chain_held)
+    due = [r for r in pending if (r["spec"], r["criterion"]) not in chain_held]
+    if pending.appended:
+        # re-read: a newly resolved chain row must not be batched from the earlier fold.
+        all_ev = refresh_events()
+    retries = [r for r in retries if (r["spec"], r["criterion"]) not in chain_gone]
     due, script_lines = provision.script_rows(due, all_ev, fold.EVENTS / "L-owed-sweeper-script.jsonl",
                                               lane="sweep", dry_run=dry_run or budget == 0)
     lines.extend(script_lines)
